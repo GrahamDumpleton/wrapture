@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=62.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wrapture"
+dynamic = ["version"]
+description = "Library for attaching bindings to arbitrary Python call sites for monkey patching, testing, tracing and profiling."
+readme = "README.md"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Graham Dumpleton", email = "Graham.Dumpleton@gmail.com"}
+]
+requires-python = ">=3.12"
+keywords = ["wrapper", "monkey patching", "tracing", "testing", "profiling"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+    "wrapt>=2.4.0rc2",
+]
+
+[project.urls]
+Homepage = "https://github.com/GrahamDumpleton/wrapture"
+"Bug Tracker" = "https://github.com/GrahamDumpleton/wrapture/issues/"
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pytest",
+    "ruff",
+    "setuptools",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+zip-safe = false
+packages = ["wrapture"]
+
+[tool.setuptools.package-data]
+wrapture = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = {attr = "wrapture.__version__"}
+
+[dependency-groups]
+test = [
+    "pytest",
+]
+dev = [
+    {include-group = "test"},
+    "mypy",
+    "ruff",
+    "setuptools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/wrapture", "tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+]
