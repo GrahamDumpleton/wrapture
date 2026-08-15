@@ -102,8 +102,8 @@ class _Behaviour:
     def __init__(self, bnd: Binding) -> None:
         self._binding = bnd
 
-    def _terminal(self, fn: WrapperFunction) -> Binding:
-        self._binding._set_terminal(self._operation, fn)
+    def _terminal(self, fn: WrapperFunction, *, injected: bool = False) -> Binding:
+        self._binding._set_terminal(self._operation, fn, injected=injected)
         return self._binding
 
     def _stage(self, fn: StageFunction) -> Binding:
@@ -121,7 +121,7 @@ class _Behaviour:
         ) -> NoReturn:
             raise exc
 
-        return self._terminal(boom)
+        return self._terminal(boom, injected=True)
 
     def passes_through(self) -> Binding:
         """Drop all configured behaviour for this operation: both the
@@ -143,7 +143,7 @@ class CallBehaviour(_Behaviour):
     def returns(self, value: Any) -> Binding:
         """Return `value`; the real callable is never invoked. Terminal."""
 
-        return self._terminal(lambda nxt, i, a, k: value)
+        return self._terminal(lambda nxt, i, a, k: value, injected=True)
 
     def decorates(self, fn: WrapperFunction) -> Binding:
         """Wrap the real callable: fn(wrapped, instance, args, kwargs).
@@ -243,7 +243,7 @@ class GetBehaviour(_Behaviour):
     def returns(self, value: Any) -> Binding:
         """Reading gives `value`; the real read never happens. Terminal."""
 
-        return self._terminal(lambda nxt, i, a, k: value)
+        return self._terminal(lambda nxt, i, a, k: value, injected=True)
 
     def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
         """Wrap the real read: fn(read, instance) -> value, where read()
@@ -312,7 +312,7 @@ class SetBehaviour(_Behaviour):
         ) -> NoReturn:
             raise AttributeError(f"can't set attribute {binding._name!r}")
 
-        return self._terminal(terminal)
+        return self._terminal(terminal, injected=True)
 
     def decorates(self, fn: Callable[[Callable[[Any], Any], Any, Any], Any]) -> Binding:
         """Wrap the real write: fn(write, instance, value), where
@@ -379,7 +379,7 @@ class DeleteBehaviour(_Behaviour):
         ) -> NoReturn:
             raise AttributeError(f"can't delete attribute {binding._name!r}")
 
-        return self._terminal(terminal)
+        return self._terminal(terminal, injected=True)
 
     def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
         """Wrap the real delete: fn(erase, instance), where erase()

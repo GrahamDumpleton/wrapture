@@ -19,6 +19,8 @@ from typing import Any, Literal
 
 from wrapt import MISSING
 
+from .capture import REFERENCE
+
 EventKind = Literal["call", "get", "set", "delete"]
 
 
@@ -84,6 +86,15 @@ class Event:
 
     value: Any = MISSING
     previous: Any = MISSING
+
+    # Recording provenance: the capture level values were recorded at,
+    # whether the outcome was supplied by returns()/raises() rather than
+    # produced by the real operation, and caller-supplied annotations
+    # merged in with annotate().
+
+    capture: int = REFERENCE
+    injected: bool = False
+    data: dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:
         # Display favours the friendly label; the path is there when no

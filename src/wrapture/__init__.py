@@ -32,6 +32,14 @@ from .bindings import (
     binding,
     bindings,
 )
+from .capture import (
+    NONE,
+    REFERENCE,
+    SNAPSHOT,
+    SUMMARY,
+    TYPES,
+    redact,
+)
 from .eventlogs import (
     EventLog,
 )
@@ -57,10 +65,17 @@ from .iterators import (
 from .timeline import (
     Tape,
     Timeline,
+    annotate,
+    current_event,
     timeline,
 )
 
 __all__ = [
+    "NONE",
+    "REFERENCE",
+    "SNAPSHOT",
+    "SUMMARY",
+    "TYPES",
     "AbandonBehaviour",
     "AlreadyAppliedError",
     "Binding",
@@ -82,8 +97,11 @@ __all__ = [
     "Tape",
     "Timeline",
     "WrongModeError",
+    "annotate",
     "binding",
     "bindings",
+    "current_event",
     "iterator",
+    "redact",
     "timeline",
 ]

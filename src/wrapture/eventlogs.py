@@ -118,6 +118,13 @@ class EventLog:
             lambda event: event.value is not MISSING and event.value == value,
         )
 
+    def injected(self, want: bool = True) -> EventLog:
+        """Events whose outcome was supplied by returns(), raises() or
+        rejects(); with want=False, events whose outcome was real."""
+
+        suffix = "[injected]" if want else "[injected=False]"
+        return self._narrow(suffix, lambda event: event.injected is want)
+
     # -- assertions: raise on failure, return self so they chain -------------
 
     def assert_never(self) -> EventLog:

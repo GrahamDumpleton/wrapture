@@ -232,7 +232,7 @@ def test_tree_renders_nesting_results_and_failures() -> None:
     assert lines[0].startswith("Processor.process(")
     assert lines[0].endswith("-> {'id': 'ch_500', 'amount': 500}")
     assert lines[1].startswith("  Gateway.charge(")
-    assert lines[2] == "Gateway.refund(amount=100)  !! TimeoutError"
+    assert lines[2] == "Gateway.refund(amount=100)  !! TimeoutError (injected)"
 
 
 def test_tree_of_an_empty_tape_is_empty() -> None:

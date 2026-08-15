@@ -216,11 +216,77 @@ Three situations produce no event, each deliberate:
   inside the recorder. Behaviour still applies to such calls: code
   stubbed out stays stubbed out.
 
-Two honest caveats while the layer is under construction: recorded
-arguments and results are references, so an object mutated after the call
-shows its mutated state on the tape; and a call that returns a generator
-records the generator object as its result, with iteration not yet
-observed. Both are being addressed in later stages of this layer.
+One honest caveat while the layer is under construction: a call that
+returns a generator records the generator object as its result, with
+iteration not yet observed.
+
+### How much is captured
+
+By default, values are recorded *by reference*, which is exactly what
+`unittest.mock` does: free, and accurate as long as nothing mutates the
+value after the call. Code that does mutate its inputs makes a
+by-reference record lie retroactively, so capture is a policy, set per
+binding:
+
+```python
+record = wrapture.binding(Ledger, "record", capture=wrapture.SUMMARY)
+```
+
+The levels, ordered by cost:
+
+- `NONE` records the event but no values: the call stays visible, its
+  arguments and result do not, and the signature binding that dominates
+  recording cost is skipped entirely.
+- `TYPES` stores type names only (`<list>`), and never calls user code.
+- `REFERENCE` stores references; the default.
+- `SUMMARY` stores a bounded, type-aware repr. It survives locks and
+  sockets and retains nothing, but repr is user code and may have side
+  effects: summarising a lazy ORM object can issue the very query being
+  observed.
+- `SNAPSHOT` deep-copies for full fidelity, falling back to `SUMMARY`
+  for values that refuse (locks, sockets, connections) rather than
+  failing the call under test.
+
+Arguments and results are separate axes, since one is a time cost and
+the other a retention cost: `capture=` sets both, and `capture_args=` /
+`capture_result=` override it individually. A policy can also be a
+callable `fn(name, value)`, and `redact()` builds a common one:
+
+```python
+charge = wrapture.binding(Gateway, "charge",
+                          capture_args=wrapture.redact("card_number"))
+```
+
+Redaction matches by parameter name against the normalized arguments,
+so positional and keyword calls redact identically. Results have no
+parameter name, so pair it with `capture_result=NONE` when the secret
+comes back out.
+
+A result supplied by `returns()`, `raises()` or `rejects()` is recorded,
+not suppressed, because the stubbed value is precisely what flowed
+downstream; the event is marked instead. `tree()` renders the mark as
+`(injected)`, and `events.injected()` / `events.injected(False)` filter
+on it.
+
+### Annotation
+
+Where the capture policy is a blanket setting, annotation is targeted:
+from inside a `decorates()` handler, or anywhere in observed code,
+attach what a generic policy cannot infer:
+
+```python
+def around(wrapped, instance, args, kwargs):
+    wrapture.annotate(item_count=len(args[0]),
+                      items=tuple(args[0]))   # caller's own immutable copy
+    return wrapped(*args, **kwargs)
+```
+
+`annotate(**data)` merges into the in-flight event's `data` dict, which
+filters like anything else:
+`events.matching(lambda e: e.data.get("item_count", 0) > 100)`. Outside
+recording it is a silent no-op, so observed code can call it
+unconditionally. `current_event()` returns the in-flight event itself,
+or `None` when nothing is recording.
 
 ## Filtering and asserting on events
 

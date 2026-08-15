@@ -27,6 +27,13 @@ from .behaviours import (
     _Behaviour,
     _compose,
 )
+from .capture import (
+    NONE,
+    REFERENCE,
+    CapturePolicy,
+    _capture_value,
+    _level_of,
+)
 from .eventlogs import EventLog
 from .events import Event, normalized_arguments
 from .exceptions import (
@@ -36,7 +43,7 @@ from .exceptions import (
     NeverAppliedError,
     WrongModeError,
 )
-from .timeline import _in_recorder, _pop, _push, _stack, _tape
+from .timeline import Tape, _in_recorder, _pop, _push, _stack, _tape
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
 
@@ -135,7 +142,10 @@ def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
 
 
 async def _record_awaited(
-    awaitable: Any, event: Event, stack: tuple[Event, ...]
+    awaitable: Any,
+    event: Event,
+    stack: tuple[Event, ...],
+    policy: CapturePolicy = REFERENCE,
 ) -> Any:
     """Record around the await, so the event reflects the real outcome.
 
@@ -154,8 +164,22 @@ async def _record_awaited(
     finally:
         _stack.reset(token)
 
-    event.result = result
+    _capture_result(event, result, policy)
     return result
+
+
+def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
+    # Result capture runs under the recorder guard: at SUMMARY and above
+    # it calls user code (repr, deepcopy), which must not record.
+
+    if _level_of(policy) <= NONE:
+        return
+
+    guard = _in_recorder.set(True)
+    try:
+        event.result = _capture_value(policy, None, outcome)
+    finally:
+        _in_recorder.reset(guard)
 
 
 class Binding:
@@ -182,6 +206,9 @@ class Binding:
         label: str | None = None,
         mode: str | None = None,
         missing_ok: bool = False,
+        capture: CapturePolicy | None = None,
+        capture_args: CapturePolicy | None = None,
+        capture_result: CapturePolicy | None = None,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
@@ -201,6 +228,13 @@ class Binding:
         self._path = _derive_path(target, name)
         self._label = label or self._default_label(target, name)
         self._missing_ok = missing_ok
+
+        # Capture policy overrides. None means follow whatever the sink
+        # consuming the events declares; capture= is shorthand for both
+        # axes, with the specific parameters winning.
+
+        self._capture_args = capture_args if capture_args is not None else capture
+        self._capture_result = capture_result if capture_result is not None else capture
 
         # The behaviour pipelines, keyed by operation ("call", "get",
         # "set" or "delete"): composing stages around one terminal, with
@@ -223,6 +257,11 @@ class Binding:
         # exit. Like behaviour, they persist across apply/remove cycles.
 
         self._expectations: list[tuple[str, int]] = []
+
+        # Which operations currently have an injecting terminal
+        # (returns / raises / rejects), so their events can be marked.
+
+        self._injects: dict[str, bool] = {}
 
     @staticmethod
     def _default_label(target: Any, name: str) -> str:
@@ -559,17 +598,7 @@ class Binding:
 
             guard = _in_recorder.set(True)
             try:
-                event = Event(
-                    "call",
-                    bnd._path,
-                    label=bnd._label,
-                    instance=instance,
-                    binding=bnd,
-                    args=args,
-                    kwargs=kwargs,
-                    arguments=normalized_arguments(wrapped, args, kwargs),
-                )
-                tape.record(event)
+                event = bnd._record_call(tape, wrapped, instance, args, kwargs)
             finally:
                 _in_recorder.reset(guard)
 
@@ -598,18 +627,85 @@ class Binding:
             # the await instead. Tested on the result, not the target: a
             # plain def can return an awaitable too.
 
-            if inspect.isawaitable(outcome):
-                return _record_awaited(outcome, event, base)
+            result_policy = bnd._capture_result
+            if result_policy is None:
+                result_policy = getattr(tape, "capture_result", REFERENCE)
 
-            event.result = outcome
+            if inspect.isawaitable(outcome):
+                return _record_awaited(outcome, event, base, result_policy)
+
+            _capture_result(event, outcome, result_policy)
             return outcome
 
         return wrapper
 
+    def _record_call(
+        self,
+        tape: Tape,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Event:
+        # Resolve the argument capture policy: the binding's override,
+        # else what the sink consuming the events declares.
+
+        policy = self._capture_args
+        if policy is None:
+            policy = getattr(tape, "capture_args", REFERENCE)
+        level = _level_of(policy)
+
+        event = Event(
+            "call",
+            self._path,
+            label=self._label,
+            instance=instance,
+            binding=self,
+            capture=level,
+            injected=self._injects.get("call", False),
+        )
+
+        # NONE skips signature binding entirely, the dominant cost of
+        # recording: the call stays visible, its values do not.
+
+        if level > NONE:
+            arguments = normalized_arguments(wrapped, args, kwargs)
+
+            if not callable(policy) and level == REFERENCE:
+                event.args = args
+                event.kwargs = kwargs
+                event.arguments = arguments
+            elif arguments is not None:
+                # Above REFERENCE, capture through the normalized form
+                # only: keeping the raw call shape too would duplicate
+                # every value, and a by-name policy such as redact()
+                # cannot see names in a raw args tuple.
+
+                event.arguments = {
+                    name: _capture_value(policy, name, value)
+                    for name, value in arguments.items()
+                }
+            else:
+                # No signature to normalize against: capture the raw
+                # call shape instead, positionals under no name.
+
+                event.args = tuple(
+                    _capture_value(policy, None, value) for value in args
+                )
+                event.kwargs = {
+                    name: _capture_value(policy, name, value)
+                    for name, value in kwargs.items()
+                }
+
+        return tape.record(event)
+
     # -- behaviour pipelines -------------------------------------------------
 
-    def _set_terminal(self, operation: str, fn: WrapperFunction) -> None:
+    def _set_terminal(
+        self, operation: str, fn: WrapperFunction, *, injected: bool = False
+    ) -> None:
         self._terminals[operation] = fn
+        self._injects[operation] = injected
         self._composed.pop(operation, None)
 
     def _add_stage(self, operation: str, fn: StageFunction) -> None:
@@ -619,6 +715,7 @@ class Binding:
     def _clear_behaviour(self, operation: str) -> None:
         self._pipelines.pop(operation, None)
         self._terminals.pop(operation, None)
+        self._injects.pop(operation, None)
         self._composed.pop(operation, None)
 
     def _behaviour(self, operation: str) -> WrapperFunction | None:
@@ -746,6 +843,9 @@ def binding(
     label: str | None = None,
     mode: str | None = None,
     missing_ok: bool = False,
+    capture: CapturePolicy | None = None,
+    capture_args: CapturePolicy | None = None,
+    capture_result: CapturePolicy | None = None,
 ) -> Binding:
     """Create a binding for one target attribute.
 
@@ -760,11 +860,26 @@ def binding(
     typically one assigned in __init__. Without it such a name raises
     AttributeError, because it is indistinguishable from a typo.
 
+    `capture=` overrides how much of the recorded values this binding
+    stores (a level such as SUMMARY, or a fn(name, value) callable),
+    with `capture_args=` and `capture_result=` controlling the two axes
+    separately and winning over the shorthand. Left unset, the binding
+    follows what the sink consuming the events declares.
+
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.
     """
 
-    return Binding(target, name, label=label, mode=mode, missing_ok=missing_ok)
+    return Binding(
+        target,
+        name,
+        label=label,
+        mode=mode,
+        missing_ok=missing_ok,
+        capture=capture,
+        capture_args=capture_args,
+        capture_result=capture_result,
+    )
 
 
 def bindings(**points: tuple[Any, str]) -> BindingGroup:

@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from wrapt import MISSING
 
+from .capture import REFERENCE, CapturePolicy
 from .eventlogs import EventLog
 from .events import Event
 
@@ -44,6 +45,15 @@ class Tape:
     so ordering assertions have a single authoritative order even when
     events arrive from concurrently running tasks.
     """
+
+    # The capture levels this sink requires of bindings that follow the
+    # sink (design: the sink says what it needs). REFERENCE on both
+    # axes, because a test asserts within the scope, where references
+    # are accurate and cost nothing. A streaming sink would declare
+    # SUMMARY arguments and NONE results instead.
+
+    capture_args: CapturePolicy = REFERENCE
+    capture_result: CapturePolicy = REFERENCE
 
     def __init__(self) -> None:
         self._entries: list[Event] = []
@@ -97,10 +107,12 @@ class Tape:
         lines: list[str] = []
 
         def emit(event: Event) -> None:
+            injected = " (injected)" if event.injected else ""
+
             if event.exception is not None:
-                marker = f"  !! {type(event.exception).__name__}"
+                marker = f"  !! {type(event.exception).__name__}{injected}"
             elif event.result is not MISSING:
-                marker = f"  -> {event.result!r}"
+                marker = f"  -> {event.result!r}{injected}"
             else:
                 marker = ""
 
@@ -186,6 +198,32 @@ def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
 
 def _pop(token: contextvars.Token[tuple[Event, ...]]) -> None:
     _stack.reset(token)
+
+
+def current_event() -> Event | None:
+    """The in-flight event, or None when nothing is being recorded.
+
+    The behaviour pipeline runs after its event is pushed, so this is
+    reachable from inside a decorates() handler, where it names the
+    event for the very call the handler is wrapping.
+    """
+
+    stack = _stack.get()
+    return stack[-1] if stack else None
+
+
+def annotate(**data: Any) -> None:
+    """Merge values into the in-flight event's data dict.
+
+    Annotation is targeted capture: the caller attaches what it knows a
+    generic policy cannot infer (a row count, a cache hit, an immutable
+    copy of a value that will be mutated). A silent no-op when nothing
+    is being recorded, so observed code can call it unconditionally.
+    """
+
+    event = current_event()
+    if event is not None:
+        event.data.update(data)
 
 
 class Timeline:
