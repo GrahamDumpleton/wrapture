@@ -6,19 +6,12 @@ from typing import Any
 
 import pytest
 
-from wrapture import NotImplementedYetError, binding
+from wrapture import binding
 
 
 class Gateway:
     def charge(self, amount: int, currency: str = "USD") -> dict[str, Any]:
         return {"id": f"ch_{amount}", "amount": amount}
-
-
-class Ledger:
-    rate = 0.05  # data attribute: detected as attribute mode
-
-    def record(self, entry: str) -> str:
-        return f"led-{entry}"
 
 
 class AsyncSvc:
@@ -295,15 +288,3 @@ def test_argument_and_result_stages_compose_on_an_async_target() -> None:
         assert asyncio.run(AsyncSvc().inner(2)) == 41
     finally:
         bnd.remove()
-
-
-# ---------------------------------------------------------------------------
-# attribute behaviours are stubbed loudly
-# ---------------------------------------------------------------------------
-
-
-def test_wraps_value_is_stubbed_loudly() -> None:
-    attr = binding(Ledger, "rate")
-
-    with pytest.raises(NotImplementedYetError):
-        attr.on_get.wraps_value()

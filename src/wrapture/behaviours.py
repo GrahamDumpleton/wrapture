@@ -21,8 +21,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 if TYPE_CHECKING:
     from .bindings import Binding
 
-from .exceptions import NotImplementedYetError
-
 # The signature wrapt uses for wrappers and decorators:
 # fn(wrapped, instance, args, kwargs).
 
@@ -288,15 +286,6 @@ class GetBehaviour(_Behaviour):
             return value
 
         return self._stage(stage)
-
-    def wraps_value(self) -> Binding:
-        """Return a proxy of the value read, so observation can follow it.
-        Not implemented yet."""
-
-        raise NotImplementedYetError(
-            "GetBehaviour.wraps_value() is specified but not implemented;"
-            " it needs a value-following proxy"
-        )
 
 
 class SetBehaviour(_Behaviour):
