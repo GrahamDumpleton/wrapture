@@ -1,0 +1,161 @@
+"""The event record produced when a binding observes something happen.
+
+One record type covers all four kinds of observation: a call to a wrapped
+callable, and a read, write or delete of a wrapped attribute. The kinds
+share the fields that describe where and when the event happened and how
+events nest; each kind then populates the fields that make sense for it.
+
+Nothing in this module records anything by itself. Events are created by
+the recording machinery when a binding fires inside a timeline, and are
+consumed through the event log and tape interfaces built on top of them.
+"""
+
+from __future__ import annotations
+
+import inspect
+import weakref
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from wrapt import MISSING
+
+EventKind = Literal["call", "get", "set", "delete"]
+
+
+@dataclass(eq=False)
+class Event:
+    """One recorded occurrence at a binding.
+
+    The `kind` field says what happened: "call" for an invocation of a
+    wrapped callable, and "get", "set" or "delete" for attribute access.
+    Fields that were not observed hold the MISSING sentinel (for values,
+    so that a recorded None stays distinguishable) or None (for the
+    optional descriptive fields). Events compare by identity: two events
+    with identical fields are still two distinct occurrences.
+    """
+
+    kind: EventKind
+    path: str
+    label: str | None = None
+    instance: Any = None
+
+    # Position on the tape: allocation order, nesting depth, and the
+    # enclosing and enclosed events. Excluded from repr() because parent
+    # and children reference each other cyclically.
+
+    seq: int = 0
+    depth: int = 0
+    parent: Event | None = field(default=None, repr=False)
+    children: list[Event] = field(default_factory=list, repr=False)
+
+    started: float | None = None
+    duration: float | None = None
+
+    # Outcome. For a call this is the return value or the exception it
+    # raised; for a get it is the value read, so the same accessors and
+    # filters work across calls and reads.
+
+    result: Any = MISSING
+    exception: BaseException | None = None
+
+    # kind == "call": the arguments as sent, the signature-normalized
+    # form with defaults applied, and the (args, kwargs) actually passed
+    # on when behaviour transformed them.
+
+    args: tuple[Any, ...] | None = None
+    kwargs: dict[str, Any] | None = None
+    arguments: dict[str, Any] | None = None
+    forwarded: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+
+    # kind == "set": the value written, and the prior value where it was
+    # cheaply available.
+
+    value: Any = MISSING
+    previous: Any = MISSING
+
+    def __str__(self) -> str:
+        if self.kind == "call":
+            return f"{self.path}({self._format_arguments()})"
+
+        if self.kind == "get":
+            if self.result is not MISSING:
+                return f"get {self.path} -> {self.result!r}"
+            return f"get {self.path}"
+
+        if self.kind == "set":
+            return f"set {self.path} = {self.value!r}"
+
+        return f"delete {self.path}"
+
+    def _format_arguments(self) -> str:
+        # Prefer the normalized form so the display matches what filters
+        # and assertions compare against; fall back to the raw call shape
+        # when no signature was available.
+
+        if self.arguments is not None:
+            return ", ".join(f"{k}={v!r}" for k, v in self.arguments.items())
+
+        positional = [repr(a) for a in (self.args or ())]
+        keyword = [f"{k}={v!r}" for k, v in (self.kwargs or {}).items()]
+        return ", ".join(positional + keyword)
+
+
+# Signature lookup is cached because inspect.signature costs microseconds
+# per call and would dominate the recording path. The cache is keyed on
+# the function itself via weak references, never on id(): ids are reused
+# after garbage collection, and a collision would silently bind one
+# function's arguments against another's signature.
+
+_signature_cache: weakref.WeakKeyDictionary[Any, inspect.Signature | None] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _signature(func: Any) -> inspect.Signature | None:
+    try:
+        return _signature_cache[func]
+    except KeyError:
+        pass
+    except TypeError:
+        # Unhashable or not weak-referenceable: compute every time.
+
+        try:
+            return inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        signature = None
+
+    try:
+        _signature_cache[func] = signature
+    except TypeError:
+        pass
+
+    return signature
+
+
+def normalized_arguments(
+    func: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Bind args and kwargs against func's signature, defaults applied.
+
+    Returns a dict mapping parameter names to values, so that f(1, 2)
+    and f(1, b=2) produce the same recorded arguments. Returns None when
+    no signature is available or the arguments do not fit it, in which
+    case the caller falls back to the raw call shape.
+    """
+
+    signature = _signature(func)
+    if signature is None:
+        return None
+
+    try:
+        bound = signature.bind(*args, **kwargs)
+    except TypeError:
+        return None
+
+    bound.apply_defaults()
+    return dict(bound.arguments)

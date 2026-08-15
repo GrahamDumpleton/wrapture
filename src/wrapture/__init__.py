@@ -32,6 +32,9 @@ from .bindings import (
     binding,
     bindings,
 )
+from .events import (
+    Event,
+)
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
@@ -56,6 +59,7 @@ __all__ = [
     "DeferredTargetError",
     "DeleteBehaviour",
     "ErrorBehaviour",
+    "Event",
     "FinishBehaviour",
     "GetBehaviour",
     "ItemBehaviour",
