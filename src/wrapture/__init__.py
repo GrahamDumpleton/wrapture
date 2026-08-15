@@ -49,6 +49,11 @@ from .iterators import (
     IteratorProxy,
     iterator,
 )
+from .timeline import (
+    Tape,
+    Timeline,
+    timeline,
+)
 
 __all__ = [
     "AbandonBehaviour",
@@ -66,8 +71,11 @@ __all__ = [
     "IteratorProxy",
     "NotImplementedYetError",
     "SetBehaviour",
+    "Tape",
+    "Timeline",
     "WrongModeError",
     "binding",
     "bindings",
     "iterator",
+    "timeline",
 ]
