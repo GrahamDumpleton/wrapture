@@ -11,8 +11,9 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on
 the safe monkey-patching machinery wrapt provides.
 
 ```{note}
-wrapture is in early development. The design is settled and the monkey
-patching layer is implemented, but the library is not yet released.
+wrapture is in early development. The monkey patching and unit testing
+layers are implemented; the tracing and profiling layers are designed
+but not built. The library is not yet released.
 ```
 
 ## What it does

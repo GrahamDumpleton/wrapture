@@ -148,13 +148,21 @@ the real code still running.
 ### Asserting on what happened
 
 `unittest.mock` records calls on the mock and asserts with
-`assert_called_once_with()` and friends. This is the half of mock that
-wrapture does not replace today: bindings intervene, but nothing records.
+`assert_called_once_with()` and friends: a flat call list, arguments by
+reference, no return values. wrapture records on a timeline, through the
+same bindings that intervene:
 
-The planned timeline layer adds recording and assertion on top of the same
-bindings: events with signature-normalized arguments, real return values
-(which mock does not record), nesting and ordering. Until it lands, use
-`unittest.mock` where recorded-call assertions are the point of the test.
+```python
+with wrapture.timeline(charge, record):
+    place_order("widget")
+
+    charge.events.with_args(amount=500).assert_once()
+    record.events.raising(TimeoutError).assert_never()
+```
+
+Events carry signature-normalized arguments, real return values (which
+mock does not record), exceptions, nesting and ordering, and the same
+handle asserts on them. The unit testing page covers the workflow.
 
 ### When to just use unittest.mock
 
@@ -166,8 +174,3 @@ wrapture exists for the cases substitution cannot express: code with no
 seams, interventions that keep the real code running, and observation of
 a real call graph.
 
-```{note}
-The testing workflow built on timelines (recording calls, asserting on
-arguments, results, ordering and nesting) is designed but not implemented
-yet. The comparisons above only show behaviour that works today.
-```

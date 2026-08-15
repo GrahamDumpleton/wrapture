@@ -56,7 +56,7 @@ An attribute produced by a module-level or class `__getattr__` exists in
 no `__dict__`, so there is no owning location to install a wrapper on.
 Resolution fails with wrapt's `PathResolutionError` naming the problem.
 
-## How a call was reached is not observable
+## Class access and instance access look the same
 
 Neither binding mode can distinguish a call made via the class
 (`Gateway.charge(obj, 1)`) from one made via an instance
@@ -65,6 +65,11 @@ either way, because wrapt deliberately normalises the two forms. An
 attribute binding does not see class-level access at all, per the first
 limitation. Distinguishing the access route requires a purpose-built
 descriptor owning the attribute, which is outside what a binding does.
+
+A related question does have an answer: while the form the caller wrote
+is not observable, the line of code that made the call is, with
+`stack=` on the binding, per the stack capture section of the unit
+testing page.
 
 ## Targets must already be imported
 

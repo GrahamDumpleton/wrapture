@@ -6,9 +6,14 @@ in a test suite is that every applied binding is removed again, whatever
 the outcome of the test: a patch that leaks changes the behaviour of every
 test that runs after it.
 
-This page shows the scoping patterns for plain tests, pytest and unittest,
-then the recording layer built on timelines: how to capture what actually
-happened inside a test as events, and how to filter and assert on them.
+This page covers the workflow in the order a test suite grows into it:
+the scoping patterns for plain tests, pytest and unittest; recording what
+actually happened inside a test as events on a timeline, including how
+much of each value is captured, annotation, and stack capture; filtering
+and asserting on those events, immediately or as declared expectations;
+the whole-tape views of the call tree and ordering; and the optional
+pytest plugin that sweeps for leaked patches and attaches tapes to
+failure reports.
 
 ## Scoping with a context manager
 
@@ -258,24 +263,6 @@ One reminder from the known limitations page: only access through an
 instance records. Reading the attribute off the class returns the
 descriptor without firing it, so nothing is recorded.
 
-### What does not record
-
-Three situations produce no event, each deliberate:
-
-- **Outside a timeline** nothing records, but configured behaviour still
-  applies: a stub is a stub whether or not anyone is recording.
-- **While suspended** a binding records nothing, but counts the calls it
-  skipped in `suspended_calls`, so a shorter-than-expected tape can be
-  explained rather than silently wrong.
-- **Calls triggered by the recording machinery itself** are not recorded,
-  which is what keeps an observed callable safe to use anywhere, even
-  inside the recorder. Behaviour still applies to such calls: code
-  stubbed out stays stubbed out.
-- **Calls on a thread without the caller's context**, on builds where
-  threads do not inherit it. These raise `RecordingGapWarning` and are
-  counted in `missed_calls`, so the gap is loud rather than silent; the
-  known limitations page covers the details and the workaround.
-
 ### Generators and iteration
 
 Calling a generator function does not run its body; it returns a
@@ -340,6 +327,24 @@ full protocol is preserved, but object identity and introspection
 details differ, the same way a wrapped function is a `FunctionWrapper`
 rather than the original function. Outside a timeline the original
 generator is returned untouched.
+
+### What does not record
+
+Four situations produce no event, each deliberate:
+
+- **Outside a timeline** nothing records, but configured behaviour still
+  applies: a stub is a stub whether or not anyone is recording.
+- **While suspended** a binding records nothing, but counts the calls it
+  skipped in `suspended_calls`, so a shorter-than-expected tape can be
+  explained rather than silently wrong.
+- **Calls triggered by the recording machinery itself** are not recorded,
+  which is what keeps an observed callable safe to use anywhere, even
+  inside the recorder. Behaviour still applies to such calls: code
+  stubbed out stays stubbed out.
+- **Calls on a thread without the caller's context**, on builds where
+  threads do not inherit it. These raise `RecordingGapWarning` and are
+  counted in `missed_calls`, so the gap is loud rather than silent; the
+  known limitations page covers the details and the workaround.
 
 ### How much is captured
 
