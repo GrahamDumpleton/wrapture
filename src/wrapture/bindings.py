@@ -9,6 +9,7 @@ call until the binding is removed, suspended or reconfigured.
 from __future__ import annotations
 
 import inspect
+import types
 from typing import Any, Self, TypeVar
 
 import wrapt
@@ -26,11 +27,13 @@ from .behaviours import (
     _Behaviour,
     _compose,
 )
+from .events import Event, normalized_arguments
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
     WrongModeError,
 )
+from .timeline import _in_recorder, _pop, _push, _stack, _tape
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
 
@@ -94,6 +97,64 @@ def _detect_mode(target: Any, name: str, missing_ok: bool = False) -> str:
     return "attribute"
 
 
+def _derive_path(target: Any, name: str) -> str:
+    """The fully qualified location of the bound attribute.
+
+    Format is module:path, both halves dotted, as used by setuptools
+    entry points: everything before the colon is the module to import,
+    everything after is the attribute path within it. Derived from the
+    target, so the same attribute yields the same path however the
+    target was expressed, and unaffected by any label override.
+    """
+
+    if isinstance(target, str):
+        return f"{target}:{name}"
+
+    if isinstance(target, types.ModuleType):
+        return f"{target.__name__}:{name}"
+
+    # An instance target is located via its type: the events it records
+    # carry the instance itself for anything the path cannot say.
+
+    owner = target if isinstance(target, type) else type(target)
+    return f"{owner.__module__}:{owner.__qualname__}.{name}"
+
+
+def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
+    """The `wrapped` handed to behaviour, recording what the original
+    actually received, which may differ from what the caller sent."""
+
+    def forward(*args: Any, **kwargs: Any) -> Any:
+        event.forwarded = (args, kwargs)
+        return wrapped(*args, **kwargs)
+
+    return forward
+
+
+async def _record_awaited(
+    awaitable: Any, event: Event, stack: tuple[Event, ...]
+) -> Any:
+    """Record around the await, so the event reflects the real outcome.
+
+    Re-establishes the in-progress stack for the duration, so calls made
+    inside the coroutine body nest under this event. The stack is set
+    raw rather than pushed, because the event was already linked to its
+    parent when the call was recorded.
+    """
+
+    token = _stack.set(stack + (event,))
+    try:
+        result = await awaitable
+    except BaseException as exc:
+        event.exception = exc
+        raise
+    finally:
+        _stack.reset(token)
+
+    event.result = result
+    return result
+
+
 class Binding:
     """The association of a target attribute with a wrapper and behaviour.
 
@@ -134,6 +195,7 @@ class Binding:
         self._mode = mode
         self._target = target
         self._name = name
+        self._path = _derive_path(target, name)
         self._label = label or self._default_label(target, name)
         self._missing_ok = missing_ok
 
@@ -168,6 +230,17 @@ class Binding:
         """
 
         return self._mode
+
+    @property
+    def path(self) -> str:
+        """Fully qualified location of the bound attribute.
+
+        Format is module:path, both halves dotted. Derived from the
+        target and never affected by a label override, so events remain
+        self-describing wherever they end up.
+        """
+
+        return self._path
 
     @property
     def label(self) -> str:
@@ -374,9 +447,68 @@ class Binding:
             kwargs: dict[str, Any],
         ) -> Any:
             behaviour = bnd._behaviour("call")
-            if behaviour is None:
-                return wrapped(*args, **kwargs)
-            return behaviour(wrapped, instance, args, kwargs)
+            tape = _tape.get()
+
+            # Not recording: no timeline is active, or this call was
+            # triggered by the recording machinery itself rather than by
+            # the code under observation. Behaviour still applies; the
+            # call is just not recorded.
+
+            if tape is None or _in_recorder.get():
+                if behaviour is None:
+                    return wrapped(*args, **kwargs)
+                return behaviour(wrapped, instance, args, kwargs)
+
+            # Create and record the event under the recorder guard, so
+            # anything the bookkeeping calls that is itself observed
+            # passes through instead of recording recursively.
+
+            guard = _in_recorder.set(True)
+            try:
+                event = Event(
+                    "call",
+                    bnd._path,
+                    label=bnd._label,
+                    instance=instance,
+                    binding=bnd,
+                    args=args,
+                    kwargs=kwargs,
+                    arguments=normalized_arguments(wrapped, args, kwargs),
+                )
+                tape.record(event)
+            finally:
+                _in_recorder.reset(guard)
+
+            # Run the call with the event on the in-progress stack, so
+            # calls made inside the body nest under it.
+
+            base = _stack.get()
+            token = _push(event)
+            try:
+                if behaviour is None:
+                    outcome = wrapped(*args, **kwargs)
+                else:
+                    outcome = behaviour(
+                        _forwarder(wrapped, event), instance, args, kwargs
+                    )
+            except BaseException as exc:
+                event.exception = exc
+                raise
+            finally:
+                _pop(token)
+
+            # Calling an `async def` does not run it: it returns a
+            # coroutine immediately, and the body only executes when
+            # something awaits it. So the scope above covered
+            # construction only, and the outcome must be recorded around
+            # the await instead. Tested on the result, not the target: a
+            # plain def can return an awaitable too.
+
+            if inspect.isawaitable(outcome):
+                return _record_awaited(outcome, event, base)
+
+            event.result = outcome
+            return outcome
 
         return wrapper
 

@@ -35,9 +35,21 @@ class Event:
     """
 
     kind: EventKind
+
+    # Where it happened: path is the fully qualified location of what
+    # was bound, in module:path form with both halves dotted, so it
+    # stays meaningful after events leave the process. label is the
+    # friendly display name, from the binding's label.
+
     path: str
     label: str | None = None
     instance: Any = None
+
+    # The Binding that recorded this event. Typed loosely because the
+    # bindings module builds on this one; excluded from repr() because
+    # the path already identifies the event.
+
+    binding: Any = field(default=None, repr=False)
 
     # Position on the tape: allocation order, nesting depth, and the
     # enclosing and enclosed events. Excluded from repr() because parent
@@ -74,18 +86,24 @@ class Event:
     previous: Any = MISSING
 
     def __str__(self) -> str:
+        # Display favours the friendly label; the path is there when no
+        # label was recorded, and for anything that needs the location
+        # rather than the name.
+
+        where = self.label or self.path
+
         if self.kind == "call":
-            return f"{self.path}({self._format_arguments()})"
+            return f"{where}({self._format_arguments()})"
 
         if self.kind == "get":
             if self.result is not MISSING:
-                return f"get {self.path} -> {self.result!r}"
-            return f"get {self.path}"
+                return f"get {where} -> {self.result!r}"
+            return f"get {where}"
 
         if self.kind == "set":
-            return f"set {self.path} = {self.value!r}"
+            return f"set {where} = {self.value!r}"
 
-        return f"delete {self.path}"
+        return f"delete {where}"
 
     def _format_arguments(self) -> str:
         # Prefer the normalized form so the display matches what filters

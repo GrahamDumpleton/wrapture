@@ -81,6 +81,17 @@ _stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar(
     "wrapture_stack", default=()
 )
 
+# The reentrancy guard. Set while the recording machinery itself runs, so
+# an observed callable invoked from inside the recorder (rather than from
+# the code under observation) does not record recursively without bound.
+# Behaviour still applies on the guarded path: only recording is skipped,
+# so a call the user stubbed out stays stubbed even when the recorder
+# triggers it.
+
+_in_recorder: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "wrapture_in_recorder", default=False
+)
+
 
 def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
     # Nest the event under whatever is currently in progress, then make

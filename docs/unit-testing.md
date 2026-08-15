@@ -6,9 +6,10 @@ in a test suite is that every applied binding is removed again, whatever
 the outcome of the test: a patch that leaks changes the behaviour of every
 test that runs after it.
 
-This page shows the scoping patterns for plain tests, pytest and unittest.
-Everything here uses the monkey patching layer; the recording and
-assertion workflow built on timelines is not implemented yet.
+This page shows the scoping patterns for plain tests, pytest and unittest,
+then the recording layer built on timelines: how to capture what actually
+happened inside a test as events, ready to inspect. The assertion API over
+those events is not implemented yet.
 
 ## Scoping with a context manager
 
@@ -134,6 +135,93 @@ context manager when something else already applied it raises
 the outer scope's patch. If a fixture owns the binding, tests should only
 reconfigure behaviour, never call `apply()`, `remove()` or enter it as a
 context manager themselves.
+
+## Recording calls on a timeline
+
+A binding does more than intervene: inside a recording scope it also
+observes. `timeline()` opens that scope, applies the bindings it is given,
+and yields a tape; on exit the bindings are removed again. The recording
+scope and the useful patch lifetime are the same interval, which is why
+the two are one construct:
+
+```python
+def test_order_writes_the_ledger():
+    charge = wrapture.binding(Gateway, "charge")
+    record = wrapture.binding(Ledger, "record")
+
+    with wrapture.timeline(charge, record) as tape:
+        place_order("widget")
+
+    outer, inner = tape.all
+    assert outer.label == "Gateway.charge"
+    assert inner.label == "Ledger.record"
+    assert inner.parent is outer
+```
+
+`timeline()` accepts bindings, binding groups, or iterables of either, and
+with no arguments it only records, for bindings whose lifetime is managed
+elsewhere. A binding applied outside any timeline records nothing and
+costs almost nothing beyond wrapt's own dispatch, so leaving bindings
+applied while only occasionally recording is a supported pattern, not a
+mistake.
+
+### What one event contains
+
+Every call through a binding inside the scope records one event. The
+fields a test typically reads:
+
+- `path` is the fully qualified location of what was bound, in
+  `module:path` form with both halves dotted (the convention setuptools
+  entry points use), so two same-named classes in different modules stay
+  distinguishable and the event remains self-describing if it ever
+  leaves the process. `label` is the friendly name: the `label=` given
+  to the binding, or an `owner.name` default like `Gateway.charge`.
+  Assert against `label` for readability, `path` when location matters.
+- `instance` is the object the method was called on.
+- `args` and `kwargs` are the call as the caller wrote it, and
+  `arguments` is the signature-normalized form with defaults applied, so
+  `charge(500)` and `charge(amount=500)` record identically. Assert
+  against `arguments`.
+- `result` holds the return value, or the wrapt MISSING sentinel when the
+  call raised instead; `exception` holds the exception that propagated. A
+  call that returned None records `result=None`, which stays
+  distinguishable from no result at all.
+- `parent`, `children` and `depth` place the event in the call tree, and
+  `seq` is its position in overall recording order.
+
+Events record what actually flowed, behaviour included. A call stubbed
+with `returns()` records the stubbed result; a failure injected with
+`raises()` records that exception. When `transforms_args()` rewrote the
+arguments, the event keeps both sides: `args` as the caller sent them,
+and `forwarded` as the `(args, kwargs)` the wrapped function actually
+received. No substitution-based mock can record that distinction, because
+replacing a function discards what it would have been called with.
+
+Calls on `async def` targets record the awaited outcome, not the
+coroutine object: the event completes when the coroutine does, and calls
+made inside its body nest under its event even when other tasks run in
+between. Concurrent asyncio tasks each record their own correctly nested
+subtree onto the shared tape.
+
+### What does not record
+
+Three situations produce no event, each deliberate:
+
+- **Outside a timeline** nothing records, but configured behaviour still
+  applies: a stub is a stub whether or not anyone is recording.
+- **While suspended** a binding records nothing, but counts the calls it
+  skipped in `suspended_calls`, so a shorter-than-expected tape can be
+  explained rather than silently wrong.
+- **Calls triggered by the recording machinery itself** are not recorded,
+  which is what keeps an observed callable safe to use anywhere, even
+  inside the recorder. Behaviour still applies to such calls: code
+  stubbed out stays stubbed out.
+
+Two honest caveats while the layer is under construction: recorded
+arguments and results are references, so an object mutated after the call
+shows its mutated state on the tape; and a call that returns a generator
+records the generator object as its result, with iteration not yet
+observed. Both are being addressed in later stages of this layer.
 
 ## Verifying nothing leaked
 

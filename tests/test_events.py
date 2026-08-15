@@ -86,6 +86,17 @@ def test_call_str_uses_normalized_arguments() -> None:
     assert str(event) == "Gateway.charge(amount=500, currency='USD', retries=3)"
 
 
+def test_str_prefers_the_label_over_the_path() -> None:
+    event = Event(
+        "call",
+        "myapp.orders:Gateway.charge",
+        label="Gateway.charge",
+        arguments={"amount": 500},
+    )
+
+    assert str(event) == "Gateway.charge(amount=500)"
+
+
 def test_call_str_falls_back_to_raw_call_shape() -> None:
     event = Event("call", "Gateway.charge", args=(500,), kwargs={"currency": "AUD"})
 
