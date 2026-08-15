@@ -12,6 +12,7 @@ import inspect
 import time
 import types
 import warnings
+import weakref
 from collections.abc import AsyncGenerator, Generator
 from typing import Any, Self, TypeVar
 
@@ -60,6 +61,12 @@ from .timeline import (
 )
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
+
+# Every currently applied binding, so tooling such as the pytest plugin
+# can sweep for patches left behind. Weak references, so the registry
+# never keeps a binding alive.
+
+_applied_bindings: weakref.WeakSet[Binding] = weakref.WeakSet()
 
 
 def _reject_deferred(target: Any) -> None:
@@ -580,6 +587,7 @@ class Binding:
             self._wrapper = install_attribute(self, self._target, self._name)
             self._suspended = suspended
             self._apply_count += 1
+            _applied_bindings.add(self)
             return self
 
         # `enabled` must be supplied at construction: wrapt's _self_enabled
@@ -592,6 +600,7 @@ class Binding:
         self._wrapper = wrapt.wrap_object(self._target, self._name, factory)
         self._suspended = suspended
         self._apply_count += 1
+        _applied_bindings.add(self)
         return self
 
     def _enabled(self) -> bool:
@@ -692,6 +701,7 @@ class Binding:
 
         self._wrapper = None
         self._suspended = False
+        _applied_bindings.discard(self)
         return self
 
     def __enter__(self) -> Self:

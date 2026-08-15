@@ -603,9 +603,53 @@ recorded that many times in that order. On failure the message names
 which binding the expectation stalled waiting for and prints the actual
 timeline, which reads far better than a list diff.
 
-## Verifying nothing leaked
+## The pytest plugin
 
-For suite-wide insurance, an autouse fixture can assert the world was
+wrapture ships an opt-in pytest plugin. It is deliberately not
+auto-loaded; activate it from a `conftest.py`:
+
+```python
+pytest_plugins = ["wrapture.pytest_plugin"]
+```
+
+or on the command line with `-p wrapture.pytest_plugin`. It provides
+three things.
+
+**A leak sweep after every test.** A binding the test applied and did
+not remove fails that test by name, and is removed so the tests after
+it are unaffected. The sweep only flags bindings applied *during* the
+test: a module or session scoped fixture that deliberately holds a
+patch across tests is respected, because its binding was already
+applied when the test began.
+
+**A `tape` fixture.** A recording scope spanning the whole test, so
+bindings applied any way at all record onto it:
+
+```python
+def test_order_flow(tape):
+    with wrapture.binding(Gateway, "charge") as charge:
+        place_order("widget")
+
+        charge.events.with_args(amount=500).assert_once()
+
+    assert len(tape.all) == 2
+```
+
+When a test that used `tape` fails, the tape's `tree()` is attached to
+the failure report under a "wrapture tape" section, so the output shows
+what actually ran, not just the assertion that tripped. Note that the
+fixture's timeline is given no bindings, so it applies none and
+verifies no declared expectations; use `timeline(...)` inside the test
+where those are wanted.
+
+**Assertion output for event logs.** Comparisons involving an
+`EventLog` print the events, including the "filtered from" fallback
+showing what an over-narrowed filter discarded, matching the output of
+the `assert_*` methods.
+
+## Verifying nothing leaked by hand
+
+Without the plugin, an autouse fixture can assert the world was
 restored:
 
 ```python
@@ -623,6 +667,3 @@ def no_leaked_patch():
 The check reads the raw class attribute with `vars()` and compares types
 with `type()` rather than `isinstance()`, because a wrapt wrapper
 masquerades as the object it wraps.
-
-This is deliberately manual for now. A pytest plugin that sweeps for
-bindings left applied at the end of each test is planned.

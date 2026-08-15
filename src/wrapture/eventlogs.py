@@ -167,13 +167,13 @@ class EventLog:
             raise AssertionError(self._failure(f"expected at most {count} event(s)"))
         return self
 
-    def _failure(self, expectation: str) -> str:
-        # The failure message shows this log's events. When the log is
-        # empty because a filter discarded everything, fall back to the
-        # nearest non-empty log in the filter chain, so filtering the
-        # wrong thing is visible rather than mysterious.
+    def _describe(self) -> list[str]:
+        # The log's events, line by line. When the log is empty because
+        # a filter discarded everything, fall back to the nearest
+        # non-empty log in the filter chain, so filtering the wrong
+        # thing is visible rather than mysterious.
 
-        lines = [f"{expectation}, got {len(self._events)}", repr(self)]
+        lines = repr(self).splitlines()
 
         if not self._events:
             ancestor = self._filtered_from
@@ -184,7 +184,10 @@ class EventLog:
                 lines.append("  filtered from:")
                 lines.extend(f"    {line}" for line in repr(ancestor).splitlines())
 
-        return "\n".join(lines)
+        return lines
+
+    def _failure(self, expectation: str) -> str:
+        return "\n".join([f"{expectation}, got {len(self._events)}", *self._describe()])
 
     # -- data ----------------------------------------------------------------
 
