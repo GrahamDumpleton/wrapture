@@ -20,6 +20,8 @@ import threading
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
+from wrapt import MISSING
+
 from .eventlogs import EventLog
 from .events import Event
 
@@ -76,6 +78,70 @@ class Tape:
             events = [event for event in self._entries if event.binding is bnd]
 
         return EventLog(getattr(bnd, "label", repr(bnd)), events)
+
+    def roots(self) -> list[Event]:
+        """The top-level events: those recorded with no observed caller."""
+
+        with self._lock:
+            return [event for event in self._entries if event.parent is None]
+
+    def tree(self) -> str:
+        """The call graph as it actually ran, one event per line,
+        indented by nesting depth.
+
+        A completed event shows its result after `->`; one that raised
+        shows `!!` and the exception type; one still in progress shows
+        neither.
+        """
+
+        lines: list[str] = []
+
+        def emit(event: Event) -> None:
+            if event.exception is not None:
+                marker = f"  !! {type(event.exception).__name__}"
+            elif event.result is not MISSING:
+                marker = f"  -> {event.result!r}"
+            else:
+                marker = ""
+
+            lines.append("  " * event.depth + str(event) + marker)
+
+            for child in event.children:
+                emit(child)
+
+        for root in self.roots():
+            emit(root)
+
+        return "\n".join(lines)
+
+    def assert_order(self, *bindings: Any) -> Tape:
+        """Assert the bindings recorded events in the given order.
+
+        A subsequence check, not an exact match: other events may appear
+        before, between and after, and only the relative order of the
+        given bindings' events matters. Repeating a binding requires it
+        to have recorded that many times in order. Raises AssertionError
+        naming where the expectation stalled, with the actual timeline.
+        """
+
+        with self._lock:
+            entries = list(self._entries)
+
+        position = 0
+        for event in entries:
+            if position < len(bindings) and event.binding is bindings[position]:
+                position += 1
+
+        if position != len(bindings):
+            stalled = getattr(bindings[position], "label", repr(bindings[position]))
+            actual = "\n".join(f"    {event}" for event in entries) or "    (no events)"
+            raise AssertionError(
+                f"expected order not satisfied; stalled waiting for"
+                f" {stalled} (position {position + 1} of {len(bindings)})\n"
+                f"  actual timeline:\n{actual}"
+            )
+
+        return self
 
 
 # The ambient state. The tape variable doubles as the recording switch:

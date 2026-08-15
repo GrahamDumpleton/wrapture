@@ -181,6 +181,104 @@ def test_nested_timelines_restore_the_outer_scope() -> None:
 
 
 # ---------------------------------------------------------------------------
+# tape-level views
+# ---------------------------------------------------------------------------
+
+
+class Processor:
+    def process(self, order: str) -> dict[str, Any]:
+        gateway = Gateway()
+        result = gateway.charge(500)
+        Ledger().record(result)
+        return result
+
+
+def test_roots_returns_only_top_level_events() -> None:
+    process = binding(Processor, "process")
+    charge = binding(Gateway, "charge")
+
+    with timeline(process, charge) as tape:
+        Processor().process("widget")
+
+    roots = tape.roots()
+
+    assert [event.label for event in roots] == ["Processor.process"]
+    assert [event.label for event in tape.all] == [
+        "Processor.process",
+        "Gateway.charge",
+    ]
+
+
+def test_tree_renders_nesting_results_and_failures() -> None:
+    process = binding(Processor, "process")
+    charge = binding(Gateway, "charge")
+    refund = binding(Gateway, "refund").on_call.raises(TimeoutError("down"))
+
+    with timeline(process, charge, refund) as tape:
+        Processor().process("widget")
+        with pytest.raises(TimeoutError):
+            Gateway().refund(100)
+
+    lines = tape.tree().splitlines()
+
+    assert lines[0].startswith("Processor.process(")
+    assert lines[0].endswith("-> {'id': 'ch_500', 'amount': 500}")
+    assert lines[1].startswith("  Gateway.charge(")
+    assert lines[2] == "Gateway.refund(amount=100)  !! TimeoutError"
+
+
+def test_tree_of_an_empty_tape_is_empty() -> None:
+    with timeline() as tape:
+        pass
+
+    assert tape.tree() == ""
+
+
+def test_assert_order_checks_a_subsequence_not_an_exact_match() -> None:
+    process = binding(Processor, "process")
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(process, charge, record) as tape:
+        Processor().process("widget")
+
+    # Other events in between are fine; only relative order matters, and
+    # a passing check chains.
+
+    assert tape.assert_order(process, record) is tape
+    tape.assert_order(charge, record)
+    tape.assert_order(process, charge, record)
+
+
+def test_assert_order_failure_names_where_it_stalled() -> None:
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(charge, record) as tape:
+        Ledger().record({"id": "manual"})
+        Gateway().charge(500)
+
+    with pytest.raises(AssertionError) as failure:
+        tape.assert_order(charge, record)
+
+    message = str(failure.value)
+    assert "stalled waiting for Ledger.record (position 2 of 2)" in message
+    assert "actual timeline:" in message
+    assert "Gateway.charge(amount=500)" in message
+
+
+def test_assert_order_failure_on_a_binding_that_never_recorded() -> None:
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(charge, record) as tape:
+        Gateway().charge(500)
+
+    with pytest.raises(AssertionError, match="position 1 of 1"):
+        tape.assert_order(record)
+
+
+# ---------------------------------------------------------------------------
 # task isolation
 # ---------------------------------------------------------------------------
 

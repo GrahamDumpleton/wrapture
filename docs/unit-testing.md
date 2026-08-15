@@ -307,6 +307,43 @@ assert charge.events.with_args(amount=500)
 assert charge.events.count == 2
 ```
 
+## The call tree and ordering
+
+Per-binding logs answer questions about one call site; the tape answers
+questions about the flow between them. `tape.all` is every event in
+recording order, `tape.roots()` is the events with no observed caller,
+and `tape.tree()` renders the call graph as it actually ran:
+
+```python
+with wrapture.timeline(process, charge, record) as tape:
+    place_order("widget")
+
+print(tape.tree())
+```
+
+```
+Processor.process(order='widget')  -> {'id': 'ch_500', 'amount': 500}
+  Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
+  Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> None
+```
+
+Each line is one event, indented by nesting depth. A completed call
+shows its result after `->`, a call that raised shows `!!` with the
+exception type, and a call still in progress shows neither.
+
+Cross-binding ordering has its own assertion:
+
+```python
+tape.assert_order(charge, record)
+```
+
+This is a subsequence check, not an exact match: other events may appear
+before, between and after, and only the relative order of the given
+bindings' events matters. Repeating a binding requires it to have
+recorded that many times in that order. On failure the message names
+which binding the expectation stalled waiting for and prints the actual
+timeline, which reads far better than a list diff.
+
 ## Verifying nothing leaked
 
 For suite-wide insurance, an autouse fixture can assert the world was
