@@ -26,7 +26,7 @@ One mechanism, four uses, in increasing order of machinery:
    patch in the meantime. Useful entirely on its own, with nothing else
    switched on.
 
-2. **Testing.** Observe and assert on how calls actually flowed through a
+2. **Unit testing.** Observe and assert on how calls actually flowed through a
    *real* call graph (nesting, ordering, arguments and return values) and
    optionally intervene (stub, transform, fail-inject). Unlike a `Mock`,
    which fabricates values and cannot see calls an object makes to itself,
