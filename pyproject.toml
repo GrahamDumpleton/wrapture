@@ -1,7 +1,7 @@
 [build-system]
 # wrapt is needed at build time because reading the dynamic version imports
 # the package, and the package imports wrapt at the top level.
-requires = ["setuptools>=62.0", "wheel", "wrapt>=2.4.0rc2"]
+requires = ["setuptools>=62.0", "wheel", "wrapt>=2.4.0rc3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -25,7 +25,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
-    "wrapt>=2.4.0rc2",
+    "wrapt>=2.4.0rc3",
 ]
 
 [project.urls]

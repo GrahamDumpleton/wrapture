@@ -272,9 +272,70 @@ Three situations produce no event, each deliberate:
   inside the recorder. Behaviour still applies to such calls: code
   stubbed out stays stubbed out.
 
-One honest caveat while the layer is under construction: a call that
-returns a generator records the generator object as its result, with
-iteration not yet observed.
+### Generators and iteration
+
+Calling a generator function does not run its body; it returns a
+generator that runs later, a little at a time, as the consumer iterates.
+Recording follows what actually happens: the call records **one event
+covering the whole iteration**, not an event per item. A binding on a
+method that yields thousands of rows still records once, and
+`assert_once()` still means "called once".
+
+The event opens when the call creates the generator and fills in as the
+iteration proceeds:
+
+- `items` counts the values yielded so far. It is live: a test can read
+  it mid-iteration.
+- At exhaustion, `result` records the generator's return value, which is
+  `None` for the common generator that just yields. Async generators
+  cannot return a value, so exhaustion records `None` there too.
+- `duration` is wall time from the call to the close of the iteration.
+  For a lazily consumed generator that includes all the time the
+  *consumer* spent between items, which could be an entire request, so
+  there is a second figure: `body_duration` is the accumulated time the
+  generator body itself ran, summed over resumptions. Wall time answers
+  "how long was this iteration alive"; body time answers "how much work
+  did it do".
+
+Nesting also follows what actually happens. The generator body only
+runs while the consumer asks for the next item, so observed calls made
+*inside the body* nest under the generator's event, while the
+consumer's own work between items does not, even though it happens
+between the generator's first and last breath. The `tree()` for a loop
+over `stream()` that calls `handle()` on each item shows `fetch()`
+(called by the body) under the stream and `handle()` (called by the
+consumer) beside it.
+
+If the consumer stops early, by `break`, by `close()`, or just by
+dropping the generator, exhaustion never happens. The event closes with
+its durations and item count but **no result**: on the tape it is
+visibly an iteration that never finished, rather than one that
+completed quietly. An abandoned generator is frequently a bug, so the
+unfinished look is the honest signal, and `result is MISSING` after
+close distinguishes it from a finished iteration's `None`.
+
+Item *values* are deliberately not captured, at any capture level: a
+long stream would retain every item on the tape, and no policy can
+guess which items matter. When a test needs item data, it says so
+itself: `annotate()` from a `decorates()` handler, or an `iterator()`
+proxy's `on_item` stages, both let the code that knows what matters
+keep an immutable copy of exactly that. The `iterator()` proxy itself
+records nothing: it has no target and so no identity on a tape. It is
+behaviour plumbing, and it composes with recording. Behaviour runs
+first, so when a bound call returns a proxied generator the recording
+relay wraps the proxy: the consumer drives the recording relay, which
+drives the proxy, which drives the real generator. The binding records
+the iteration as the consumer experienced it (items counted after the
+proxy's transforms, body time including the proxy's stages), while the
+return value, exceptions, and close all thread through both levels.
+
+One consequence of recording iteration at all is worth stating plainly:
+while a timeline is active, the consumer of a recorded generator
+receives the recording relay, not the original generator object. The
+full protocol is preserved, but object identity and introspection
+details differ, the same way a wrapped function is a `FunctionWrapper`
+rather than the original function. Outside a timeline the original
+generator is returned untouched.
 
 ### How much is captured
 

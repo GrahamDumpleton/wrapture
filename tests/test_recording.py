@@ -7,9 +7,12 @@ recorder's own reentrancy guard).
 """
 
 import asyncio
+import functools
+import inspect
 from typing import Any
 
 import pytest
+import wrapt
 from wrapt import MISSING
 
 from wrapture import binding, bindings, timeline
@@ -305,3 +308,146 @@ def test_calls_inside_a_coroutine_body_nest_under_its_event() -> None:
     assert inner.label == "Ledger.record"
     assert inner.parent is outer
     assert outer.children == [inner]
+
+
+# ---------------------------------------------------------------------------
+# decorators that lie about the calling convention
+# ---------------------------------------------------------------------------
+
+# Recording dispatches on what a call actually returned, never on what
+# introspection claims about the target, so decorator stacks that lie
+# about sync versus async (the problem wrapt's calling convention
+# markers and adapters exist for) still record correctly.
+
+
+def _coroutine_returning(fn: Any) -> Any:
+    # A third-party style decorator: a plain def whose calls return a
+    # coroutine. Introspection reports sync; runtime behaviour is async.
+
+    async def run(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0)
+        return fn(*args, **kwargs)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return run(*args, **kwargs)
+
+    return wrapper
+
+
+def _run_to_completion(fn: Any) -> Any:
+    # The opposite lie: an async def collapsed into a synchronous call.
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return asyncio.run(fn(*args, **kwargs))
+
+    return wrapper
+
+
+class Deceptive:
+    @_coroutine_returning
+    def secretly_async(self, amount: int) -> dict[str, Any]:
+        return {"id": f"ch_{amount}"}
+
+    @_run_to_completion
+    async def secretly_sync(self, amount: int) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"id": f"ch_{amount}"}
+
+    @wrapt.mark_as_async
+    @_coroutine_returning
+    def marked_async(self, amount: int) -> dict[str, Any]:
+        return {"id": f"ch_{amount}"}
+
+    @wrapt.mark_as_sync
+    @_run_to_completion
+    async def marked_sync(self, amount: int) -> dict[str, Any]:
+        await asyncio.sleep(0)
+        return {"id": f"ch_{amount}"}
+
+
+class Adapted:
+    @wrapt.async_to_sync
+    async def collapsed(self, amount: int) -> int:
+        await asyncio.sleep(0)
+        return amount * 2
+
+    @wrapt.sync_to_async
+    def promoted(self, amount: int) -> int:
+        return amount * 3
+
+
+def test_a_sync_looking_call_returning_a_coroutine_records_the_awaited_result() -> None:
+    # Introspection reports a plain function: the lie the markers exist
+    # to correct. Recording never consults it.
+
+    assert not inspect.iscoroutinefunction(vars(Deceptive)["secretly_async"])
+
+    secretly_async = binding(Deceptive, "secretly_async")
+
+    with timeline(secretly_async) as tape:
+        result = asyncio.run(Deceptive().secretly_async(5))
+
+    (event,) = tape.all
+    assert result == {"id": "ch_5"}
+    assert event.result is result
+
+
+def test_an_async_def_collapsed_to_sync_records_the_plain_value() -> None:
+    secretly_sync = binding(Deceptive, "secretly_sync")
+
+    with timeline(secretly_sync) as tape:
+        result = Deceptive().secretly_sync(5)
+
+    (event,) = tape.all
+    assert result == {"id": "ch_5"}
+    assert event.result is result
+    assert not inspect.iscoroutine(event.result)
+
+
+def test_mark_as_sync_does_not_disturb_recording() -> None:
+    # The marker fixes what introspection reports without changing what
+    # calls return, so recording is identical with or without it.
+
+    assert not inspect.iscoroutinefunction(vars(Deceptive)["marked_sync"])
+
+    marked_sync = binding(Deceptive, "marked_sync")
+
+    with timeline(marked_sync) as tape:
+        direct = Deceptive().marked_sync(7)
+
+    (event,) = tape.all
+    assert event.result is direct
+    assert direct == {"id": "ch_7"}
+
+
+def test_mark_as_async_preserves_the_single_await_contract() -> None:
+    # The marker fixes what introspection reports while one await still
+    # produces the value.
+
+    assert inspect.iscoroutinefunction(vars(Deceptive)["marked_async"])
+
+    marked_async = binding(Deceptive, "marked_async")
+
+    with timeline(marked_async) as tape:
+        awaited = asyncio.run(Deceptive().marked_async(5))
+
+    assert awaited == {"id": "ch_5"}
+    assert tape.all[0].result == {"id": "ch_5"}
+
+
+def test_wrapt_adapters_record_the_convention_they_present() -> None:
+    collapsed = binding(Adapted, "collapsed")
+    promoted = binding(Adapted, "promoted")
+
+    # The adapters change the runtime convention while their type hints
+    # keep the original signatures, hence the ignores.
+
+    with timeline(collapsed, promoted) as tape:
+        assert Adapted().collapsed(2) == 4  # type: ignore[comparison-overlap]
+        assert asyncio.run(Adapted().promoted(5)) == 15  # type: ignore[arg-type]
+
+    first, second = tape.all
+    assert first.result == 4
+    assert second.result == 15

@@ -73,6 +73,24 @@ patching (a trailing `?` on a string target, registering a post-import
 hook that returns no handle) is rejected with `DeferredTargetError`.
 Import the module first and bind against it.
 
+## Iteration recording covers generators only
+
+When a recorded call returns a generator or async generator, the event
+tracks the iteration: item count, wall and body durations, the return
+value at exhaustion, and a visibly unfinished event on abandonment, as
+described on the unit testing page. That treatment keys on the returned
+object actually being a generator. A call that returns any other kind
+of iterator (`map()` and `filter()` objects, `itertools` results, a
+custom class implementing `__next__`, or an already materialised list)
+records that object as an ordinary by-reference result, with no item
+count and no iteration lifecycle.
+
+This is deliberate: only generators have the suspended-body semantics
+the one-event-per-iteration model is built on, and wrapping arbitrary
+iterators would substitute objects flowing through the program far more
+broadly. For item-level visibility on other iterators, wrap them
+explicitly with `iterator()` or record what matters with `annotate()`.
+
 ## Builtin and extension types cannot be patched
 
 Attributes of types implemented in C (`list`, `dict`, `str`, and

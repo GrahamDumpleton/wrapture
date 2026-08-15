@@ -65,6 +65,15 @@ class Event:
     started: float | None = None
     duration: float | None = None
 
+    # Iteration, for a call that produced a generator: how many items it
+    # has yielded so far, and the accumulated time its body ran across
+    # resumptions. duration is then wall time from creation to close,
+    # which includes all the consumer's time between yields, so the two
+    # answer different questions.
+
+    items: int | None = None
+    body_duration: float | None = None
+
     # Outcome. For a call this is the return value or the exception it
     # raised; for a get it is the value read, so the same accessors and
     # filters work across calls and reads.

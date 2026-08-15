@@ -9,11 +9,13 @@ call until the binding is removed, suspended or reconfigured.
 from __future__ import annotations
 
 import inspect
+import time
 import types
+from collections.abc import AsyncGenerator, Generator
 from typing import Any, Self, TypeVar
 
 import wrapt
-from wrapt import is_wrapped_by, unwrap_object
+from wrapt import MISSING, is_wrapped_by, unwrap_object
 
 from .attributes import install as install_attribute
 from .behaviours import (
@@ -174,6 +176,149 @@ async def _record_awaited(
 
     _capture_result(event, result, policy)
     return result
+
+
+def _close_iteration(
+    event: Event,
+    started: float,
+    body: float,
+    items: int,
+    policy: CapturePolicy,
+    result: Any = MISSING,
+    exception: BaseException | None = None,
+) -> None:
+    # Close a generator's event: durations and the final item count
+    # always, then the outcome. An abandoned generator supplies neither
+    # a result nor an exception, so its event closes with no outcome and
+    # stays visibly unfinished on the tape.
+
+    event.duration = time.perf_counter() - started
+    event.body_duration = body
+    event.items = items
+
+    if exception is not None:
+        event.exception = exception
+    elif result is not MISSING:
+        _capture_result(event, result, policy)
+
+
+def _record_generator(
+    generator: Generator[Any, Any, Any],
+    event: Event,
+    stack: tuple[Event, ...],
+    policy: CapturePolicy,
+) -> Generator[Any, Any, Any]:
+    """A generator around a generator, recording as it runs.
+
+    One event, already on the tape, covers the whole iteration. The
+    in-progress stack is re-established around each resumption only, so
+    calls made inside the body nest under the event while the consumer's
+    own work between yields does not. Preserves the full generator
+    protocol: send() and throw() are forwarded, close() closes the
+    wrapped generator, and the return value is returned.
+    """
+
+    started = time.perf_counter()
+    body = 0.0
+    items = 0
+    event.items = 0
+
+    operation: tuple[str, Any] = ("send", None)
+
+    while True:
+        # Drive the wrapped generator with whatever the consumer last
+        # did, timing the resumption: the body only runs inside send()
+        # and throw().
+
+        token = _stack.set(stack + (event,))
+        resumed = time.perf_counter()
+
+        try:
+            if operation[0] == "send":
+                item = generator.send(operation[1])
+            else:
+                item = generator.throw(operation[1])
+        except StopIteration as stop:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+            _close_iteration(event, started, body, items, policy, result=stop.value)
+            return stop.value
+        except BaseException as exc:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+            _close_iteration(event, started, body, items, policy, exception=exc)
+            raise
+        else:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+
+        items += 1
+        event.items = items
+
+        try:
+            operation = ("send", (yield item))
+        except GeneratorExit:
+            generator.close()
+            _close_iteration(event, started, body, items, policy)
+            raise
+        except BaseException as exc:
+            operation = ("throw", exc)
+
+
+async def _record_async_generator(
+    generator: AsyncGenerator[Any, Any],
+    event: Event,
+    stack: tuple[Event, ...],
+    policy: CapturePolicy,
+) -> AsyncGenerator[Any, Any]:
+    """The async twin of _record_generator, for async generators.
+
+    Async generators have no return value, so exhaustion records a
+    result of None, which is what keeps a finished iteration
+    distinguishable from an abandoned one.
+    """
+
+    started = time.perf_counter()
+    body = 0.0
+    items = 0
+    event.items = 0
+
+    operation: tuple[str, Any] = ("send", None)
+
+    while True:
+        token = _stack.set(stack + (event,))
+        resumed = time.perf_counter()
+
+        try:
+            if operation[0] == "send":
+                item = await generator.asend(operation[1])
+            else:
+                item = await generator.athrow(operation[1])
+        except StopAsyncIteration:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+            _close_iteration(event, started, body, items, policy, result=None)
+            return
+        except BaseException as exc:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+            _close_iteration(event, started, body, items, policy, exception=exc)
+            raise
+        else:
+            body += time.perf_counter() - resumed
+            _stack.reset(token)
+
+        items += 1
+        event.items = items
+
+        try:
+            operation = ("send", (yield item))
+        except GeneratorExit:
+            await generator.aclose()
+            _close_iteration(event, started, body, items, policy)
+            raise
+        except BaseException as exc:
+            operation = ("throw", exc)
 
 
 class Binding:
@@ -614,16 +759,22 @@ class Binding:
             finally:
                 _pop(token)
 
-            # Calling an `async def` does not run it: it returns a
-            # coroutine immediately, and the body only executes when
-            # something awaits it. So the scope above covered
-            # construction only, and the outcome must be recorded around
-            # the await instead. Tested on the result, not the target: a
-            # plain def can return an awaitable too.
+            # A generator or coroutine outcome has not run yet: calling
+            # the target only constructed it, and the body executes when
+            # the consumer iterates or awaits. So the scope above
+            # covered construction only, and the outcome is recorded
+            # around the iteration or await instead. All tested on the
+            # result, not the target: a plain def can return either.
 
             result_policy = bnd._capture_result
             if result_policy is None:
                 result_policy = getattr(tape, "capture_result", REFERENCE)
+
+            if inspect.isgenerator(outcome):
+                return _record_generator(outcome, event, base, result_policy)
+
+            if inspect.isasyncgen(outcome):
+                return _record_async_generator(outcome, event, base, result_policy)
 
             if inspect.isawaitable(outcome):
                 return _record_awaited(outcome, event, base, result_policy)
