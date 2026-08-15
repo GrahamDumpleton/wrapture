@@ -12,18 +12,26 @@ definition, so wrapt's unwrap_object() can traverse and splice the
 wrapper chain, and two attribute bindings on one name compose rather
 than clobber. The read precedence and the write and delete delegation
 mirror wrapt's own AttributeWrapper, which only hooks reads.
+
+Inside a timeline, each operation additionally records an event of kind
+"get", "set" or "delete" onto the ambient tape, mirroring the callable
+mode's recording path.
 """
 
 from __future__ import annotations
 
 import inspect
 import sys
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import wrapt
 from wrapt import MISSING, BaseObjectProxy, apply_patch
 
+from .capture import REFERENCE, _capture_value, _level_of
+from .events import Event, EventKind
 from .exceptions import NotImplementedYetError
+from .timeline import _capture_result, _in_recorder, _pop, _push, _tape
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -89,6 +97,83 @@ def _delete(prior: Any, attribute: str, instance: Any) -> None:
         ) from None
 
 
+def _record(
+    binding: Binding,
+    kind: EventKind,
+    instance: Any,
+    attribute: str,
+    operate: Callable[[], Any],
+    value: Any = MISSING,
+) -> Any:
+    """Run one attribute operation, recording it onto the ambient tape.
+
+    Mirrors the callable-mode recording path: no ambient tape (or the
+    recorder's own reentrancy guard) means the operation just runs, and
+    otherwise an event is recorded around it, with the operation pushed
+    on the in-progress stack so anything it triggers nests under it.
+    """
+
+    tape = _tape.get()
+    if tape is None or _in_recorder.get():
+        return operate()
+
+    # The written value and the prior value are inbound data, so they
+    # capture on the arguments axis, under the attribute's name so a
+    # by-name policy such as redact() applies to writes too.
+
+    policy = binding._capture_args
+    if policy is None:
+        policy = getattr(tape, "capture_args", REFERENCE)
+
+    guard = _in_recorder.set(True)
+    try:
+        event = Event(
+            kind,
+            binding._path,
+            label=binding._label,
+            instance=instance,
+            binding=binding,
+            capture=_level_of(policy),
+            injected=binding._injects.get(kind, False),
+        )
+
+        if value is not MISSING:
+            event.value = _capture_value(policy, attribute, value)
+
+        # The prior value, when cheaply available: only what already
+        # sits in the instance dictionary. A prior held by a descriptor
+        # would take running user code to read, so it is not recorded.
+
+        if kind in ("set", "delete"):
+            previous = getattr(instance, "__dict__", {}).get(attribute, MISSING)
+            if previous is not MISSING:
+                event.previous = _capture_value(policy, attribute, previous)
+
+        tape.record(event)
+    finally:
+        _in_recorder.reset(guard)
+
+    token = _push(event)
+    try:
+        outcome = operate()
+    except BaseException as exc:
+        event.exception = exc
+        raise
+    finally:
+        _pop(token)
+
+    # The value a read produced is its outcome, so it captures on the
+    # result axis, exactly as a call's return value does.
+
+    if kind == "get":
+        result_policy = binding._capture_result
+        if result_policy is None:
+            result_policy = getattr(tape, "capture_result", REFERENCE)
+        _capture_result(event, outcome, result_policy)
+
+    return outcome
+
+
 class AttributeDescriptor(BaseObjectProxy[Any]):
     """The data descriptor an attribute binding installs on the class.
 
@@ -121,13 +206,15 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
 
         behaviour = binding._behaviour("get")
 
-        if behaviour is None:
-            return _read(prior, attribute, instance, owner)
-
         def read() -> Any:
             return _read(prior, attribute, instance, owner)
 
-        return behaviour(read, instance, (), {})
+        def operate() -> Any:
+            if behaviour is None:
+                return read()
+            return behaviour(read, instance, (), {})
+
+        return _record(binding, "get", instance, attribute, operate)
 
     def __set__(self, instance: Any, value: Any) -> None:
         binding = self._self_wrapture_binding
@@ -141,14 +228,16 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
 
         behaviour = binding._behaviour("set")
 
-        if behaviour is None:
-            _write(prior, attribute, instance, value)
-            return
-
         def write(new_value: Any) -> None:
             _write(prior, attribute, instance, new_value)
 
-        behaviour(write, instance, (value,), {})
+        def operate() -> Any:
+            if behaviour is None:
+                write(value)
+                return None
+            return behaviour(write, instance, (value,), {})
+
+        _record(binding, "set", instance, attribute, operate, value=value)
 
     def __delete__(self, instance: Any) -> None:
         binding = self._self_wrapture_binding
@@ -162,14 +251,16 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
 
         behaviour = binding._behaviour("delete")
 
-        if behaviour is None:
-            _delete(prior, attribute, instance)
-            return
-
         def erase() -> None:
             _delete(prior, attribute, instance)
 
-        behaviour(erase, instance, (), {})
+        def operate() -> Any:
+            if behaviour is None:
+                erase()
+                return None
+            return behaviour(erase, instance, (), {})
+
+        _record(binding, "delete", instance, attribute, operate)
 
 
 def _resolve_parent(target: Any, name: str) -> tuple[Any, str]:

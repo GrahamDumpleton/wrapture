@@ -43,7 +43,15 @@ from .exceptions import (
     NeverAppliedError,
     WrongModeError,
 )
-from .timeline import Tape, _in_recorder, _pop, _push, _stack, _tape
+from .timeline import (
+    Tape,
+    _capture_result,
+    _in_recorder,
+    _pop,
+    _push,
+    _stack,
+    _tape,
+)
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
 
@@ -166,20 +174,6 @@ async def _record_awaited(
 
     _capture_result(event, result, policy)
     return result
-
-
-def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
-    # Result capture runs under the recorder guard: at SUMMARY and above
-    # it calls user code (repr, deepcopy), which must not record.
-
-    if _level_of(policy) <= NONE:
-        return
-
-    guard = _in_recorder.set(True)
-    try:
-        event.result = _capture_value(policy, None, outcome)
-    finally:
-        _in_recorder.reset(guard)
 
 
 class Binding:

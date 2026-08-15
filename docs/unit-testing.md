@@ -202,6 +202,62 @@ made inside its body nest under its event even when other tasks run in
 between. Concurrent asyncio tasks each record their own correctly nested
 subtree onto the shared tape.
 
+### Attribute events
+
+Attribute bindings record onto the same tape, as events of kind `get`,
+`set` and `delete`, read through the same `events` property and narrowed
+with `of_kind()` when a test cares about one kind.
+
+Suppose the code under test stores its outcome in an attribute:
+
+```python
+def publish(model):
+    ...
+    model.status = "published"
+```
+
+A binding on the attribute observes that write happen, so the test can
+assert on it without knowing anything about how `publish()` works
+inside:
+
+```python
+def test_publishing_writes_the_status_once():
+    status = wrapture.binding(Model, "status", missing_ok=True)
+
+    with wrapture.timeline(status):
+        publish(model)
+
+        status.events.of_kind("set").with_value("published").assert_once()
+```
+
+What each kind records:
+
+- A `get` event records the value read in `result`, the same field a
+  call's return value uses. That is why `returning()` works on both:
+  "what came out" is one question, whether it came out of a call or a
+  read.
+- A `set` event records the value the caller wrote in `value`. If
+  `on_set.transforms()` rewrote the value on the way through, `value`
+  still holds the caller's original.
+- A `set` or `delete` event also records the old value in `previous`,
+  but only when that was free to know, meaning the old value sat in the
+  instance dictionary. When the prior definition is a property, reading
+  the old value would mean running its getter behind your back, so
+  `previous` stays unrecorded.
+
+Capture policies apply here too. A written value is captured under the
+attribute's name, so `redact("password")` masks writes to an attribute
+called `password` the same way it masks a parameter called `password`.
+
+Attribute and call events nest together on the tape. If a property's
+getter calls an observed method, the `get` event is the parent and the
+call event is its child, so `tree()` shows which read triggered the
+work. That is exactly the question a lazy-loading bug usually turns on.
+
+One reminder from the known limitations page: only access through an
+instance records. Reading the attribute off the class returns the
+descriptor without firing it, so nothing is recorded.
+
 ### What does not record
 
 Three situations produce no event, each deliberate:

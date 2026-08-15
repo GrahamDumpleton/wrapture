@@ -22,7 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from wrapt import MISSING
 
-from .capture import REFERENCE, CapturePolicy
+from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
 from .events import Event
 
@@ -198,6 +198,20 @@ def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
 
 def _pop(token: contextvars.Token[tuple[Event, ...]]) -> None:
     _stack.reset(token)
+
+
+def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
+    # Result capture runs under the recorder guard: at SUMMARY and above
+    # it calls user code (repr, deepcopy), which must not record.
+
+    if _level_of(policy) <= NONE:
+        return
+
+    guard = _in_recorder.set(True)
+    try:
+        event.result = _capture_value(policy, None, outcome)
+    finally:
+        _in_recorder.reset(guard)
 
 
 def current_event() -> Event | None:
