@@ -31,6 +31,7 @@ from wrapt import MISSING, BaseObjectProxy, apply_patch
 from .capture import REFERENCE, _capture_value, _level_of
 from .events import Event, EventKind
 from .exceptions import NotImplementedYetError
+from .stacks import _capture as _capture_stack
 from .timeline import (
     _capture_result,
     _in_recorder,
@@ -146,6 +147,9 @@ def _record(
             capture=_level_of(policy),
             injected=binding._injects.get(kind, False),
         )
+
+        if binding._stack_depth is not None:
+            event.stack = _capture_stack(binding._stack_depth)
 
         if value is not MISSING:
             event.value = _capture_value(policy, attribute, value)

@@ -409,6 +409,47 @@ recording it is a silent no-op, so observed code can call it
 unconditionally. `current_event()` returns the in-flight event itself,
 or `None` when nothing is recording.
 
+### Stack capture
+
+The tape's parent and child links give the logical path between
+observed points; they say nothing about the unobserved frames in
+between. Stack capture gives the physical route, answering "which line
+of code triggered this", and is priced per binding:
+
+```python
+charge = wrapture.binding(Gateway, "charge", stack=wrapture.caller)
+```
+
+- `stack=None`, the default, captures nothing and costs nothing.
+- `stack=wrapture.caller` captures just the calling frame, adding a few
+  hundred nanoseconds to each recorded event: the sweet spot, since
+  "who touched this?" is usually the whole question. Recording an event
+  already costs single-digit microseconds, so this is a small fraction
+  on top.
+- `stack=5` captures that many frames, walking outward from the caller,
+  with cost growing roughly per frame.
+- `stack=wrapture.full` captures everything, for diagnosis rather than
+  routine use.
+
+The event stores a small integer, `event.stack`, rather than the frames
+themselves. Captured stacks are interned: identical stacks, and stacks
+repeat almost perfectly at a given call site, share one entry in a side
+table, so per-event storage stays tiny however hot the call. Resolve
+the id with `stack_frames()`:
+
+```python
+event = charge.events.first
+for frame in wrapture.stack_frames(event.stack):
+    print(f"{frame.filename}:{frame.lineno} in {frame.function}")
+```
+
+Frames are innermost first, and wrapture's and wrapt's own machinery
+frames are elided, so the first frame is the code that actually made
+the call. Stack capture pairs especially well with attribute events:
+`stack=wrapture.caller` on a lazy-loading property names the exact
+source line that triggered the load, which is normally the hard part
+of diagnosing an accidental query.
+
 ## Filtering and asserting on events
 
 A binding's `events` property is the usual way to read the tape: a

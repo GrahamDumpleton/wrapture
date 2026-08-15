@@ -63,6 +63,12 @@ from .iterators import (
     IteratorProxy,
     iterator,
 )
+from .stacks import (
+    StackFrame,
+    caller,
+    full,
+    stack_frames,
+)
 from .timeline import (
     Tape,
     Timeline,
@@ -96,14 +102,18 @@ __all__ = [
     "NotImplementedYetError",
     "RecordingGapWarning",
     "SetBehaviour",
+    "StackFrame",
     "Tape",
     "Timeline",
     "WrongModeError",
     "annotate",
     "binding",
     "bindings",
+    "caller",
     "current_event",
+    "full",
     "iterator",
     "redact",
+    "stack_frames",
     "timeline",
 ]
