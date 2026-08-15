@@ -28,7 +28,8 @@ module scope is safe; the patch is only installed when you ask for it.
 
 A misspelled attribute name raises `AttributeError` at creation, on the
 line that made the mistake. This check is a side effect of mode detection
-(see [Modes](#modes)), so it has two exceptions. Passing an explicit
+(see [Binding modes](#binding-modes)), so it has two exceptions. Passing
+an explicit
 `mode=` skips detection, and a typo in such a binding only surfaces when
 `apply()` resolves the target. Passing `missing_ok=True` deliberately
 accepts a name that does not resolve, to allow binding a name that
@@ -79,10 +80,10 @@ access, so if a third party replaces the attribute wholesale, or removes
 the patch behind your back, the binding reports it. `repr(charge)` shows one
 of three states: `unapplied`, `active` or `displaced`.
 
-## Behaviour
+## Call behaviour
 
-Behaviour is configured through the `on_call` namespace. Every method
-returns the binding, so configuration chains with `apply()`.
+Behaviour for calls is configured through the `on_call` namespace. Every
+method returns the binding, so configuration chains with `apply()`.
 
 ### Substituting results and failures
 
@@ -210,7 +211,7 @@ arrive while suspended run the original callable and are counted on
 `remove()` clears suspension, so a re-applied binding starts active unless
 `apply(suspended=True)` says otherwise.
 
-## Groups
+## Binding groups
 
 `bindings()` creates several bindings at once, named by keyword, that apply
 and remove as a unit:
@@ -226,7 +227,7 @@ If applying any member fails, the members already applied are removed
 again, so a group never half-applies. `suspend()`, `resume()` and
 `apply(suspended=True)` work across the whole group.
 
-## Modes
+## Binding modes
 
 A binding is either `callable` or `attribute` mode, detected from what is
 found at the target: functions, lambdas, staticmethods and classmethods are
@@ -363,12 +364,14 @@ one wrapper once, where this pattern allocates a wrapper per access.
 Note also that class-level access bypasses it: `Gateway.charge(obj, 1)`
 reaches the raw function, since no instance access occurs.
 
-Two limits. Binding an attribute of a module is refused with
-`NotImplementedYetError`, because module attribute access does not go
-through class descriptors. And the target must resolve to a class: an
-instance target is refused with `TypeError`, since the descriptor is
-installed on the class and would affect every instance, not just the
-one given.
+Two limits worth knowing here. Binding an attribute of a module is
+refused with `NotImplementedYetError`, because module attribute access
+does not go through class descriptors. And the target must resolve to a
+class: an instance target is refused with `TypeError`, since the
+descriptor is installed on the class and would affect every instance,
+not just the one given. See [Known limitations](known-limitations.md)
+for the full list, including that attribute bindings intercept access
+made through instances only.
 
 ## Iterators and generators
 

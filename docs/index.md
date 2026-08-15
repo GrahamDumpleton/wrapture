@@ -51,8 +51,9 @@ method by name and a trace appears.
 ```{toctree}
 :maxdepth: 2
 
-philosophy
+design-philosophy
 monkey-patching
 testing
+known-limitations
 release-notes
 ```

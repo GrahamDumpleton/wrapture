@@ -1,4 +1,4 @@
-# Philosophy
+# Design philosophy
 
 wrapture attaches bindings to call sites in code you do not want to, or
 cannot, modify. One mechanism scales from simple monkey patching, through
