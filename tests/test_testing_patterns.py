@@ -1,4 +1,4 @@
-"""Tests that the scoping patterns documented in docs/testing.md work.
+"""Tests that the scoping patterns documented in docs/unit-testing.md work.
 
 The pytest fixtures and the unittest.TestCase here are the real thing, so
 these tests exercise the documented patterns under the framework itself
@@ -24,7 +24,7 @@ class Gateway:
 
 @pytest.fixture(autouse=True)
 def no_leaked_patch() -> Generator[None, None, None]:
-    # The leak-check recipe from docs/testing.md, applied to every test in
+    # The leak-check recipe from docs/unit-testing.md, applied to every test in
     # this module. Tears down after each test's own fixtures, so it also
     # proves the stub_charge fixture really removed its patch.
 
@@ -95,7 +95,7 @@ def test_shared_declaration_first_use() -> None:
 
 
 def test_shared_declaration_reused_and_behaviour_persists() -> None:
-    # The trap documented in docs/testing.md: behaviour configured by an
+    # The trap documented in docs/unit-testing.md: behaviour configured by an
     # earlier test is still there when a later test applies the same
     # binding, until passes_through() resets it.
 
