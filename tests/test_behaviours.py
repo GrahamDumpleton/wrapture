@@ -302,21 +302,8 @@ def test_argument_and_result_stages_compose_on_an_async_target() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_attribute_behaviours_are_stubbed_loudly() -> None:
+def test_wraps_value_is_stubbed_loudly() -> None:
     attr = binding(Ledger, "rate")
 
-    calls: list[Callable[[], Any]] = [
-        lambda: attr.on_get.returns(1),
-        lambda: attr.on_get.transforms(str),
-        lambda: attr.on_get.wraps_value(),
-        lambda: attr.on_get.validates(None),
-        lambda: attr.on_get.decorates(str),
-        lambda: attr.on_get.raises(ValueError()),
-        lambda: attr.on_get.passes_through(),
-        lambda: attr.on_set.transforms(str),
-        lambda: attr.on_set.rejects(),
-        lambda: attr.on_delete.rejects(),
-    ]
-    for call in calls:
-        with pytest.raises(NotImplementedYetError):
-            call()
+    with pytest.raises(NotImplementedYetError):
+        attr.on_get.wraps_value()

@@ -1,22 +1,22 @@
 """Behaviour namespaces for bindings.
 
-Behaviour is what a binding does to the operation it intercepts: substitute
-a result, raise an exception, transform arguments or results, validate them
-in flight, or wrap the whole call with a decorator.
+Behaviour is what a binding does to the operation it intercepts:
+substitute a result, raise an exception, transform arguments or results,
+validate them in flight, or wrap the whole operation with a decorator.
 
 Behaviour is scoped by operation. A callable binding exposes on_call; an
-attribute binding exposes on_get, on_set and on_delete (not implemented
-yet). Configured behaviour forms a pipeline: composing stages (transforms_*
+attribute binding exposes on_get, on_set and on_delete. Configured
+behaviour forms a pipeline per operation: composing stages (transforms_*
 and validates_*) wrap around what follows and accumulate in the order
-added, while a terminal (returns / raises / decorates) decides what happens
-at the centre and replaces any previous terminal.
+added, while a terminal (returns / raises / decorates / rejects) decides
+what happens at the centre and replaces any previous terminal.
 """
 
 from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -59,7 +59,7 @@ def _compose(
     Each composing stage is called as stage(forward, instance, args, kwargs)
     where forward(*args, **kwargs) invokes the rest of the chain, so a stage
     can alter what goes in, what comes back, or both. The first stage added
-    is outermost. A terminal of None means "call the real thing".
+    is outermost. A terminal of None means "perform the real operation".
     """
 
     def innermost(
@@ -99,15 +99,17 @@ class _Behaviour:
 
     __slots__ = ("_binding",)
 
+    _operation: ClassVar[str]
+
     def __init__(self, bnd: Binding) -> None:
         self._binding = bnd
 
     def _terminal(self, fn: WrapperFunction) -> Binding:
-        self._binding._set_terminal(fn)
+        self._binding._set_terminal(self._operation, fn)
         return self._binding
 
     def _stage(self, fn: StageFunction) -> Binding:
-        self._binding._add_stage(fn)
+        self._binding._add_stage(self._operation, fn)
         return self._binding
 
     def raises(self, exc: BaseException | type[BaseException]) -> Binding:
@@ -127,12 +129,16 @@ class _Behaviour:
         """Drop all configured behaviour for this operation: both the
         terminal and every composing stage."""
 
-        self._binding._clear_behaviour()
+        self._binding._clear_behaviour(self._operation)
         return self._binding
 
 
 class CallBehaviour(_Behaviour):
     """`binding.on_call`: behaviour for calls to a wrapped callable."""
+
+    __slots__ = ()
+
+    _operation = "call"
 
     # -- terminal ---------------------------------------------------------
 
@@ -226,87 +232,190 @@ class CallBehaviour(_Behaviour):
         return self._stage(stage)
 
 
-class _AttributeBehaviour(_Behaviour):
-    """Common base for the attribute-access namespaces.
-
-    NOT IMPLEMENTED. The API shape is recorded here so it can be reviewed;
-    every method raises NotImplementedYetError.
-    """
-
-    __slots__ = ()
-
-    def _todo(self, what: str) -> NoReturn:
-        raise NotImplementedYetError(
-            f"{type(self).__name__}.{what}() is specified but not implemented;"
-            f" attribute mode needs a purpose-built descriptor because wrapt's"
-            f" AttributeWrapper only hooks __get__"
-        )
-
-    def raises(self, exc: BaseException | type[BaseException]) -> Binding:
-        self._todo("raises")
-
-    def passes_through(self) -> Binding:
-        self._todo("passes_through")
-
-    def validates(self, check: Callable[..., Any] | None = None) -> Binding:
-        self._todo("validates")
-
-    def transforms(self, fn: Callable[[Any], Any]) -> Binding:
-        self._todo("transforms")
-
-    def decorates(self, fn: Callable[..., Any]) -> Binding:
-        self._todo("decorates")
-
-
-class GetBehaviour(_AttributeBehaviour):
+class GetBehaviour(_Behaviour):
     """`binding.on_get`: behaviour for attribute reads.
 
-    Shape: no inputs, produces the value.
-
-        returns(v)          reading gives v; the real read never happens
-        transforms(fn)      fn(value) -> value
-        validates(check)    check(value); the read passes through
-        decorates(fn)       fn(read, instance) -> value
-        wraps_value()       return a proxy so observation follows the value
+    The real read is a zero-argument operation producing the value.
     """
 
     __slots__ = ()
+
+    _operation = "get"
 
     def returns(self, value: Any) -> Binding:
-        self._todo("returns")
+        """Reading gives `value`; the real read never happens. Terminal."""
+
+        return self._terminal(lambda nxt, i, a, k: value)
+
+    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
+        """Wrap the real read: fn(read, instance) -> value, where read()
+        performs the read. Terminal."""
+
+        def terminal(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return fn(wrapped, instance)
+
+        return self._terminal(terminal)
+
+    def transforms(self, fn: Callable[[Any], Any]) -> Binding:
+        """fn(value) -> value, rewriting the value read."""
+
+        def stage(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return fn(nxt())
+
+        return self._stage(stage)
+
+    def validates(self, check: Callable[[Any], Any]) -> Binding:
+        """check(value); the read passes through unchanged."""
+
+        def stage(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            value = nxt()
+            check(value)
+            return value
+
+        return self._stage(stage)
 
     def wraps_value(self) -> Binding:
-        self._todo("wraps_value")
+        """Return a proxy of the value read, so observation can follow it.
+        Not implemented yet."""
+
+        raise NotImplementedYetError(
+            "GetBehaviour.wraps_value() is specified but not implemented;"
+            " it needs a value-following proxy"
+        )
 
 
-class SetBehaviour(_AttributeBehaviour):
+class SetBehaviour(_Behaviour):
     """`binding.on_set`: behaviour for attribute writes.
 
-    Shape: takes the value, produces nothing, so there is no returns().
-
-        transforms(fn)      fn(value) -> value actually written
-        validates(check)    check(value); the write passes through
-        rejects()           raise AttributeError instead of writing
-        decorates(fn)       fn(write, instance, value) -> None
+    The real write takes the value and produces nothing, so there is no
+    returns().
     """
 
     __slots__ = ()
 
+    _operation = "set"
+
     def rejects(self) -> Binding:
-        self._todo("rejects")
+        """Raise AttributeError instead of writing. Terminal."""
+
+        binding = self._binding
+
+        def terminal(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> NoReturn:
+            raise AttributeError(f"can't set attribute {binding._name!r}")
+
+        return self._terminal(terminal)
+
+    def decorates(self, fn: Callable[[Callable[[Any], Any], Any, Any], Any]) -> Binding:
+        """Wrap the real write: fn(write, instance, value), where
+        write(value) performs the write. Terminal."""
+
+        def terminal(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return fn(wrapped, instance, args[0])
+
+        return self._terminal(terminal)
+
+    def transforms(self, fn: Callable[[Any], Any]) -> Binding:
+        """fn(value) -> value, rewriting the value actually written."""
+
+        def stage(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return nxt(fn(args[0]))
+
+        return self._stage(stage)
+
+    def validates(self, check: Callable[[Any], Any]) -> Binding:
+        """check(value); the write passes through unchanged."""
+
+        def stage(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            check(args[0])
+            return nxt(args[0])
+
+        return self._stage(stage)
 
 
-class DeleteBehaviour(_AttributeBehaviour):
+class DeleteBehaviour(_Behaviour):
     """`binding.on_delete`: behaviour for attribute deletes.
 
-    Shape: no inputs, no output.
-
-        rejects()           raise AttributeError instead of deleting
-        validates(check)    check(instance); the delete passes through
-        decorates(fn)       fn(erase, instance) -> None
+    The real delete takes nothing and produces nothing.
     """
 
     __slots__ = ()
 
+    _operation = "delete"
+
     def rejects(self) -> Binding:
-        self._todo("rejects")
+        """Raise AttributeError instead of deleting. Terminal."""
+
+        binding = self._binding
+
+        def terminal(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> NoReturn:
+            raise AttributeError(f"can't delete attribute {binding._name!r}")
+
+        return self._terminal(terminal)
+
+    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
+        """Wrap the real delete: fn(erase, instance), where erase()
+        performs the delete. Terminal."""
+
+        def terminal(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return fn(wrapped, instance)
+
+        return self._terminal(terminal)
+
+    def validates(self, check: Callable[[Any], Any]) -> Binding:
+        """check(instance); the delete passes through unchanged."""
+
+        def stage(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            check(instance)
+            return nxt()
+
+        return self._stage(stage)

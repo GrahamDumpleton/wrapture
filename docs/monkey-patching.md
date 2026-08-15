@@ -243,14 +243,93 @@ detection:
 wrapture.binding(Model, "author", mode="attribute")
 ```
 
-```{note}
-Attribute mode is not implemented yet. Its API shape is present and every
-operation raises `NotImplementedYetError`, including `apply()` on an
-attribute-mode binding. When it is implemented, verify that a binding
-created with an explicit `mode=` and a misspelled name still fails with
-`AttributeError` at `apply()`, since such bindings skip the creation-time
-check.
+See [Attribute bindings](#attribute-bindings) for what the attribute-mode
+namespaces do. A binding created with an explicit `mode=` and a
+misspelled name fails with `AttributeError` at `apply()`, since such
+bindings skip the creation-time check.
+
+## Attribute bindings
+
+An attribute-mode binding intercepts reads, writes and deletes of an
+attribute by installing a data descriptor on the class, wrapping whatever
+previously occupied the attribute: a plain class default, a property or
+other descriptor, a `__slots__` member, or nothing at all with
+`missing_ok=True`. The prior definition keeps working beneath the
+interception: a property's getter, setter and deleter still run, writes
+land in the instance dictionary when there is no prior setter, and reads
+follow the normal lookup precedence, with an instance value beating a
+plain class default.
+
+Behaviour is configured through three namespaces, one per operation:
+
+```python
+status = wrapture.binding(Model, "status")
+
+status.on_get.returns(value)        # reading gives value; no real read
+status.on_get.transforms(fn)        # fn(value) -> value
+status.on_get.validates(check)      # check(value); read passes unchanged
+status.on_get.decorates(fn)         # fn(read, instance) -> value
+status.on_get.raises(exc)           # raise exc instead of reading
+
+status.on_set.transforms(fn)        # fn(value) -> value actually written
+status.on_set.validates(check)      # check(value); write passes unchanged
+status.on_set.decorates(fn)         # fn(write, instance, value)
+status.on_set.rejects()             # AttributeError instead of writing
+
+status.on_delete.validates(check)   # check(instance); delete passes
+status.on_delete.decorates(fn)      # fn(erase, instance)
+status.on_delete.rejects()          # AttributeError instead of deleting
 ```
+
+Each namespace is an independent pipeline with the same composing and
+terminal rules as `on_call`, and each has its own `passes_through()`. In
+the `decorates()` forms, `read()`, `write(value)` and `erase()` perform
+the real operation, so the function decides whether and how it happens.
+
+```python
+status = wrapture.binding(Model, "status")
+status.on_set.validates(lambda value: check_transition(value))
+status.on_delete.rejects()
+
+with status:
+    ...
+```
+
+The lifecycle is identical to callable bindings: apply and remove or a
+context manager, groups (which can mix both modes), and honest
+active/displaced state. A suspended attribute binding passes reads,
+writes and deletes straight through, counting them on `suspended_calls`.
+Two attribute bindings on the same name compose, and removal restores
+the original definition exactly, including removing the shadowing slot
+when the binding was over an inherited default or a `missing_ok` name.
+
+With `missing_ok=True` the binding covers an attribute that exists only
+on instances, typically assigned in `__init__`; reads raise
+`AttributeError` until a value is written, exactly as without the
+binding, and writes made in `__init__` pass through the binding's set
+behaviour.
+
+An attribute binding and a callable binding can be stacked on the same
+method, in either order, to observe both the access and the call: the
+attribute binding sees the lookup that produces the bound method, the
+callable binding sees the call itself. The attribute binding needs an
+explicit `mode="attribute"`, since detection classifies a method as
+callable:
+
+```python
+access = wrapture.binding(Service, "ping", mode="attribute")
+access.on_get.validates(record_access)
+
+calls = wrapture.binding(Service, "ping")
+calls.on_call.validates_args(record_call)
+```
+
+Two limits. Binding an attribute of a module is refused with
+`NotImplementedYetError`, because module attribute access does not go
+through class descriptors. And the target must resolve to a class: an
+instance target is refused with `TypeError`, since the descriptor is
+installed on the class and would affect every instance, not just the
+one given.
 
 ## Iterators and generators
 

@@ -14,6 +14,7 @@ from typing import Any, Self, TypeVar
 import wrapt
 from wrapt import is_wrapped_by, unwrap_object
 
+from .attributes import install as install_attribute
 from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
@@ -28,7 +29,6 @@ from .behaviours import (
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
-    NotImplementedYetError,
     WrongModeError,
 )
 
@@ -135,13 +135,15 @@ class Binding:
         self._target = target
         self._name = name
         self._label = label or self._default_label(target, name)
+        self._missing_ok = missing_ok
 
-        # The behaviour pipeline: composing stages around one terminal,
-        # with the composed form cached until either changes.
+        # The behaviour pipelines, keyed by operation ("call", "get",
+        # "set" or "delete"): composing stages around one terminal, with
+        # the composed form cached until either changes.
 
-        self._pipeline: list[StageFunction] = []
-        self._terminal: WrapperFunction | None = None
-        self._composed: WrapperFunction | None = None
+        self._pipelines: dict[str, list[StageFunction]] = {}
+        self._terminals: dict[str, WrapperFunction] = {}
+        self._composed: dict[str, WrapperFunction] = {}
 
         # Lifecycle state, populated by apply() and cleared by remove().
 
@@ -295,13 +297,9 @@ class Binding:
             )
 
         if self._mode == "attribute":
-            raise NotImplementedYetError(
-                f"{self._label}: attribute mode is specified but not"
-                f" implemented. It needs a purpose-built descriptor because"
-                f" wrapt's AttributeWrapper only hooks __get__."
-            )
-
-        self._suspended = suspended
+            self._wrapper = install_attribute(self, self._target, self._name)
+            self._suspended = suspended
+            return self
 
         # `enabled` must be supplied at construction: wrapt's _self_enabled
         # is not writable afterwards. When it returns False wrapt bypasses
@@ -311,6 +309,7 @@ class Binding:
             return wrapt.FunctionWrapper(wrapped, self._make_wrapper(), self._enabled)
 
         self._wrapper = wrapt.wrap_object(self._target, self._name, factory)
+        self._suspended = suspended
         return self
 
     def _enabled(self) -> bool:
@@ -374,39 +373,45 @@ class Binding:
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> Any:
-            behaviour = bnd._behaviour
+            behaviour = bnd._behaviour("call")
             if behaviour is None:
                 return wrapped(*args, **kwargs)
             return behaviour(wrapped, instance, args, kwargs)
 
         return wrapper
 
-    # -- behaviour pipeline ------------------------------------------------
+    # -- behaviour pipelines -------------------------------------------------
 
-    def _set_terminal(self, fn: WrapperFunction) -> None:
-        self._terminal = fn
-        self._composed = None
+    def _set_terminal(self, operation: str, fn: WrapperFunction) -> None:
+        self._terminals[operation] = fn
+        self._composed.pop(operation, None)
 
-    def _add_stage(self, fn: StageFunction) -> None:
-        self._pipeline.append(fn)
-        self._composed = None
+    def _add_stage(self, operation: str, fn: StageFunction) -> None:
+        self._pipelines.setdefault(operation, []).append(fn)
+        self._composed.pop(operation, None)
 
-    def _clear_behaviour(self) -> None:
-        self._pipeline.clear()
-        self._terminal = None
-        self._composed = None
+    def _clear_behaviour(self, operation: str) -> None:
+        self._pipelines.pop(operation, None)
+        self._terminals.pop(operation, None)
+        self._composed.pop(operation, None)
 
-    @property
-    def _behaviour(self) -> WrapperFunction | None:
-        """The composed pipeline, or None when nothing is configured."""
+    def _behaviour(self, operation: str) -> WrapperFunction | None:
+        """The composed pipeline for one operation, or None when nothing
+        is configured for it."""
 
-        if not self._pipeline and self._terminal is None:
+        pipeline = self._pipelines.get(operation)
+        terminal = self._terminals.get(operation)
+
+        if not pipeline and terminal is None:
             return None
 
-        if self._composed is None:
-            self._composed = _compose(self._pipeline, self._terminal)
+        composed = self._composed.get(operation)
 
-        return self._composed
+        if composed is None:
+            composed = _compose(pipeline or (), terminal)
+            self._composed[operation] = composed
+
+        return composed
 
 
 class BindingGroup:

@@ -11,7 +11,6 @@ from wrapture import (
     AlreadyAppliedError,
     Binding,
     DeferredTargetError,
-    NotImplementedYetError,
     WrongModeError,
     binding,
     bindings,
@@ -305,11 +304,6 @@ def test_wrong_mode_error_keeps_hasattr_working() -> None:
     assert issubclass(WrongModeError, AttributeError)
 
 
-def test_attribute_mode_apply_is_stubbed_loudly() -> None:
-    with pytest.raises(NotImplementedYetError):
-        binding(Ledger, "rate").apply()
-
-
 def test_repr_names_the_mode() -> None:
     assert "callable" in repr(binding(Gateway, "charge"))
     assert "attribute" in repr(binding(Ledger, "rate"))
@@ -339,10 +333,18 @@ def test_group_applies_and_removes_as_a_unit() -> None:
 
 
 def test_group_rolls_back_on_partial_failure() -> None:
-    group = bindings(good=(Ledger, "record"), bad=(Ledger, "rate"))
-    with pytest.raises(NotImplementedYetError):
-        group.apply()
-    assert not group["good"].active
+    group = bindings(good=(Ledger, "record"), bad=(Gateway, "charge"))
+
+    # Pre-applying a member makes the group's own apply() of that member
+    # fail partway through, which must roll back the members before it.
+
+    group["bad"].apply()
+    try:
+        with pytest.raises(AlreadyAppliedError):
+            group.apply()
+        assert not group["good"].active
+    finally:
+        group["bad"].remove()
 
 
 def test_group_suspend_and_resume() -> None:
