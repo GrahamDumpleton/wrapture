@@ -27,10 +27,12 @@ from .behaviours import (
     _Behaviour,
     _compose,
 )
+from .eventlogs import EventLog
 from .events import Event, normalized_arguments
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
+    NeverAppliedError,
     WrongModeError,
 )
 from .timeline import _in_recorder, _pop, _push, _stack, _tape
@@ -208,10 +210,13 @@ class Binding:
         self._composed: dict[str, WrapperFunction] = {}
 
         # Lifecycle state, populated by apply() and cleared by remove().
+        # The apply count survives remove(): it distinguishes a binding
+        # that recorded nothing from one that was never applied at all.
 
         self._wrapper: Any = None
         self._suspended = False
         self._suspended_calls = 0
+        self._apply_count = 0
 
     @staticmethod
     def _default_label(target: Any, name: str) -> str:
@@ -372,6 +377,7 @@ class Binding:
         if self._mode == "attribute":
             self._wrapper = install_attribute(self, self._target, self._name)
             self._suspended = suspended
+            self._apply_count += 1
             return self
 
         # `enabled` must be supplied at construction: wrapt's _self_enabled
@@ -383,6 +389,7 @@ class Binding:
 
         self._wrapper = wrapt.wrap_object(self._target, self._name, factory)
         self._suspended = suspended
+        self._apply_count += 1
         return self
 
     def _enabled(self) -> bool:
@@ -415,6 +422,35 @@ class Binding:
         """Calls that reached this binding while it was suspended."""
 
         return self._suspended_calls
+
+    @property
+    def events(self) -> EventLog:
+        """This binding's events from the enclosing timeline, as a
+        filterable EventLog.
+
+        One canonical name across both modes: a callable binding records
+        "call" events, an attribute binding records "get", "set" and
+        "delete"; narrow with .of_kind() where a mode has several.
+
+        Raises rather than returning an empty log when no events could
+        possibly exist, so "recorded nothing" can never be mistaken for
+        "not recording": NeverAppliedError if the binding was never
+        applied, and RuntimeError outside a timeline.
+        """
+
+        if self._apply_count == 0:
+            raise NeverAppliedError(
+                f"{self._label} was never applied; call apply() or use it"
+                f" as a context manager"
+            )
+
+        tape = _tape.get()
+        if tape is None:
+            raise RuntimeError(
+                f"{self._label}: events are only recorded inside a timeline()"
+            )
+
+        return tape.for_binding(self)
 
     def remove(self, *, missing_ok: bool = True) -> Self:
         """Remove the wrapper. Idempotent. The binding can be applied

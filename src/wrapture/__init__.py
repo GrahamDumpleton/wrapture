@@ -32,12 +32,16 @@ from .bindings import (
     binding,
     bindings,
 )
+from .eventlogs import (
+    EventLog,
+)
 from .events import (
     Event,
 )
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
+    NeverAppliedError,
     NotImplementedYetError,
     WrongModeError,
 )
@@ -65,10 +69,12 @@ __all__ = [
     "DeleteBehaviour",
     "ErrorBehaviour",
     "Event",
+    "EventLog",
     "FinishBehaviour",
     "GetBehaviour",
     "ItemBehaviour",
     "IteratorProxy",
+    "NeverAppliedError",
     "NotImplementedYetError",
     "SetBehaviour",
     "Tape",

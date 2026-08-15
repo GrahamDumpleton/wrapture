@@ -14,6 +14,11 @@ class WrongModeError(AttributeError):
     """
 
 
+class NeverAppliedError(RuntimeError):
+    """events was read on a binding that was never applied, so nothing
+    could possibly have been recorded for it."""
+
+
 class NotImplementedYetError(NotImplementedError):
     """A feature whose API shape is settled is not implemented yet."""
 

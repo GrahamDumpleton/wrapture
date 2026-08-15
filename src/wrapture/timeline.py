@@ -20,6 +20,7 @@ import threading
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
+from .eventlogs import EventLog
 from .events import Event
 
 
@@ -67,6 +68,14 @@ class Tape:
 
         with self._lock:
             return list(self._entries)
+
+    def for_binding(self, bnd: Any) -> EventLog:
+        """A filterable view over this tape's events for one binding."""
+
+        with self._lock:
+            events = [event for event in self._entries if event.binding is bnd]
+
+        return EventLog(getattr(bnd, "label", repr(bnd)), events)
 
 
 # The ambient state. The tape variable doubles as the recording switch:
