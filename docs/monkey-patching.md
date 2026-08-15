@@ -214,14 +214,24 @@ arrive while suspended run the original callable and are counted on
 ## Binding groups
 
 `bindings()` creates several bindings at once, named by keyword, that apply
-and remove as a unit:
+and remove as a unit. Like `binding()`, it only declares: the members are
+reachable by attribute or item access for configuring behaviour, and
+nothing is applied until the group is:
 
 ```python
-with wrapture.bindings(charge=(Gateway, "charge"),
-                       ledger=(Ledger, "record")) as group:
-    group.charge.on_call.returns({"id": "stub"})
-    group["ledger"].suspend()
+group = wrapture.bindings(charge=(Gateway, "charge"),
+                          ledger=(Ledger, "record"))
+group.charge.on_call.returns({"id": "stub"})
+group["ledger"].on_call.raises(TimeoutError("down"))
+
+with group:
+    ...
 ```
+
+Configuring behaviour before applying means no call can slip through in
+its real form between the patch landing and the behaviour being set.
+Members can still be reconfigured while the group is applied, as with
+any binding.
 
 If applying any member fails, the members already applied are removed
 again, so a group never half-applies. `suspend()`, `resume()` and

@@ -26,10 +26,12 @@ body raises. Groups scope the same way:
 
 ```python
 def test_gateway_offline():
-    with wrapture.bindings(charge=(Gateway, "charge"),
-                           refund=(Gateway, "refund")) as group:
-        group.charge.on_call.raises(TimeoutError("down"))
-        group.refund.on_call.raises(TimeoutError("down"))
+    group = wrapture.bindings(charge=(Gateway, "charge"),
+                              refund=(Gateway, "refund"))
+    group.charge.on_call.raises(TimeoutError("down"))
+    group.refund.on_call.raises(TimeoutError("down"))
+
+    with group:
         ...
 ```
 
