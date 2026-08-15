@@ -484,6 +484,56 @@ def test_stacked_method_bindings_remove_in_either_order() -> None:
     assert Service().ping() == "pong"
 
 
+def test_on_get_can_decorate_the_bound_method_on_the_fly() -> None:
+    # The pattern documented in docs/monkey-patching.md: minting a wrapt
+    # FunctionWrapper for the bound method at each access, so decoration
+    # is decided per access with the instance in hand.
+
+    import wrapt
+
+    class Gateway:
+        audited = False
+
+        def charge(self, amount: int) -> dict[str, Any]:
+            return {"id": f"ch_{amount}", "amount": amount}
+
+    seen: list[tuple[Any, tuple[Any, ...]]] = []
+
+    def audit(
+        wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        seen.append((instance, args))
+        return wrapped(*args, **kwargs)
+
+    def selective(read: Any, instance: Any) -> Any:
+        bound = read()
+        if instance.audited:
+            return wrapt.FunctionWrapper(bound, audit)
+        return bound
+
+    charge = binding(Gateway, "charge", mode="attribute")
+    charge.on_get.decorates(selective)
+
+    with charge:
+        flagged, unflagged = Gateway(), Gateway()
+        flagged.audited = True
+
+        assert flagged.charge(1) == {"id": "ch_1", "amount": 1}
+        assert unflagged.charge(2) == {"id": "ch_2", "amount": 2}
+
+        # wrapt extracts __self__ from the bound method, so the wrapper
+        # saw the right instance, and only for the flagged one.
+        assert seen == [(flagged, (1,))]
+
+        # a stored bound method stays decorated when called later
+        callback = flagged.charge
+        callback(3)
+        assert seen[-1] == (flagged, (3,))
+
+    assert flagged.charge(4) == {"id": "ch_4", "amount": 4}  # restored
+    assert len(seen) == 2
+
+
 # ---------------------------------------------------------------------------
 # unsupported targets
 # ---------------------------------------------------------------------------

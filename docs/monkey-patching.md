@@ -324,6 +324,45 @@ calls = wrapture.binding(Service, "ping")
 calls.on_call.validates_args(record_call)
 ```
 
+### Decorating a method on the fly
+
+Because `on_get` runs with the instance in hand, an attribute binding on
+a method can mint a wrapper for the bound method at each access, using
+wrapt directly. That makes the decoration decision per access rather
+than per definition:
+
+```python
+import wrapt
+
+def audit(wrapped, instance, args, kwargs):
+    record(instance, args)
+    return wrapped(*args, **kwargs)
+
+charge = wrapture.binding(Gateway, "charge", mode="attribute")
+
+def selective(read, instance):
+    bound = read()
+    if instance.audited:
+        return wrapt.FunctionWrapper(bound, audit)
+    return bound
+
+charge.on_get.decorates(selective)
+```
+
+Only instances flagged `audited` get the wrapper; everything else
+receives the bare bound method. The `instance` argument inside `audit`
+is correct without further work: `read()` returns a bound method, and
+`wrapt.FunctionWrapper` recognises one, extracting `__self__` as the
+instance when called. Method semantics survive the wrapper: equality
+between accesses, signature introspection, `__name__` and `__self__`
+all behave, and a bound method stored as a callback and called later
+stays decorated.
+
+Prefer a callable-mode binding for unconditional decoration: it installs
+one wrapper once, where this pattern allocates a wrapper per access.
+Note also that class-level access bypasses it: `Gateway.charge(obj, 1)`
+reaches the raw function, since no instance access occurs.
+
 Two limits. Binding an attribute of a module is refused with
 `NotImplementedYetError`, because module attribute access does not go
 through class descriptors. And the target must resolve to a class: an
