@@ -73,6 +73,51 @@ patching (a trailing `?` on a string target, registering a post-import
 hook that returns no handle) is rejected with `DeferredTargetError`.
 Import the module first and bind against it.
 
+## Calls on other threads may not be recorded
+
+The ambient recording state (which tape is active, what call is in
+progress) lives in context variables, which is what makes concurrent
+asyncio tasks record correctly isolated trees. Threads are the other
+side of that coin: a thread that does not carry the caller's context
+sees no ambient tape, so its calls run normally, with behaviour still
+applied, but record nothing.
+
+Whether a plain `threading.Thread` carries context depends on the
+Python build. From Python 3.14, `Thread` accepts a `context=` argument
+and inherits a copy of the caller's context by default where
+`sys.flags.thread_inherit_context` is set, which is the free-threaded
+default; on GIL builds, and everywhere on 3.12 and 3.13, threads start
+with an empty context and do not record.
+
+What wrapture guarantees is that the gap is loud rather than silent:
+an observed operation that runs with no context while a timeline is
+active elsewhere raises `RecordingGapWarning` (once per binding per
+apply) and is counted on `Binding.missed_calls`, so a shorter tape than
+expected can be explained. To record thread work deliberately, hand the
+thread a copy of the context taken inside the timeline:
+
+```python
+context = contextvars.copy_context()
+thread = threading.Thread(target=context.run, args=(work,))
+```
+
+or on Python 3.14+ pass `context=` to `Thread` directly. The tape is
+safe to record onto from several threads at once.
+
+Asyncio tasks are unaffected: every task runs in a copy of the context
+it was created under. Copying a context copies variable bindings, not
+the objects they refer to, so every task's binding points at the one
+shared tape and their events all land there, visible to the parent's
+assertions. Only the in-progress nesting state is per-task, which is
+what keeps concurrent tasks' call trees from tangling. The asyncio thread bridges
+split along the same context line as plain threads.
+`asyncio.to_thread()` copies the caller's context per call and records
+normally. `loop.run_in_executor()` propagates nothing per call: a pool
+worker keeps whatever context existed when that worker thread was first
+created, which on inheriting builds makes recording depend on pool
+warm-up timing, and elsewhere means no context at all. Treat executor
+work as unrecorded, and expect the gap warning for it.
+
 ## Iteration recording covers generators only
 
 When a recorded call returns a generator or async generator, the event

@@ -31,7 +31,14 @@ from wrapt import MISSING, BaseObjectProxy, apply_patch
 from .capture import REFERENCE, _capture_value, _level_of
 from .events import Event, EventKind
 from .exceptions import NotImplementedYetError
-from .timeline import _capture_result, _in_recorder, _pop, _push, _tape
+from .timeline import (
+    _capture_result,
+    _in_recorder,
+    _pop,
+    _push,
+    _tape,
+    _timelines_active,
+)
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -115,6 +122,9 @@ def _record(
 
     tape = _tape.get()
     if tape is None or _in_recorder.get():
+        if tape is None and not _in_recorder.get() and _timelines_active():
+            binding._note_missed_call()
+
         return operate()
 
     # The written value and the prior value are inbound data, so they

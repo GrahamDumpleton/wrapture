@@ -23,6 +23,13 @@ class ExpectationNotMetError(AssertionError):
     """
 
 
+class RecordingGapWarning(RuntimeWarning):
+    """An observed operation ran on a thread with no recording context
+    while a timeline was active elsewhere, so it is missing from that
+    timeline's tape. Behaviour still applied; only recording was lost.
+    """
+
+
 class NeverAppliedError(RuntimeError):
     """events was read on a binding that was never applied, so nothing
     could possibly have been recorded for it."""

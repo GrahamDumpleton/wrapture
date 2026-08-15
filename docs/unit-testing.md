@@ -271,6 +271,10 @@ Three situations produce no event, each deliberate:
   which is what keeps an observed callable safe to use anywhere, even
   inside the recorder. Behaviour still applies to such calls: code
   stubbed out stays stubbed out.
+- **Calls on a thread without the caller's context**, on builds where
+  threads do not inherit it. These raise `RecordingGapWarning` and are
+  counted in `missed_calls`, so the gap is loud rather than silent; the
+  known limitations page covers the details and the workaround.
 
 ### Generators and iteration
 

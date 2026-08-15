@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import time
 import types
+import warnings
 from collections.abc import AsyncGenerator, Generator
 from typing import Any, Self, TypeVar
 
@@ -43,6 +44,7 @@ from .exceptions import (
     DeferredTargetError,
     ExpectationNotMetError,
     NeverAppliedError,
+    RecordingGapWarning,
     WrongModeError,
 )
 from .timeline import (
@@ -53,6 +55,7 @@ from .timeline import (
     _push,
     _stack,
     _tape,
+    _timelines_active,
 )
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
@@ -391,6 +394,8 @@ class Binding:
         self._suspended = False
         self._suspended_calls = 0
         self._apply_count = 0
+        self._missed_calls = 0
+        self._gap_warned = False
 
         # Declared expectations, verified by the enclosing timeline at
         # exit. Like behaviour, they persist across apply/remove cycles.
@@ -558,6 +563,10 @@ class Binding:
                 f" not both."
             )
 
+        # A fresh apply may warn about missed thread calls again.
+
+        self._gap_warned = False
+
         if self._mode == "attribute":
             self._wrapper = install_attribute(self, self._target, self._name)
             self._suspended = suspended
@@ -606,6 +615,33 @@ class Binding:
         """Calls that reached this binding while it was suspended."""
 
         return self._suspended_calls
+
+    @property
+    def missed_calls(self) -> int:
+        """Operations that ran with no recording context while a
+        timeline was active elsewhere, typically on a thread, and are
+        therefore missing from that timeline's tape."""
+
+        return self._missed_calls
+
+    def _note_missed_call(self) -> None:
+        # Count every miss, but warn only once per apply cycle: a
+        # worker thread in a loop must not emit thousands of warnings.
+
+        self._missed_calls += 1
+
+        if not self._gap_warned:
+            self._gap_warned = True
+            warnings.warn(
+                f"{self._label}: an observed operation ran on a thread"
+                f" with no recording context while a timeline was active"
+                f" elsewhere, so it was not recorded (behaviour still"
+                f" applied). To record work on this thread, hand it a"
+                f" copied context: contextvars.copy_context().run(...)."
+                f" Misses are counted on Binding.missed_calls.",
+                RecordingGapWarning,
+                stacklevel=2,
+            )
 
     @property
     def events(self) -> EventLog:
@@ -724,9 +760,15 @@ class Binding:
             # Not recording: no timeline is active, or this call was
             # triggered by the recording machinery itself rather than by
             # the code under observation. Behaviour still applies; the
-            # call is just not recorded.
+            # call is just not recorded. A call with no context while a
+            # timeline runs elsewhere is a recording gap, typically a
+            # thread, and is counted and warned about rather than lost
+            # silently.
 
             if tape is None or _in_recorder.get():
+                if tape is None and not _in_recorder.get() and _timelines_active():
+                    bnd._note_missed_call()
+
                 if behaviour is None:
                     return wrapped(*args, **kwargs)
                 return behaviour(wrapped, instance, args, kwargs)

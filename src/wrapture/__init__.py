@@ -52,6 +52,7 @@ from .exceptions import (
     ExpectationNotMetError,
     NeverAppliedError,
     NotImplementedYetError,
+    RecordingGapWarning,
     WrongModeError,
 )
 from .iterators import (
@@ -93,6 +94,7 @@ __all__ = [
     "IteratorProxy",
     "NeverAppliedError",
     "NotImplementedYetError",
+    "RecordingGapWarning",
     "SetBehaviour",
     "Tape",
     "Timeline",

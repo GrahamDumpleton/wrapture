@@ -168,6 +168,34 @@ _stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar(
     "wrapture_stack", default=()
 )
 
+# How many timelines are active process-wide, kept so a wrapper firing
+# with no ambient tape can tell "nothing is recording anywhere" from
+# "a timeline is running but this thread has no context". Threads start
+# with a fresh context, so their calls otherwise vanish from the tape
+# silently; see the known limitations page.
+
+_active_lock = threading.Lock()
+_active_count = 0
+
+
+def _timeline_started() -> None:
+    global _active_count
+
+    with _active_lock:
+        _active_count += 1
+
+
+def _timeline_finished() -> None:
+    global _active_count
+
+    with _active_lock:
+        _active_count -= 1
+
+
+def _timelines_active() -> bool:
+    return _active_count > 0
+
+
 # The reentrancy guard. Set while the recording machinery itself runs, so
 # an observed callable invoked from inside the recorder (rather than from
 # the code under observation) does not record recursively without bound.
@@ -280,9 +308,12 @@ class Timeline:
             self._restore()
             raise
 
+        _timeline_started()
         return self.tape
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        _timeline_finished()
+
         for applied in reversed(self._applied):
             applied.remove()
         self._applied.clear()
