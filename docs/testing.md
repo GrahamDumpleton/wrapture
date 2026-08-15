@@ -43,8 +43,8 @@ import wrapture
 
 @pytest.fixture
 def stub_charge():
-    with wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"}) as bnd:
-        yield bnd
+    with wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"}) as stub:
+        yield stub
 
 def test_order_uses_stub(stub_charge):
     assert place_order("widget")["charge"] == "stub"

@@ -12,7 +12,7 @@ A binding names one attribute of a module, class or instance:
 ```python
 import wrapture
 
-bnd = wrapture.binding(Gateway, "charge")
+charge = wrapture.binding(Gateway, "charge")
 ```
 
 `target` is a module, class, instance, or a string naming a module. `name`
@@ -45,10 +45,10 @@ first and bind against it.
 original:
 
 ```python
-bnd = wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"})
-bnd.apply()
+charge = wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"})
+charge.apply()
 ...
-bnd.remove()
+charge.remove()
 ```
 
 `apply()` also returns the binding, so it can be chained onto creation
@@ -69,14 +69,14 @@ binding raises `AlreadyAppliedError`.
 Three properties report state honestly:
 
 ```python
-bnd.applied     # did we install the wrapper
-bnd.active      # is it still installed on the target (queried, not cached)
-bnd.suspended   # is an applied wrapper currently inert
+charge.applied     # did we install the wrapper
+charge.active      # is it still installed on the target (queried, not cached)
+charge.suspended   # is an applied wrapper currently inert
 ```
 
 `active` resolves the target and inspects the wrapper chain on every
 access, so if a third party replaces the attribute wholesale, or removes
-the patch behind your back, the binding reports it. `repr(bnd)` shows one
+the patch behind your back, the binding reports it. `repr(charge)` shows one
 of three states: `unapplied`, `active` or `displaced`.
 
 ## Behaviour
@@ -87,8 +87,8 @@ returns the binding, so configuration chains with `apply()`.
 ### Substituting results and failures
 
 ```python
-bnd.on_call.returns(value)      # return value; the real callable never runs
-bnd.on_call.raises(exc)         # raise exc; the real callable never runs
+charge.on_call.returns(value)      # return value; the real callable never runs
+charge.on_call.raises(exc)         # raise exc; the real callable never runs
 ```
 
 Both replace the call outright: the wrapped callable is never invoked,
@@ -102,7 +102,7 @@ def charge_then_drop(wrapped, instance, args, kwargs):
     wrapped(*args, **kwargs)
     raise TimeoutError("response lost")
 
-bnd.on_call.decorates(charge_then_drop)
+charge.on_call.decorates(charge_then_drop)
 ```
 
 The return value of `wrapped()` is deliberately ignored here: the caller
@@ -120,7 +120,7 @@ def around(wrapped, instance, args, kwargs):
     kwargs.setdefault("currency", "EUR")
     return wrapped(*args, **kwargs)
 
-bnd.on_call.decorates(around)
+charge.on_call.decorates(around)
 ```
 
 It decides whether and how the real callable is invoked.
@@ -128,10 +128,10 @@ It decides whether and how the real callable is invoked.
 ### Transforming and validating
 
 ```python
-bnd.on_call.transforms_args(fn)      # fn(args, kwargs) -> (args, kwargs)
-bnd.on_call.transforms_result(fn)    # fn(result) -> result
-bnd.on_call.validates_args(check)    # check(*args, **kwargs); call unchanged
-bnd.on_call.validates_result(check)  # check(result); result unchanged
+charge.on_call.transforms_args(fn)      # fn(args, kwargs) -> (args, kwargs)
+charge.on_call.transforms_result(fn)    # fn(result) -> result
+charge.on_call.validates_args(check)    # check(*args, **kwargs); call unchanged
+charge.on_call.validates_result(check)  # check(result); result unchanged
 ```
 
 A validation check that raises fails the call; anything it returns is
@@ -148,17 +148,17 @@ Configured behaviour forms a pipeline rather than a single slot:
   one while composing stages persist.
 
 ```python
-bnd = wrapture.binding(Gateway, "charge")
-bnd.on_call.transforms_args(lambda a, k: ((a[0] * 100,), k))
-bnd.on_call.transforms_result(lambda r: {**r, "sandbox": True})
-bnd.apply()
+charge = wrapture.binding(Gateway, "charge")
+charge.on_call.transforms_args(lambda a, k: ((a[0] * 100,), k))
+charge.on_call.transforms_result(lambda r: {**r, "sandbox": True})
+charge.apply()
 ```
 
 `passes_through()` drops all configured behaviour, both the terminal and
 every composing stage, while leaving the patch installed:
 
 ```python
-bnd.on_call.passes_through()
+charge.on_call.passes_through()
 ```
 
 ### Reconfiguring a live binding
@@ -167,12 +167,12 @@ Behaviour can be set before or after `apply()`, and changed at any time
 while the patch is installed:
 
 ```python
-bnd = wrapture.binding(Gateway, "charge").apply()
-bnd.on_call.returns({"id": "A"})
+charge = wrapture.binding(Gateway, "charge").apply()
+charge.on_call.returns({"id": "A"})
 ...
-bnd.on_call.returns({"id": "B"})
+charge.on_call.returns({"id": "B"})
 ...
-bnd.remove()
+charge.remove()
 ```
 
 ### Async targets
@@ -182,8 +182,8 @@ Result-side stages are await-aware. When the wrapped callable is async,
 to the coroutine object:
 
 ```python
-bnd = wrapture.binding(Service, "fetch")
-bnd.on_call.transforms_result(lambda rows: rows[:10])
+fetch = wrapture.binding(Service, "fetch")
+fetch.on_call.transforms_result(lambda rows: rows[:10])
 ```
 
 ## Suspending and resuming
@@ -192,20 +192,20 @@ bnd.on_call.transforms_result(lambda rows: rows[:10])
 `resume()` reactivates it:
 
 ```python
-bnd = wrapture.binding(Gateway, "charge").apply(suspended=True)
+charge = wrapture.binding(Gateway, "charge").apply(suspended=True)
 ...
-bnd.resume()
+charge.resume()
 ...
-bnd.suspend()
-bnd.on_call.returns({"id": "other"})    # reconfigure with nothing in flight
-bnd.resume()
+charge.suspend()
+charge.on_call.returns({"id": "other"})    # reconfigure with nothing in flight
+charge.resume()
 ```
 
 Unlike `remove()` followed by `apply()`, suspension changes nothing
 structural: the wrapper keeps its position in the wrapper chain, so it is
 safe to toggle while other parties have wrapped the same target. Calls that
 arrive while suspended run the original callable and are counted on
-`bnd.suspended_calls`.
+`charge.suspended_calls`.
 
 `remove()` clears suspension, so a re-applied binding starts active unless
 `apply(suspended=True)` says otherwise.
@@ -258,9 +258,9 @@ The underlying wrapt handle and the patch coordinates are exposed, so
 anything core wrapt can do remains reachable:
 
 ```python
-bnd.wrapper     # the wrapt FunctionWrapper handle, or None while unapplied
-bnd.target
-bnd.name
+charge.wrapper     # the wrapt FunctionWrapper handle, or None while unapplied
+charge.target
+charge.name
 
-wrapt.unwrap_object(bnd.target, bnd.name, bnd.wrapper)   # what remove() does
+wrapt.unwrap_object(charge.target, charge.name, charge.wrapper)   # what remove() does
 ```

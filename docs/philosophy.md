@@ -46,8 +46,9 @@ reversible.
 ## Built on wrapt, not hiding it
 
 wrapture does not reimplement patching; it adds lifecycle and vocabulary
-over wrapt, and it exposes the underlying handle (`bnd.wrapper`,
-`bnd.target`, `bnd.name`) so anything core wrapt can do remains available.
+over wrapt, and every binding exposes the underlying handle through its
+`wrapper`, `target` and `name` attributes, so anything core wrapt can do
+remains available.
 If wrapture's API does not cover a case, you can always drop down a level.
 
 ## wrapture and unittest.mock
