@@ -118,6 +118,67 @@ class EventLog:
             lambda event: event.value is not MISSING and event.value == value,
         )
 
+    # -- assertions: raise on failure, return self so they chain -------------
+
+    def assert_never(self) -> EventLog:
+        """Assert the log holds no events."""
+
+        if self._events:
+            raise AssertionError(self._failure("expected no events"))
+        return self
+
+    def assert_any(self) -> EventLog:
+        """Assert the log holds at least one event."""
+
+        if not self._events:
+            raise AssertionError(self._failure("expected at least 1 event(s)"))
+        return self
+
+    def assert_once(self) -> EventLog:
+        """Assert the log holds exactly one event."""
+
+        return self.assert_times(1)
+
+    def assert_times(self, count: int) -> EventLog:
+        """Assert the log holds exactly `count` events."""
+
+        if len(self._events) != count:
+            raise AssertionError(self._failure(f"expected exactly {count} event(s)"))
+        return self
+
+    def assert_at_least(self, count: int) -> EventLog:
+        """Assert the log holds at least `count` events."""
+
+        if len(self._events) < count:
+            raise AssertionError(self._failure(f"expected at least {count} event(s)"))
+        return self
+
+    def assert_at_most(self, count: int) -> EventLog:
+        """Assert the log holds at most `count` events."""
+
+        if len(self._events) > count:
+            raise AssertionError(self._failure(f"expected at most {count} event(s)"))
+        return self
+
+    def _failure(self, expectation: str) -> str:
+        # The failure message shows this log's events. When the log is
+        # empty because a filter discarded everything, fall back to the
+        # nearest non-empty log in the filter chain, so filtering the
+        # wrong thing is visible rather than mysterious.
+
+        lines = [f"{expectation}, got {len(self._events)}", repr(self)]
+
+        if not self._events:
+            ancestor = self._filtered_from
+            while ancestor is not None and not ancestor._events:
+                ancestor = ancestor._filtered_from
+
+            if ancestor is not None:
+                lines.append("  filtered from:")
+                lines.extend(f"    {line}" for line in repr(ancestor).splitlines())
+
+        return "\n".join(lines)
+
     # -- data ----------------------------------------------------------------
 
     @property

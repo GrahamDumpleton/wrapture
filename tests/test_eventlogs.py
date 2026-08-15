@@ -183,6 +183,125 @@ def test_with_args_on_attribute_events_narrows_to_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# assertions: raise on failure, return self so they chain
+# ---------------------------------------------------------------------------
+
+
+def test_assertions_pass_and_chain() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+        Gateway().charge(500)
+
+        events = charge.events
+
+        assert events.assert_times(2) is events
+        events.assert_any().assert_at_least(1).assert_at_most(2)
+        events.with_args(amount=500).assert_times(2)
+        events.raising().assert_never()
+
+        first = events.with_args(amount=500).assert_any().first
+        assert first.args == (500,)
+
+
+def test_assert_once_and_times_fail_with_the_events_shown() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        with pytest.raises(AssertionError) as failure:
+            charge.events.assert_times(3)
+
+        message = str(failure.value)
+        assert "expected exactly 3 event(s), got 1" in message
+        assert "<EventLog Gateway.charge: 1 event(s)>" in message
+        assert "Gateway.charge(amount=500, currency='USD')" in message
+
+
+def test_assert_never_failure_shows_the_offending_events() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        with pytest.raises(AssertionError) as failure:
+            charge.events.assert_never()
+
+        assert "expected no events, got 1" in str(failure.value)
+
+
+def test_bound_assertions_fail_on_the_boundary() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        with pytest.raises(AssertionError, match="at least 2"):
+            charge.events.assert_at_least(2)
+
+        with pytest.raises(AssertionError, match="at most 0"):
+            charge.events.assert_at_most(0)
+
+        with pytest.raises(AssertionError, match="at least 1"):
+            charge.events.raising().assert_any()
+
+
+def test_an_over_narrowed_log_falls_back_to_what_was_discarded() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        with pytest.raises(AssertionError) as failure:
+            charge.events.with_args(amount=999).assert_once()
+
+        # The empty narrowed log alone would be mysterious; the message
+        # shows the nearest non-empty log in the filter chain, so the
+        # discarded event is visible.
+
+        message = str(failure.value)
+        assert "expected exactly 1 event(s), got 0" in message
+        assert "<EventLog Gateway.charge[amount=999]: 0 event(s)>" in message
+        assert "(no events)" in message
+        assert "filtered from:" in message
+        assert "Gateway.charge(amount=500, currency='USD')" in message
+
+
+def test_fallback_walks_past_empty_intermediate_logs() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        with pytest.raises(AssertionError) as failure:
+            charge.events.with_args(amount=999).raising().assert_once()
+
+        message = str(failure.value)
+        assert "filtered from:" in message
+        assert "<EventLog Gateway.charge: 1 event(s)>" in message
+
+
+def test_no_fallback_when_nothing_was_ever_recorded() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        with pytest.raises(AssertionError) as failure:
+            charge.events.raising().assert_any()
+
+        assert "filtered from:" not in str(failure.value)
+
+
+def test_a_mistyped_assertion_is_an_attribute_error() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        with pytest.raises(AttributeError):
+            charge.events.assert_calld_once()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # data access
 # ---------------------------------------------------------------------------
 

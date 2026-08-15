@@ -8,8 +8,7 @@ test that runs after it.
 
 This page shows the scoping patterns for plain tests, pytest and unittest,
 then the recording layer built on timelines: how to capture what actually
-happened inside a test as events, ready to inspect. The assertion API over
-those events is not implemented yet.
+happened inside a test as events, and how to filter and assert on them.
 
 ## Scoping with a context manager
 
@@ -222,6 +221,91 @@ arguments and results are references, so an object mutated after the call
 shows its mutated state on the tape; and a call that returns a generator
 records the generator object as its result, with iteration not yet
 observed. Both are being addressed in later stages of this layer.
+
+## Filtering and asserting on events
+
+A binding's `events` property is the usual way to read the tape: a
+filterable view over the enclosing timeline's events for that one
+binding. It works inside the `with` block, after the code under test has
+run:
+
+```python
+def test_failed_charge_is_not_recorded_in_the_ledger():
+    charge = wrapture.binding(Gateway, "charge")
+    record = wrapture.binding(Ledger, "record")
+    charge.on_call.raises(TimeoutError("down"))
+
+    with wrapture.timeline(charge, record):
+        with pytest.raises(TimeoutError):
+            place_order("widget")
+
+        charge.events.raising(TimeoutError).assert_once()
+        record.events.assert_never()
+```
+
+Where an empty log would lie, access is a loud error instead: reading
+`events` raises `NeverAppliedError` if the binding was never applied,
+and `RuntimeError` outside a timeline. "Recorded nothing" and "was not
+recording" can therefore never be confused.
+
+### One naming rule
+
+> A method whose name starts with `assert_` raises on failure.
+> Everything else returns data.
+
+The rule holds on every object in the package, so a single line read out
+of context still says whether it can fail a test. A mistyped assertion
+name is an `AttributeError`, never a silent pass.
+
+### Filters narrow, and never raise
+
+Each filter returns a new, narrowed `EventLog`, so filters chain freely:
+
+- `of_kind("call", "get", ...)` narrows by event kind.
+- `matching(predicate)` keeps events the predicate accepts.
+- `raising(TimeoutError)` keeps events that raised one of the given
+  exception types; `raising()` keeps events that raised anything.
+- `with_args(amount=500)` keeps calls whose *normalized* arguments
+  include the given values, so `with_args(currency="USD")` also matches
+  calls that relied on the default.
+- `returning(value)` keeps events whose outcome was the value: a call's
+  return value, or the value an attribute read produced.
+- `with_value(value)` keeps attribute writes of that value.
+
+A filter that does not apply to an event narrows to empty rather than
+raising, so mixed logs stay safe to filter. The risk that creates, a
+silently empty log after filtering the wrong thing, is answered in the
+failure output: it shows the nearest non-empty log in the filter chain,
+so the discarded events are visible:
+
+```
+AssertionError: expected exactly 1 event(s), got 0
+<EventLog Gateway.charge[amount=999]: 0 event(s)>
+    (no events)
+  filtered from:
+    <EventLog Gateway.charge: 1 event(s)>
+        Gateway.charge(amount=500, currency='USD')
+```
+
+### Asserting
+
+The assertions are `assert_never()`, `assert_any()`, `assert_once()`,
+`assert_times(n)`, `assert_at_least(n)` and `assert_at_most(n)`. Each
+raises `AssertionError` with the events in the message, and returns the
+log so a passing assertion can keep chaining:
+
+```python
+event = charge.events.with_args(amount=500).assert_once().first
+assert event.forwarded is None
+```
+
+For those who prefer pytest's bare `assert`, a log is falsey when empty
+and sized like a list, and its repr prints the events:
+
+```python
+assert charge.events.with_args(amount=500)
+assert charge.events.count == 2
+```
 
 ## Verifying nothing leaked
 
