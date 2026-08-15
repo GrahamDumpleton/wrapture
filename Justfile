@@ -42,9 +42,18 @@ format:
 typecheck:
     uv run mypy
 
+# Build the documentation into docs/_build/html.
+docs:
+    uv run --extra docs sphinx-build -W docs docs/_build/html
+
+# Build the documentation if out of date, then open it in the browser.
+docs-open: docs
+    open docs/_build/html/index.html
+
 # Remove temporary files: caches, virtual environments and build artifacts.
 clean:
     rm -rf .venv .venv-*
     rm -rf build dist src/*.egg-info *.egg-info
     rm -rf .pytest_cache .mypy_cache .ruff_cache
+    rm -rf docs/_build
     find . -type d -name __pycache__ -not -path "./scratch/*" -exec rm -rf {} +

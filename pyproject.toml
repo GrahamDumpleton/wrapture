@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=62.0", "wheel"]
+# wrapt is needed at build time because reading the dynamic version imports
+# the package, and the package imports wrapt at the top level.
+requires = ["setuptools>=62.0", "wheel", "wrapt>=2.4.0rc2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,6 +39,11 @@ dev = [
     "ruff",
     "setuptools",
 ]
+docs = [
+    "myst-parser",
+    "sphinx",
+    "sphinx-rtd-theme",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -73,6 +80,8 @@ line-length = 88
 target-version = "py312"
 
 [tool.ruff.lint]
+# Version information is defined before the imports in __init__.py.
+per-file-ignores = {"src/wrapture/__init__.py" = ["E402"]}
 select = [
     "E",      # pycodestyle errors
     "W",      # pycodestyle warnings

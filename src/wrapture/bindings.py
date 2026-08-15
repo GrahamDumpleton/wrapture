@@ -1,0 +1,541 @@
+"""Bindings: the association of a target attribute with a wrapper.
+
+A binding is created with binding() and names one attribute of a module,
+class or instance. Applying it installs a wrapt wrapper on the target;
+behaviour configured through the binding's namespaces then applies to every
+call until the binding is removed, suspended or reconfigured.
+"""
+
+from __future__ import annotations
+
+import inspect
+from typing import Any, Self, TypeVar
+
+import wrapt
+from wrapt import is_wrapped_by, unwrap_object
+
+from .behaviours import (
+    CallBehaviour,
+    DeleteBehaviour,
+    GetBehaviour,
+    SetBehaviour,
+    StageFunction,
+    WrappedFunction,
+    WrapperFunction,
+    _Behaviour,
+    _compose,
+)
+from .exceptions import (
+    AlreadyAppliedError,
+    DeferredTargetError,
+    NotImplementedYetError,
+    WrongModeError,
+)
+
+_BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
+
+
+def _reject_deferred(target: Any) -> None:
+    """Reject wrapt's `?` deferred-patching syntax.
+
+    Only a trailing `?` on a string target is rejected; that is the only
+    position where wrapt gives it meaning. A `?` in `name` is an ordinary
+    character that fails to resolve like any other typo.
+    """
+
+    if isinstance(target, str) and target.endswith("?"):
+        raise DeferredTargetError(
+            f"deferred patching is not supported: target {target!r} uses"
+            f" wrapt's trailing `?` syntax. A deferred wrap registers a"
+            f" post-import hook and returns no handle, so a binding would"
+            f" have nothing to remove, suspend or query. Import the module"
+            f" first and bind against it."
+        )
+
+
+def _detect_mode(target: Any, name: str, missing_ok: bool = False) -> str:
+    """Decide whether this binding wraps a call or an attribute access.
+
+    Classified from whatever `resolve_path` finds at the target:
+
+        function / lambda / staticmethod / classmethod  -> "callable"
+        property / member_descriptor / plain data       -> "attribute"
+        other callable stored as data                   -> "callable"
+        absent from the class                           -> error unless
+                                                           missing_ok=True
+
+    A callable stored as data is ambiguous; override with mode= if the
+    guess is wrong. An absent attribute raises rather than being inferred,
+    because it is indistinguishable from a typo.
+    """
+
+    try:
+        value = wrapt.resolve_path(target, name)[2]
+    except Exception:
+        if missing_ok:
+            return "attribute"
+        raise
+
+    # Classify what was found. The routine checks must come before the
+    # descriptor check: functions are themselves descriptors, so testing
+    # for __get__ first would classify every method as an attribute.
+
+    if isinstance(value, staticmethod | classmethod):
+        return "callable"
+    if inspect.isroutine(value):
+        return "callable"
+
+    if hasattr(type(value), "__get__"):
+        return "attribute"
+
+    if callable(value):
+        return "callable"
+
+    return "attribute"
+
+
+class Binding:
+    """The association of a target attribute with a wrapper and behaviour.
+
+    Created by binding(); the wrapper is installed by apply() or by
+    entering the binding as a context manager. Mixing the two lifecycle
+    styles is an error.
+
+    Two independent axes:
+
+      apply() / remove()     whether the wrapper is applied to the target
+      suspend() / resume()   whether an applied wrapper does anything
+
+    Behaviour can be configured or reconfigured at any time, before or
+    after apply().
+    """
+
+    def __init__(
+        self,
+        target: Any,
+        name: str,
+        *,
+        label: str | None = None,
+        mode: str | None = None,
+        missing_ok: bool = False,
+    ) -> None:
+        # Validate the target and settle the mode before anything is
+        # stored, so a bad binding fails on the line that created it.
+
+        _reject_deferred(target)
+
+        if mode is None:
+            mode = _detect_mode(target, name, missing_ok=missing_ok)
+        elif mode not in ("callable", "attribute"):
+            raise ValueError(f"mode must be 'callable' or 'attribute', got {mode!r}")
+
+        # What this binding is bound to.
+
+        self._mode = mode
+        self._target = target
+        self._name = name
+        self._label = label or self._default_label(target, name)
+
+        # The behaviour pipeline: composing stages around one terminal,
+        # with the composed form cached until either changes.
+
+        self._pipeline: list[StageFunction] = []
+        self._terminal: WrapperFunction | None = None
+        self._composed: WrapperFunction | None = None
+
+        # Lifecycle state, populated by apply() and cleared by remove().
+
+        self._wrapper: Any = None
+        self._suspended = False
+        self._suspended_calls = 0
+
+    @staticmethod
+    def _default_label(target: Any, name: str) -> str:
+        owner = getattr(target, "__name__", None) or repr(target)
+        return f"{owner}.{name}"
+
+    # -- identity ----------------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        """'callable' or 'attribute'. Detected at creation.
+
+        Names what is bound, not the operation: a 'callable' binding
+        exposes on_call, an 'attribute' binding exposes on_get / on_set /
+        on_delete.
+        """
+
+        return self._mode
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    @property
+    def target(self) -> Any:
+        return self._target
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def wrapper(self) -> Any:
+        """The underlying wrapt handle, or None while unapplied.
+
+        Escape hatch to core wrapt: anything this class does not expose
+        remains reachable through it, e.g.
+        wrapt.unwrap_object(bnd.target, bnd.name, bnd.wrapper).
+        """
+
+        return self._wrapper
+
+    def __repr__(self) -> str:
+        if self._wrapper is None:
+            state = "unapplied"
+        else:
+            state = "active" if self.active else "displaced"
+
+        if self._suspended:
+            state += " suspended"
+
+        return f"<Binding {self._label!r} {self._mode} {state}>"
+
+    # -- behaviour namespaces ----------------------------------------------
+
+    def _namespace(
+        self, name: str, wanted: str, factory: type[_BehaviourT]
+    ) -> _BehaviourT:
+        if self._mode != wanted:
+            other = "on_get, on_set or on_delete" if wanted == "callable" else "on_call"
+            article = "an" if self._mode == "attribute" else "a"
+            raise WrongModeError(
+                f"{name} is not available: {self._label} is {article}"
+                f" {self._mode!r} binding; use {other}"
+            )
+
+        return factory(self)
+
+    @property
+    def on_call(self) -> CallBehaviour:
+        """The behaviour namespace for calls. Callable mode only."""
+
+        return self._namespace("on_call", "callable", CallBehaviour)
+
+    @property
+    def on_get(self) -> GetBehaviour:
+        """The behaviour namespace for attribute reads. Attribute mode only."""
+
+        return self._namespace("on_get", "attribute", GetBehaviour)
+
+    @property
+    def on_set(self) -> SetBehaviour:
+        """The behaviour namespace for attribute writes. Attribute mode only."""
+
+        return self._namespace("on_set", "attribute", SetBehaviour)
+
+    @property
+    def on_delete(self) -> DeleteBehaviour:
+        """The behaviour namespace for attribute deletes. Attribute mode only."""
+
+        return self._namespace("on_delete", "attribute", DeleteBehaviour)
+
+    # -- lifecycle ---------------------------------------------------------
+
+    @property
+    def applied(self) -> bool:
+        """Whether apply() installed a wrapper that has not been removed."""
+
+        return self._wrapper is not None
+
+    @property
+    def suspended(self) -> bool:
+        """Whether an applied wrapper is currently inert.
+
+        Orthogonal to `active`: a suspended binding is still applied, so it
+        reports active=True, suspended=True.
+        """
+
+        return self._suspended
+
+    @property
+    def active(self) -> bool:
+        """Whether the wrapper is still installed on the target.
+
+        Queried, not cached, so removal or replacement behind this
+        object's back is reported honestly. Three states: unapplied /
+        active / displaced.
+        """
+
+        if self._wrapper is None:
+            return False
+
+        # Resolve what is at the target right now; if the path no longer
+        # resolves at all, the wrapper is certainly not installed.
+
+        try:
+            current = wrapt.resolve_path(self._target, self._name)[2]
+        except Exception:
+            return False
+
+        return bool(is_wrapped_by(current, self._wrapper))
+
+    def apply(self, *, suspended: bool = False) -> Self:
+        """Apply the wrapper to the target. Returns self, so it chains.
+
+        With suspended=True the wrapper is installed but inert until
+        resume() is called.
+        """
+
+        if self._wrapper is not None:
+            raise AlreadyAppliedError(
+                f"{self._label} is already applied. Use either"
+                f" `with binding(...)` or apply()/remove() explicitly,"
+                f" not both."
+            )
+
+        if self._mode == "attribute":
+            raise NotImplementedYetError(
+                f"{self._label}: attribute mode is specified but not"
+                f" implemented. It needs a purpose-built descriptor because"
+                f" wrapt's AttributeWrapper only hooks __get__."
+            )
+
+        self._suspended = suspended
+
+        # `enabled` must be supplied at construction: wrapt's _self_enabled
+        # is not writable afterwards. When it returns False wrapt bypasses
+        # the wrapper entirely.
+
+        def factory(wrapped: WrappedFunction, *args: Any, **kwargs: Any) -> Any:
+            return wrapt.FunctionWrapper(wrapped, self._make_wrapper(), self._enabled)
+
+        self._wrapper = wrapt.wrap_object(self._target, self._name, factory)
+        return self
+
+    def _enabled(self) -> bool:
+        """Read by wrapt on every call; False bypasses the wrapper."""
+
+        if self._suspended:
+            self._suspended_calls += 1
+            return False
+
+        return True
+
+    def suspend(self) -> Self:
+        """Make an applied wrapper inert without removing it.
+
+        The wrapper stays in the chain, so nothing structural changes and
+        reconfiguration is atomic from a caller's point of view.
+        """
+
+        self._suspended = True
+        return self
+
+    def resume(self) -> Self:
+        """Reactivate a suspended wrapper."""
+
+        self._suspended = False
+        return self
+
+    @property
+    def suspended_calls(self) -> int:
+        """Calls that reached this binding while it was suspended."""
+
+        return self._suspended_calls
+
+    def remove(self, *, missing_ok: bool = True) -> Self:
+        """Remove the wrapper. Idempotent. The binding can be applied
+        again afterwards, starting unsuspended."""
+
+        if self._wrapper is None:
+            return self
+
+        unwrap_object(self._target, self._name, self._wrapper, missing_ok=missing_ok)
+
+        self._wrapper = None
+        self._suspended = False
+        return self
+
+    def __enter__(self) -> Self:
+        return self.apply()
+
+    def __exit__(self, *exc: object) -> None:
+        self.remove()
+
+    # -- wrapper -----------------------------------------------------------
+
+    def _make_wrapper(self) -> WrapperFunction:
+        bnd = self
+
+        def wrapper(
+            wrapped: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            behaviour = bnd._behaviour
+            if behaviour is None:
+                return wrapped(*args, **kwargs)
+            return behaviour(wrapped, instance, args, kwargs)
+
+        return wrapper
+
+    # -- behaviour pipeline ------------------------------------------------
+
+    def _set_terminal(self, fn: WrapperFunction) -> None:
+        self._terminal = fn
+        self._composed = None
+
+    def _add_stage(self, fn: StageFunction) -> None:
+        self._pipeline.append(fn)
+        self._composed = None
+
+    def _clear_behaviour(self) -> None:
+        self._pipeline.clear()
+        self._terminal = None
+        self._composed = None
+
+    @property
+    def _behaviour(self) -> WrapperFunction | None:
+        """The composed pipeline, or None when nothing is configured."""
+
+        if not self._pipeline and self._terminal is None:
+            return None
+
+        if self._composed is None:
+            self._composed = _compose(self._pipeline, self._terminal)
+
+        return self._composed
+
+
+class BindingGroup:
+    """Several bindings applied and removed as a unit.
+
+    Bindings are reachable by attribute or item access using the names
+    they were given. apply() rolls back on partial failure; remove()
+    removes in reverse order of application.
+    """
+
+    def __init__(self, points: dict[str, tuple[Any, str]]) -> None:
+        self._bindings = {
+            key: Binding(target, name, label=key)
+            for key, (target, name) in points.items()
+        }
+
+    def __getitem__(self, key: str) -> Binding:
+        return self._bindings[key]
+
+    def __iter__(self) -> Any:
+        return iter(self._bindings.values())
+
+    def __len__(self) -> int:
+        return len(self._bindings)
+
+    def __getattr__(self, key: str) -> Binding:
+        try:
+            return self._bindings[key]
+        except KeyError:
+            raise AttributeError(key) from None
+
+    def __repr__(self) -> str:
+        return f"<BindingGroup {list(self._bindings)}>"
+
+    @property
+    def active(self) -> bool:
+        """Whether every binding in the group is applied and active."""
+
+        return all(b.active for b in self._bindings.values())
+
+    @property
+    def suspended(self) -> bool:
+        """Whether every binding in the group is suspended."""
+
+        return all(b.suspended for b in self._bindings.values())
+
+    def apply(self, *, suspended: bool = False) -> Self:
+        """Apply every binding, in declaration order. Returns self.
+
+        If any member fails to apply, the members already applied are
+        removed again, so the group never half-applies.
+        """
+
+        applied: list[Binding] = []
+
+        try:
+            for bnd in self._bindings.values():
+                applied.append(bnd.apply(suspended=suspended))
+        except Exception:
+            for bnd in reversed(applied):
+                bnd.remove()
+            raise
+
+        return self
+
+    def suspend(self) -> Self:
+        """Suspend every binding in the group. Returns self."""
+
+        for bnd in self._bindings.values():
+            bnd.suspend()
+        return self
+
+    def resume(self) -> Self:
+        """Resume every binding in the group. Returns self."""
+
+        for bnd in self._bindings.values():
+            bnd.resume()
+        return self
+
+    def remove(self) -> Self:
+        """Remove every binding, in reverse order of application. Returns
+        self. Idempotent, like Binding.remove()."""
+
+        for bnd in reversed(list(self._bindings.values())):
+            bnd.remove()
+        return self
+
+    def __enter__(self) -> Self:
+        return self.apply()
+
+    def __exit__(self, *exc: object) -> None:
+        self.remove()
+
+
+def binding(
+    target: Any,
+    name: str,
+    *,
+    label: str | None = None,
+    mode: str | None = None,
+    missing_ok: bool = False,
+) -> Binding:
+    """Create a binding for one target attribute.
+
+    `target` is a module, class, instance, or a string naming a module.
+    `name` is a dotted path to the attribute.
+
+    The mode, 'callable' or 'attribute', is detected from whatever is at
+    the target and selects which behaviour namespaces exist. Pass `mode=`
+    to override for the ambiguous case of a callable stored as data.
+
+    `missing_ok=True` permits binding a name that is not on the class,
+    typically one assigned in __init__. Without it such a name raises
+    AttributeError, because it is indistinguishable from a typo.
+
+    Does NOT apply the wrapper; call apply() or use the binding as a
+    context manager.
+    """
+
+    return Binding(target, name, label=label, mode=mode, missing_ok=missing_ok)
+
+
+def bindings(**points: tuple[Any, str]) -> BindingGroup:
+    """Create several bindings at once, named by keyword.
+
+    with bindings(charge=(Gateway, "charge"),
+                  ledger=(Ledger, "record")) as group:
+        ...
+        group.charge.suspend()
+    """
+
+    return BindingGroup(dict(points))

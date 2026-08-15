@@ -42,9 +42,10 @@ One mechanism, four uses, in increasing order of machinery:
    own profiling machinery is active, so you can profile one subsystem of a
    live process instead of everything.
 
-The distinction that matters: OpenTelemetry-style tracing requires the code
-to already emit spans. `cProfile` requires whole-process activation. wrapture
-requires neither: you point at a method by name and a trace appears.
+The distinction that matters: most tracing and profiling tools either need
+the code to have been written with them in mind, or can only be switched on
+for the whole program at once. wrapture needs neither: you point at a method
+by name and a trace appears.
 
 ## Why
 
