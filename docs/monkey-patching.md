@@ -252,6 +252,106 @@ created with an explicit `mode=` and a misspelled name still fails with
 check.
 ```
 
+## Iterators and generators
+
+Behaviour on a binding runs when the target is called. A callable that
+returns a generator or iterator produces its values later, one item at a
+time, as the caller iterates, so `transforms_result` on such a target
+transforms the iterator object itself, not the items it will produce.
+The same applies on the way in: an argument may be a generator whose
+items only flow once the callee iterates it. wrapture never wraps items
+automatically; working per item is opted into explicitly.
+
+The opt-in is an iterator proxy factory, created with `iterator()` and
+configured through its `on_item` namespace:
+
+```python
+doubles = wrapture.iterator()
+doubles.on_item.transforms_item(lambda item: 2 * item)
+```
+
+Unlike a binding, the factory has no target. It is applied by calling
+it: each call takes one iterator and returns a new wrapped iterator that
+applies the configured behaviour to every item passing through. One
+factory can wrap any number of iterators.
+
+Because the factory is a callable taking the iterator and returning the
+wrapped iterator, it slots directly into a binding's pipeline on either
+side of the call:
+
+```python
+# items produced by the result
+rows = wrapture.binding(Repo, "rows")
+rows.on_call.transforms_result(doubles)
+
+# items consumed from an argument
+consume = wrapture.binding(Sink, "consume")
+consume.on_call.transforms_args(
+    lambda args, kwargs: ((doubles(args[0]), *args[1:]), kwargs)
+)
+```
+
+Use `decorates()` when wrapping is conditional or applies to both sides:
+
+```python
+def per_item(wrapped, instance, args, kwargs):
+    result = wrapped(*args, **kwargs)
+    if inspect.isgenerator(result):
+        result = doubles(result)
+    return result
+```
+
+`on_item` mirrors the composing half of `on_call`:
+
+```python
+doubles.on_item.transforms_item(fn)     # fn(item) -> item
+doubles.on_item.validates_item(check)   # check(item); item passes unchanged
+doubles.on_item.passes_through()        # drop all configured item behaviour
+```
+
+Three further namespaces cover how an iteration ends:
+
+```python
+doubles.on_finish.validates(check)      # normal exhaustion; check(value)
+doubles.on_error.notifies(fn)           # iteration failed; fn(exc)
+doubles.on_abandon.notifies(fn)         # closed before exhaustion; fn()
+```
+
+Finish checks receive the wrapped generator's return value, or None for
+iterator kinds that have none, and completion stands unless the check
+raises. Error hooks see the exception about to reach the consumer,
+whether it came from the iterator's body, from an unhandled `throw()`,
+or from an item stage. Abandon hooks fire when a started, unexhausted
+generator is closed, explicitly or by garbage collection; a wrapper
+closed before its first item is silent, and plain iterators have no
+close protocol so never report abandonment. Each namespace has its own
+`passes_through()`.
+
+Behaviour is snapshotted each time the factory is applied: a wrapped
+iterator applies the behaviour configured at the moment it was wrapped,
+and reconfiguring the factory affects only iterators wrapped afterwards.
+With no behaviour configured, applying the factory returns the iterator
+unwrapped.
+
+An iterator factory has no `suspend()` or `resume()`: suspension belongs
+to bindings (see above), because only an applied binding has a live
+presence on a target, while a factory acts only at the moment it is
+applied. Since a factory is normally applied from a binding's behaviour,
+suspending that binding is what stops further iterators being wrapped.
+Note that either way, iterators already wrapped keep the behaviour
+snapshotted when they were wrapped, for as long as they are iterated.
+
+Wrapped generators keep their full protocol: `send()` values and
+`throw()` are forwarded to the wrapped generator, `close()` closes it,
+and its return value is preserved. Async generators and plain sync and
+async iterators are supported by the same factory, each keeping its own
+protocol.
+
+Applying the factory to an iterable that is not an iterator, such as a
+list, raises `TypeError` rather than silently replacing the container
+with an iterator of a different type; call `iter()` on it first if that
+is what you want.
+
 ## Escape hatch to wrapt
 
 The underlying wrapt handle and the patch coordinates are exposed, so

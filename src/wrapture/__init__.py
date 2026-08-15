@@ -38,18 +38,32 @@ from .exceptions import (
     NotImplementedYetError,
     WrongModeError,
 )
+from .iterators import (
+    AbandonBehaviour,
+    ErrorBehaviour,
+    FinishBehaviour,
+    ItemBehaviour,
+    IteratorProxy,
+    iterator,
+)
 
 __all__ = [
+    "AbandonBehaviour",
     "AlreadyAppliedError",
     "Binding",
     "BindingGroup",
     "CallBehaviour",
     "DeferredTargetError",
     "DeleteBehaviour",
+    "ErrorBehaviour",
+    "FinishBehaviour",
     "GetBehaviour",
+    "ItemBehaviour",
+    "IteratorProxy",
     "NotImplementedYetError",
     "SetBehaviour",
     "WrongModeError",
     "binding",
     "bindings",
+    "iterator",
 ]
