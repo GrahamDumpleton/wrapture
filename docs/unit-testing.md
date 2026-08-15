@@ -250,12 +250,13 @@ recording" can therefore never be confused.
 
 ### One naming rule
 
-> A method whose name starts with `assert_` raises on failure.
-> Everything else returns data.
+> A method whose name starts with `assert_` raises, immediately. One
+> starting with `expect_` declares, and is checked when the timeline
+> exits. Everything else returns data.
 
 The rule holds on every object in the package, so a single line read out
-of context still says whether it can fail a test. A mistyped assertion
-name is an `AttributeError`, never a silent pass.
+of context still says whether and when it can fail a test. A mistyped
+assertion name is an `AttributeError`, never a silent pass.
 
 ### Filters narrow, and never raise
 
@@ -306,6 +307,36 @@ and sized like a list, and its repr prints the events:
 assert charge.events.with_args(amount=500)
 assert charge.events.count == 2
 ```
+
+### Declared expectations
+
+An assertion is written where it runs; an expectation is stated once, up
+front, and verified automatically when the timeline exits, so
+verification cannot be forgotten:
+
+```python
+def test_order_charges_exactly_once():
+    charge = wrapture.binding(Gateway, "charge").expect_once()
+
+    with wrapture.timeline(charge):
+        place_order("widget")
+    # exiting verifies: ExpectationNotMetError if there was not
+    # exactly one charge
+```
+
+Available: `expect_times(n)`, `expect_once()`, `expect_never()` and
+`expect_at_least(n)`. Several can be declared and all are verified; the
+timeline verifies the bindings (and group members) it was given.
+`ExpectationNotMetError` derives from `AssertionError`, so test
+frameworks report it as a failure, with the same event-listing output
+the immediate assertions produce.
+
+Verification is skipped when the block raised: the in-flight failure is
+the real cause, and a verification error on top would bury it.
+
+Like behaviour, expectations persist on the binding across apply and
+remove cycles: a shared declaration carries its expectation into every
+timeline it is used with.
 
 ## The call tree and ordering
 

@@ -41,6 +41,7 @@ from .events import (
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
+    ExpectationNotMetError,
     NeverAppliedError,
     NotImplementedYetError,
     WrongModeError,
@@ -70,6 +71,7 @@ __all__ = [
     "ErrorBehaviour",
     "Event",
     "EventLog",
+    "ExpectationNotMetError",
     "FinishBehaviour",
     "GetBehaviour",
     "ItemBehaviour",

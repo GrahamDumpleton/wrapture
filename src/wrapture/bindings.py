@@ -32,6 +32,7 @@ from .events import Event, normalized_arguments
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
+    ExpectationNotMetError,
     NeverAppliedError,
     WrongModeError,
 )
@@ -217,6 +218,11 @@ class Binding:
         self._suspended = False
         self._suspended_calls = 0
         self._apply_count = 0
+
+        # Declared expectations, verified by the enclosing timeline at
+        # exit. Like behaviour, they persist across apply/remove cycles.
+
+        self._expectations: list[tuple[str, int]] = []
 
     @staticmethod
     def _default_label(target: Any, name: str) -> str:
@@ -471,6 +477,58 @@ class Binding:
     def __exit__(self, *exc: object) -> None:
         self.remove()
 
+    # -- declared expectations ---------------------------------------------
+
+    def expect_times(self, count: int) -> Self:
+        """Declare that this binding records exactly `count` events.
+
+        Verified when the enclosing timeline exits, so verification
+        cannot be forgotten; a mismatch raises ExpectationNotMetError.
+        """
+
+        self._expectations.append(("times", count))
+        return self
+
+    def expect_once(self) -> Self:
+        """Declare that this binding records exactly one event."""
+
+        return self.expect_times(1)
+
+    def expect_never(self) -> Self:
+        """Declare that this binding records no events."""
+
+        self._expectations.append(("never", 0))
+        return self
+
+    def expect_at_least(self, count: int) -> Self:
+        """Declare that this binding records at least `count` events."""
+
+        self._expectations.append(("at_least", count))
+        return self
+
+    def _verify(self, tape: Any) -> None:
+        # Called by the timeline at exit. Reuses the assertion methods
+        # so failure output matches theirs, re-raised under the declared
+        # expectation's own exception type.
+
+        if not self._expectations:
+            return
+
+        log = tape.for_binding(self)
+
+        for kind, count in self._expectations:
+            try:
+                if kind == "times":
+                    log.assert_times(count)
+                elif kind == "never":
+                    log.assert_never()
+                else:
+                    log.assert_at_least(count)
+            except AssertionError as exc:
+                raise ExpectationNotMetError(
+                    f"declared expectation on {self._label} not met: {exc}"
+                ) from None
+
     # -- wrapper -----------------------------------------------------------
 
     def _make_wrapper(self) -> WrapperFunction:
@@ -666,6 +724,13 @@ class BindingGroup:
         for bnd in reversed(list(self._bindings.values())):
             bnd.remove()
         return self
+
+    def _verify(self, tape: Any) -> None:
+        # Called by the timeline at exit: verify every member's declared
+        # expectations.
+
+        for bnd in self._bindings.values():
+            bnd._verify(tape)
 
     def __enter__(self) -> Self:
         return self.apply()

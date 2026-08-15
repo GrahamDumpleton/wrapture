@@ -14,6 +14,15 @@ class WrongModeError(AttributeError):
     """
 
 
+class ExpectationNotMetError(AssertionError):
+    """A declared expect_* expectation was not met when the timeline
+    verified it at exit.
+
+    Derives from AssertionError so test frameworks report it as a test
+    failure rather than an error.
+    """
+
+
 class NeverAppliedError(RuntimeError):
     """events was read on a binding that was never applied, so nothing
     could possibly have been recorded for it."""

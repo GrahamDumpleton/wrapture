@@ -230,12 +230,22 @@ class Timeline:
 
         return self.tape
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         for applied in reversed(self._applied):
             applied.remove()
         self._applied.clear()
 
         self._restore()
+
+        # Verify declared expectations only when the block itself
+        # succeeded: raising here over an in-flight failure would bury
+        # the real cause.
+
+        if exc_type is None:
+            for appliable in self._appliables:
+                verify = getattr(appliable, "_verify", None)
+                if verify is not None:
+                    verify(self.tape)
 
     def _restore(self) -> None:
         assert self._tape_token is not None

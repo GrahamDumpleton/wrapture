@@ -10,7 +10,15 @@ from typing import Any
 
 import pytest
 
-from wrapture import AlreadyAppliedError, Event, Tape, binding, bindings, timeline
+from wrapture import (
+    AlreadyAppliedError,
+    Event,
+    ExpectationNotMetError,
+    Tape,
+    binding,
+    bindings,
+    timeline,
+)
 from wrapture.timeline import _pop, _push, _stack, _tape
 
 
@@ -276,6 +284,97 @@ def test_assert_order_failure_on_a_binding_that_never_recorded() -> None:
 
     with pytest.raises(AssertionError, match="position 1 of 1"):
         tape.assert_order(record)
+
+
+# ---------------------------------------------------------------------------
+# declared expectations
+# ---------------------------------------------------------------------------
+
+
+def test_a_met_expectation_passes_silently() -> None:
+    charge = binding(Gateway, "charge").expect_once()
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+
+def test_an_unmet_expectation_raises_at_timeline_exit() -> None:
+    charge = binding(Gateway, "charge").expect_times(2)
+
+    with pytest.raises(ExpectationNotMetError) as failure:
+        with timeline(charge):
+            Gateway().charge(500)
+
+    message = str(failure.value)
+    assert "Gateway.charge" in message
+    assert "expected exactly 2 event(s), got 1" in message
+
+
+def test_expect_never_catches_an_unexpected_call() -> None:
+    refund = binding(Gateway, "refund").expect_never()
+
+    with pytest.raises(ExpectationNotMetError):
+        with timeline(refund):
+            Gateway().refund(100)
+
+
+def test_expect_at_least() -> None:
+    charge = binding(Gateway, "charge").expect_at_least(2)
+
+    with timeline(charge):
+        Gateway().charge(100)
+        Gateway().charge(200)
+
+    with pytest.raises(ExpectationNotMetError):
+        with timeline(charge):
+            Gateway().charge(300)
+
+
+def test_multiple_expectations_are_all_verified() -> None:
+    charge = binding(Gateway, "charge").expect_at_least(1)
+    refund = binding(Gateway, "refund").expect_never()
+
+    with timeline(charge, refund):
+        Gateway().charge(500)
+
+
+def test_group_member_expectations_are_verified() -> None:
+    group = bindings(charge=(Gateway, "charge"), refund=(Gateway, "refund"))
+    group.refund.expect_never()
+
+    with pytest.raises(ExpectationNotMetError, match="refund"):
+        with timeline(group):
+            Gateway().refund(100)
+
+
+def test_verification_is_skipped_when_the_block_already_raised() -> None:
+    charge = binding(Gateway, "charge").expect_once()
+
+    # The expectation is unmet, but the in-flight failure is the real
+    # cause and must not be buried by verification.
+
+    with pytest.raises(ValueError, match="real cause"):
+        with timeline(charge):
+            raise ValueError("real cause")
+
+
+def test_expectations_persist_across_timelines_like_behaviour() -> None:
+    charge = binding(Gateway, "charge").expect_once()
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+    with pytest.raises(ExpectationNotMetError):
+        with timeline(charge):
+            pass
+
+
+def test_expectation_declarations_chain_with_behaviour() -> None:
+    charge = binding(Gateway, "charge").expect_once()
+    charge.on_call.returns({"id": "stub"})
+
+    with timeline(charge):
+        assert Gateway().charge(500) == {"id": "stub"}
 
 
 # ---------------------------------------------------------------------------
