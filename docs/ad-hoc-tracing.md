@@ -241,6 +241,71 @@ takes the highest of its inner sinks'), read at construction, so
 capture negotiation sees through the composition and the aggregate
 above never forces values to be captured for the printer's sake.
 
+## Streaming to disk: JSONLines
+
+`JSONLines(path)` writes each completed event to a file as one JSON
+object per line, the [JSON Lines](https://jsonlines.org/) format that
+`jq`, pandas and log tooling consume directly. A line is written when
+an event closes, exit and error alike, so every line carries the
+outcome and the timing; lines therefore appear in completion order,
+children before the operation that contains them, and sorting by
+`seq` with nesting rebuilt from `parent_id` recovers the tree.
+
+The form is deliberately stable. Every line has `seq`, `parent_id`
+(null for a root), `depth`, `kind` and `path`; everything else
+appears only when it was observed: `label`, `started` and `duration`
+(plus `body_duration` and `items` for generators), `arguments` or the
+raw `args`/`kwargs` shape, `forwarded`, `result`, `exception` (type
+and message), `value` and `previous` for attribute writes, `injected`,
+`stack`, and `data`. Absence means "not captured", so an absent
+`result` stays distinguishable from `"result": null`, a call that
+returned None, exactly the distinction `MISSING` preserves in memory.
+
+Two properties make it safe to leave running:
+
+- **The application is never blocked on I/O.** Lines go onto a
+  bounded queue drained by a background writer thread; when the queue
+  is full the line is dropped and counted on `dropped` rather than
+  making the observed call wait. `flush()` blocks briefly until
+  queued lines are on disk (the atexit handler and `flush_sinks()`
+  call it for you); `close()` flushes, stops the writer, and closes
+  the file.
+- **It declares `"summary"` capture**, so it neither retains live
+  objects nor fails on unserialisable ones, and values that reach it
+  captured by reference anyway (a binding's override, a tape's
+  requirement) are reduced to bounded summaries at serialisation
+  time, with a depth limit that cuts even self-referential
+  structures.
+
+This completes the inherited-dev-server story from the top of this
+page. The whole intervention is a few lines in the application's entry
+point, with no timeline and no changes to the code being observed:
+
+```python
+# the tail of manage.py, or the app factory
+import wrapture
+from myapp.orders import OrderService
+from myapp.payments import PaymentGateway
+
+wrapture.binding(OrderService, "place_order").apply()
+wrapture.binding(OrderService, "restock").apply()
+wrapture.binding(PaymentGateway, "charge").apply()
+
+wrapture.add_sink(wrapture.Fanout(
+    wrapture.Depth(2, wrapture.Printer()),
+    wrapture.JSONLines("trace.jsonl"),
+))
+```
+
+Requests then print a live two-level tree to the console while the
+full nested trace streams to `trace.jsonl`, worker threads included,
+ready for `jq`:
+
+```console
+$ jq -c 'select(.path | endswith("PaymentGateway.charge"))' trace.jsonl
+$ jq -c 'select(.exception)' trace.jsonl
+```
+
 ## Writing a sink
 
 The protocol is small enough that special-purpose sinks are cheap to

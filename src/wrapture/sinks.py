@@ -25,6 +25,9 @@ from __future__ import annotations
 
 import atexit
 import contextvars
+import json
+import os
+import queue
 import random
 import sys
 import threading
@@ -42,6 +45,8 @@ from .capture import (
     CapturePolicy,
     _level_of,
     _resolve_policy,
+    summarize,
+    type_name,
 )
 from .events import Event
 from .exceptions import SinkErrorWarning
@@ -653,3 +658,280 @@ class Sample(Sink):
         """Flush the inner sink."""
 
         self._sink.flush()
+
+
+def _jsonable(value: Any, depth: int = 8) -> Any:
+    # Reduce a captured value to something json.dumps accepts, whatever
+    # the capture level stored: summary-captured values are already
+    # strings and scalars, but reference and snapshot captures can hold
+    # arbitrary objects. The depth bound stops runaway recursion on
+    # deep or self-referential containers; past it only the type is
+    # reported, which calls no user code.
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+
+    if depth <= 0:
+        return type_name(value)
+
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item, depth - 1) for item in value]
+
+    if isinstance(value, dict):
+        return {
+            (key if isinstance(key, str) else str(key)): _jsonable(item, depth - 1)
+            for key, item in value.items()
+        }
+
+    summarized = summarize(value)
+    if summarized is None or isinstance(summarized, (bool, int, float, str)):
+        return summarized
+    return str(summarized)
+
+
+def _event_record(event: Event) -> dict[str, Any]:
+    # The stable serialised form of one event, shared by JSONLines now
+    # and the exporters later. Identity and position are always
+    # present; parent_id is null for a root. Everything else appears
+    # only when observed, so an absent "result" (nothing captured)
+    # stays distinguishable from "result": null (the call returned
+    # None).
+
+    record: dict[str, Any] = {
+        "seq": event.seq,
+        "parent_id": event.parent_id,
+        "depth": event.depth,
+        "kind": event.kind,
+        "path": event.path,
+    }
+
+    if event.label is not None:
+        record["label"] = event.label
+
+    if event.started is not None:
+        record["started"] = event.started
+    if event.duration is not None:
+        record["duration"] = event.duration
+    if event.body_duration is not None:
+        record["body_duration"] = event.body_duration
+    if event.items is not None:
+        record["items"] = event.items
+
+    if event.arguments is not None:
+        record["arguments"] = _jsonable(event.arguments)
+    if event.args is not None:
+        record["args"] = _jsonable(list(event.args))
+    if event.kwargs is not None:
+        record["kwargs"] = _jsonable(event.kwargs)
+    if event.forwarded is not None:
+        forwarded_args, forwarded_kwargs = event.forwarded
+        record["forwarded"] = {
+            "args": _jsonable(list(forwarded_args)),
+            "kwargs": _jsonable(forwarded_kwargs),
+        }
+
+    if event.result is not MISSING:
+        record["result"] = _jsonable(event.result)
+    if event.exception is not None:
+        record["exception"] = {
+            "type": type(event.exception).__name__,
+            "message": str(event.exception),
+        }
+
+    if event.value is not MISSING:
+        record["value"] = _jsonable(event.value)
+    if event.previous is not MISSING:
+        record["previous"] = _jsonable(event.previous)
+
+    if event.injected:
+        record["injected"] = True
+    if event.stack is not None:
+        record["stack"] = event.stack
+    if event.data:
+        record["data"] = _jsonable(event.data)
+
+    return record
+
+
+_STOP = object()
+
+
+class JSONLines(Sink):
+    """Stream each completed event to a file, one JSON object per line.
+
+    A line is written when an event closes, exit and error alike, so
+    every line carries the outcome and timing; an event that never
+    closes is never written. Lines therefore appear in completion
+    order, children before the operation that contains them; sort by
+    "seq" and rebuild nesting from "parent_id" to recover the tree.
+    Fields present on every line: seq, parent_id (null for a root),
+    depth, kind and path. Everything else appears only when observed,
+    so an absent "result" (nothing captured) stays distinguishable
+    from "result": null (the operation returned None).
+
+    The observed application is never blocked on I/O: lines go onto a
+    bounded queue drained by a background writer thread, and when the
+    queue is full the line is dropped and counted on `dropped` rather
+    than making the application wait. flush() blocks briefly until
+    queued lines are on disk; close() flushes, stops the writer, and
+    closes the file, and anything recorded after that is dropped and
+    counted.
+
+    Declares "summary" capture on both axes: a streaming sink must
+    neither retain live objects nor fail on unserialisable ones.
+    Values that reach it captured by reference regardless (a binding
+    override, another sink's requirement) are reduced to summaries at
+    serialisation time.
+    """
+
+    capture_args: CapturePolicy | str = "summary"
+    capture_result: CapturePolicy | str = "summary"
+
+    def __init__(self, path: str | os.PathLike[str], *, limit: int = 1000) -> None:
+        self._path = os.fspath(path)
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=limit)
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self._closed = False
+        self._dropped = 0
+
+    @property
+    def dropped(self) -> int:
+        """Lines dropped because the queue was full or the sink was
+        closed, counted so backpressure is a visible fact."""
+
+        with self._lock:
+            return self._dropped
+
+    def _submit(self, event: Event) -> None:
+        # Serialise inline, cheaply, on the observed thread; only the
+        # write is handed to the background thread. The writer starts
+        # lazily with the first line, so a constructed but unused sink
+        # owns no thread and no open file.
+
+        with self._lock:
+            if self._closed:
+                self._dropped += 1
+                return
+
+            if not self._started:
+                self._started = True
+                self._thread = threading.Thread(
+                    target=self._run, name="wrapture-jsonlines", daemon=True
+                )
+                self._thread.start()
+
+        line = json.dumps(
+            _event_record(event), ensure_ascii=False, separators=(",", ":")
+        )
+
+        try:
+            self._queue.put_nowait(line + "\n")
+        except queue.Full:
+            with self._lock:
+                self._dropped += 1
+
+    def on_exit(self, event: Event) -> None:
+        """Write the completed event as one line."""
+
+        self._submit(event)
+
+    def on_error(self, event: Event) -> None:
+        """Write the failed event as one line."""
+
+        self._submit(event)
+
+    def _run(self) -> None:
+        # The writer owns the file for its whole life. If it cannot be
+        # opened the sink is broken: the error is counted, and the
+        # queue is drained and discarded so flush() barriers never
+        # hang and the application never blocks.
+
+        try:
+            stream = open(self._path, "a", encoding="utf-8")
+        except Exception:
+            _note_sink_error(self)
+
+            while True:
+                item = self._queue.get()
+                if item is _STOP:
+                    return
+                if isinstance(item, threading.Event):
+                    item.set()
+
+        try:
+            while True:
+                item = self._queue.get()
+
+                if item is _STOP:
+                    break
+
+                if isinstance(item, threading.Event):
+                    try:
+                        stream.flush()
+                    except Exception:
+                        _note_sink_error(self)
+                    item.set()
+                    continue
+
+                try:
+                    stream.write(item)
+
+                    # Batch under load, current when idle: flush only
+                    # once the queue has gone quiet.
+
+                    if self._queue.empty():
+                        stream.flush()
+                except Exception:
+                    _note_sink_error(self)
+        finally:
+            try:
+                stream.flush()
+                stream.close()
+            except Exception:
+                _note_sink_error(self)
+
+    def flush(self) -> None:
+        """Block briefly until every queued line is on disk."""
+
+        with self._lock:
+            if not self._started or self._closed:
+                return
+
+        barrier = threading.Event()
+
+        try:
+            self._queue.put(barrier, timeout=5)
+        except queue.Full:
+            return
+
+        barrier.wait(timeout=5)
+
+    def close(self) -> None:
+        """Write out the queue, stop the writer, and close the file.
+
+        Anything recorded after closing is dropped and counted on
+        `dropped`. Idempotent.
+        """
+
+        with self._lock:
+            if self._closed:
+                return
+
+            self._closed = True
+            started = self._started
+            thread = self._thread
+
+        if not started or thread is None:
+            return
+
+        # The stop marker queues behind every pending line, so the
+        # writer drains the lot before it exits and closes the file.
+
+        try:
+            self._queue.put(_STOP, timeout=5)
+        except queue.Full:
+            return
+
+        thread.join(timeout=5)
