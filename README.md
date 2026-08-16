@@ -2,6 +2,7 @@
 
 **Trace assertions without instrumenting your code.**
 
+[![Tests](https://github.com/GrahamDumpleton/wrapture/actions/workflows/build-test-release.yml/badge.svg?branch=develop)](https://github.com/GrahamDumpleton/wrapture/actions/workflows/build-test-release.yml)
 [![Documentation](https://readthedocs.org/projects/wrapture/badge/?version=latest)](https://wrapture.readthedocs.io)
 
 wrapture (`wrapt` + `capture`) is a Python library for attaching bindings to
