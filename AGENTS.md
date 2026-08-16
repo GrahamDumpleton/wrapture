@@ -31,6 +31,26 @@ pip, or python -m build directly.
   `uv remove <package>`
 - Sync the environment from pyproject.toml: `uv sync`
 
+## Common tasks: use the Justfile
+
+The Justfile defines targets for the common development tasks, wrapping
+the correct uv invocations (including details like the docs extra and
+per-version test environments). Prefer these targets over synthesizing
+the underlying commands yourself; run `just --list` to see everything.
+
+- `just test` runs the test suite on the default Python version. Extra
+  arguments pass through to pytest, so a specific file or test is
+  `just test tests/test_config.py` or `just test -k pattern`.
+- `just test-python 3.13t` runs the suite on one nominated Python
+  version; `just test-all` runs it on every supported version. Both
+  also pass extra arguments through to pytest.
+- `just lint` checks with the ruff linter and formatter; `just format`
+  reformats and applies auto-fixes.
+- `just typecheck` runs mypy.
+- `just docs` builds the documentation; `just docs-clean` clears a
+  stale incremental build after structural changes such as renamed or
+  removed pages.
+
 ## Style
 
 - Do not use emdashes in any files in this project. Rephrase with commas,
