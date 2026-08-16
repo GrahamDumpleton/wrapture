@@ -50,3 +50,14 @@ class DeferredTargetError(ValueError):
     """A string target used wrapt's trailing `?` deferred-patching syntax,
     which is not supported. Import the module first and bind against it.
     """
+
+
+class ConfigError(Exception):
+    """A tracing configuration could not be loaded or applied: a config
+    file said something the schema does not allow, a reference in it did
+    not resolve, or applying it to the running process failed."""
+
+
+class ConfigWarning(UserWarning):
+    """A tracing configuration is suspicious but not fatally wrong,
+    such as a match pattern that selected no members at all."""

@@ -37,6 +37,14 @@ from .bindings import (
 from .capture import (
     redact,
 )
+from .config import (
+    AppliedConfig,
+    Config,
+    ObserveEntry,
+    SetupEntry,
+    find_config,
+    load_config,
+)
 from .eventlogs import (
     EventLog,
 )
@@ -45,6 +53,8 @@ from .events import (
 )
 from .exceptions import (
     AlreadyAppliedError,
+    ConfigError,
+    ConfigWarning,
     DeferredTargetError,
     ExpectationNotMetError,
     NeverAppliedError,
@@ -93,9 +103,13 @@ __all__ = [
     "MISSING",
     "Aggregate",
     "AlreadyAppliedError",
+    "AppliedConfig",
     "Binding",
     "BindingGroup",
     "CallBehaviour",
+    "Config",
+    "ConfigError",
+    "ConfigWarning",
     "Counter",
     "DeferredTargetError",
     "DeleteBehaviour",
@@ -114,11 +128,13 @@ __all__ = [
     "JSONLines",
     "NeverAppliedError",
     "NotImplementedYetError",
+    "ObserveEntry",
     "PathStats",
     "Printer",
     "RecordingGapWarning",
     "Sample",
     "SetBehaviour",
+    "SetupEntry",
     "Sink",
     "SinkErrorWarning",
     "StackFrame",
@@ -130,8 +146,10 @@ __all__ = [
     "binding",
     "bindings",
     "current_event",
+    "find_config",
     "flush_sinks",
     "iterator",
+    "load_config",
     "propagate",
     "redact",
     "remove_sink",

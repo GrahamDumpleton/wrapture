@@ -405,3 +405,166 @@ One caveat for sinks that hold state, like the dictionary above:
 notifications arrive from whatever thread ran the observed operation,
 so a sink shared across threads must protect its own state if it
 mutates anything more compound than the example's per-key counter.
+
+## Configuring from a file
+
+The dev-server example above still edits the application's entry
+point. A config file moves the same setup out of the code entirely:
+observe rules, the sink, capture and sampling, written as TOML and
+applied as one unit. This is the format the `python -m wrapture`
+runner and the autowrapt injection path (both arriving with later
+steps) consume; it can also be applied directly:
+
+```python
+import wrapture
+
+source = wrapture.find_config()
+if source is not None:
+    wrapture.load_config(source).apply()
+```
+
+`find_config()` implements the source precedence: a path in the
+`WRAPTURE_CONFIG` environment variable, then `wrapture.toml` in the
+current directory, then a `[tool.wrapture]` table in
+`pyproject.toml`. The first source found wins outright; sources are
+never merged.
+
+A complete file:
+
+```toml
+pythonpath = "tracing"
+capture = "summary"
+sample = 0.1
+
+[[observe]]
+target = "myapp.orders:OrderService"
+match = "*"
+exclude = "_*"
+
+[[observe]]
+target = "myapp.payments:PaymentGateway"
+name = ["charge", "refund"]
+
+[[observe]]
+target = "myapp.parsers"
+match = "parse_*"
+
+[sink]
+type = "jsonlines"
+path = "trace.jsonl"
+
+[[setup]]
+module = "myapp.orders"
+call = "wrapture_local.hooks:instrument_orders"
+```
+
+### Choosing what to observe
+
+Each `[[observe]]` entry binds members of one exact target. `target`
+is never a pattern: it is `"module"` or `"module:path"`, the same
+colon convention event paths use, so a bound member's event path is
+literally the target plus the member's name. Members within the
+target come from `name` or `match`, one of which is required; each
+accepts a single string or a list:
+
+- `name` lists exact members. Every listed name must exist or the
+  config fails to apply, and it binds anything, properties and other
+  attributes included.
+- `match` is an `fnmatchcase` pattern over the target's own immediate
+  members only: no traversal into nested classes or submodules, and
+  no inherited members. It selects routines only (functions, static
+  and class methods; for a module target, only functions the module
+  itself defines), skipping properties, nested classes, plain data
+  and anything already wrapped; `name` is the escape hatch that binds
+  the skipped kinds explicitly. `exclude` subtracts patterns from the
+  match, and a match that selects nothing warns with
+  `ConfigWarning`.
+
+The blast radius of a pattern is thereby one level of one named
+container, stated on the line above it.
+
+The top-level `capture` key overrides the capture level on every
+binding the file creates, and `sample` keeps only that fraction of
+call trees by wrapping the sink in `Sample`.
+
+### The sink and its factory escape hatch
+
+`[sink]` names the sink with `type` and passes every other key to its
+constructor. Two builtin names cover the no-code cases: `printer` and
+`jsonlines`. Anything else is reached by `module:attr` reference: a
+callable, invoked with the remaining keys as keyword arguments, that
+must return a `Sink`. The factory is also the composition escape
+hatch; the file has no syntax for combinators because a factory can
+return any arrangement:
+
+```toml
+[sink]
+type = "wrapture_local.sinks:make_sink"
+endpoint = "https://collector.internal"
+```
+
+```python
+# wrapture_local/sinks.py
+import wrapture
+
+def make_sink(endpoint):
+    return wrapture.Fanout(
+        wrapture.Depth(2, wrapture.Printer()),
+        MySender(endpoint),
+    )
+```
+
+Sink references resolve when the file loads, because the sink must
+exist before events can flow.
+
+### Setup callbacks
+
+Declarative `[[observe]]` entries cover plain observation. Everything
+richer (behaviour pipelines, redaction policies, `when=` predicates,
+iterator proxies) lives in ordinary Python that a `[[setup]]` entry
+triggers at the right moment: `call` names a `module:attr` callable
+invoked with the module named by `module` as soon as that module is
+imported, or immediately if it already was.
+
+```python
+# wrapture_local/hooks.py
+import wrapture
+
+def instrument_orders(module):
+    wrapture.binding(module.OrderService, "restock",
+                     when=only_traced_tenants).apply()
+```
+
+Unlike sink references, the callback reference resolves only when the
+hook fires: by then the trigger module is mid-import anyway, so
+naming operator code here can never cause it to be imported ahead of
+the module it instruments.
+
+### Code next to the config file
+
+Uninstalled operator code, the factories and callbacks above, is made
+importable by the top-level `pythonpath` key: a directory or list of
+directories prepended to `sys.path` when the file loads, with
+relative entries anchored to the config file's own directory, so a
+config plus its companion code stays a self-contained bundle wherever
+the process launches from. Prepending can shadow installed modules,
+so keep such code in a distinctively named package (`wrapture_local/`
+above), never in loose generically named files.
+
+### Trust and failure
+
+A config file can name arbitrary code to run, so loading one is
+equivalent to executing code; the trust boundary is write access to
+the file, as it already is for anything else the process imports.
+Failures are loud: unknown keys, `name` and `match` together, a named
+member that does not exist, a reference that does not resolve, a
+factory that returns something other than a `Sink`, all raise
+`ConfigError`, and a config that fails partway through applying
+unwinds whatever it had installed before the error propagates.
+
+The same setup is available programmatically as the `Config` class
+with `ObserveEntry` and `SetupEntry` values, which is exactly what
+the loader builds: the file can say nothing that `Config` cannot,
+and code can additionally pass live objects, a constructed sink or a
+callable capture policy, where the file is limited to what TOML can
+spell.
