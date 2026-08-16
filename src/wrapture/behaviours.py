@@ -148,9 +148,10 @@ class CallBehaviour(_Behaviour):
     def decorates(self, fn: WrapperFunction) -> Binding:
         """Wrap the real callable: fn(wrapped, instance, args, kwargs).
 
-        This is wrapt's own decorator signature, so a function can move
-        between a production decorator and an interceptor unedited.
-        Terminal: it decides whether and how the real callable is invoked.
+        This is wrapt's own wrapper signature, so the function you would
+        apply @wrapt.decorator to moves here unedited; pass that
+        function, not the result of decorating it. Terminal: it decides
+        whether and how the real callable is invoked.
         """
 
         return self._terminal(fn)
@@ -195,7 +196,11 @@ class CallBehaviour(_Behaviour):
         return self._stage(stage)
 
     def validates_args(self, check: Callable[..., Any]) -> Binding:
-        """check(*args, **kwargs); the call passes through unchanged."""
+        """check(*args, **kwargs); the call passes through unchanged.
+
+        The check fails the call only by raising; its return value is
+        ignored, so returning False fails nothing.
+        """
 
         def stage(
             nxt: WrappedFunction,
@@ -211,8 +216,9 @@ class CallBehaviour(_Behaviour):
     def validates_result(self, check: Callable[[Any], Any]) -> Binding:
         """check(result); the result passes through unchanged.
 
-        Await-aware: when the target is async, the check sees the awaited
-        value rather than the coroutine.
+        The check fails the call only by raising; its return value is
+        ignored. Await-aware: when the target is async, the check sees
+        the awaited value rather than the coroutine.
         """
 
         def stage(
@@ -273,7 +279,11 @@ class GetBehaviour(_Behaviour):
         return self._stage(stage)
 
     def validates(self, check: Callable[[Any], Any]) -> Binding:
-        """check(value); the read passes through unchanged."""
+        """check(value); the read passes through unchanged.
+
+        The check fails the read only by raising; its return value is
+        ignored.
+        """
 
         def stage(
             nxt: WrappedFunction,
@@ -342,7 +352,11 @@ class SetBehaviour(_Behaviour):
         return self._stage(stage)
 
     def validates(self, check: Callable[[Any], Any]) -> Binding:
-        """check(value); the write passes through unchanged."""
+        """check(value); the write passes through unchanged.
+
+        The check fails the write only by raising; its return value is
+        ignored.
+        """
 
         def stage(
             nxt: WrappedFunction,
@@ -396,7 +410,11 @@ class DeleteBehaviour(_Behaviour):
         return self._terminal(terminal)
 
     def validates(self, check: Callable[[Any], Any]) -> Binding:
-        """check(instance); the delete passes through unchanged."""
+        """check(instance); the delete passes through unchanged.
+
+        The check fails the delete only by raising; its return value is
+        ignored.
+        """
 
         def stage(
             nxt: WrappedFunction,

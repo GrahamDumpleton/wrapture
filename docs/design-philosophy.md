@@ -108,9 +108,9 @@ everything around the failure. In the mock version the rest of the
 pipeline is typically also mocked, so the test can only assert that the
 exception propagated. With wrapture only the one bound method is replaced
 and the rest of the pipeline stays real: the reservation is really taken,
-the ledger write really does or does not happen, and (once timelines
-land, see below) the test can assert on what the rest of the system did
-about the failure.
+the ledger write really does or does not happen, and by recording on a
+timeline (see below) the test can assert on what the rest of the system
+did about the failure.
 
 ### Running the real code while modifying the call
 

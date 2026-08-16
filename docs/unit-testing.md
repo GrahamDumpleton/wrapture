@@ -375,18 +375,47 @@ The levels, ordered by cost:
 
 Arguments and results are separate axes, since one is a time cost and
 the other a retention cost: `capture=` sets both, and `capture_args=` /
-`capture_result=` override it individually. A policy can also be a
-callable `fn(name, value)`, and `redact()` builds a common one:
+`capture_result=` override it individually.
+
+A policy is either one of the levels above or any callable
+`fn(name, value)` returning what to store, called once per captured
+value with the parameter's name (None for a result). Writing one is
+ordinary code, and the levels' building blocks, `summarize()` and
+`type_name()`, are importable from `wrapture.capture` for use inside
+it:
 
 ```python
-charge = wrapture.binding(Gateway, "charge",
-                          capture_args=wrapture.redact("card_number"))
+from wrapture.capture import summarize
+
+def masked(name, value):
+    if name == "card_number":
+        return "<redacted>"
+    if name == "metadata":
+        return summarize(value, limit=50)
+    return value
+
+charge = wrapture.binding(Gateway, "charge", capture_args=masked)
+```
+
+The common case, masking named parameters and capturing the rest at
+one level, is packaged as `redact()`:
+
+```python
+charge = wrapture.binding(
+    Gateway, "charge",
+    capture_args=wrapture.redact("card_number", level=wrapture.SUMMARY),
+)
 ```
 
 Redaction matches by parameter name against the normalized arguments,
-so positional and keyword calls redact identically. Results have no
-parameter name, so pair it with `capture_result=NONE` when the secret
-comes back out.
+so positional and keyword calls redact identically, and everything not
+named is captured at `level=` (`REFERENCE` unless given). Results have
+no parameter name, so pair it with `capture_result=NONE` when the
+secret comes back out.
+
+One bookkeeping note for custom callables: the level recorded on
+`event.capture` is read from an optional `.level` attribute on the
+callable, defaulting to `REFERENCE`; `redact()` sets it for you.
 
 A result supplied by `returns()`, `raises()` or `rejects()` is recorded,
 not suppressed, because the stubbed value is precisely what flowed

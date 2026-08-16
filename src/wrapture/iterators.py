@@ -242,7 +242,11 @@ class ItemBehaviour(_IteratorBehaviour):
         return self._factory._add(self._factory._item_stages, fn)
 
     def validates_item(self, check: Callable[[Any], Any]) -> IteratorProxy:
-        """check(item); each item passes through unchanged."""
+        """check(item); each item passes through unchanged.
+
+        The check fails the iteration only by raising; its return value
+        is ignored.
+        """
 
         def stage(item: Any) -> Any:
             check(item)

@@ -94,9 +94,38 @@ charge.on_call.raises(exc)         # raise exc; the real callable never runs
 
 Both replace the call outright: the wrapped callable is never invoked,
 matching what `unittest.mock` does with `return_value` and `side_effect`.
-To run the real callable and raise afterwards, for example to simulate a
-response lost after the operation actually succeeded, use `decorates()`,
-which controls both sides of the call:
+Everything else in the namespace runs the real callable and intervenes
+around it.
+
+### Transforming and validating
+
+```python
+charge.on_call.transforms_args(fn)      # fn(args, kwargs) -> (args, kwargs)
+charge.on_call.transforms_result(fn)    # fn(result) -> result
+charge.on_call.validates_args(check)    # check(*args, **kwargs); call unchanged
+charge.on_call.validates_result(check)  # check(result); result unchanged
+```
+
+The real callable runs; each of these adjusts or inspects one side of
+the call. A check reports failure the same way a test does: by raising,
+and a plain `assert` inside the check is enough. Whatever the check
+returns is ignored, so returning False fails nothing; there is no
+wrapture-supplied validation exception.
+
+```python
+def positive_amount(amount, currency="USD"):
+    assert amount > 0, f"amount must be positive, got {amount}"
+
+charge.on_call.validates_args(positive_amount)
+```
+
+### Wrapping with a decorator
+
+When touching one side at a time is not enough, `decorates()` controls
+the whole call: it decides whether and how the real callable is invoked,
+and what the caller gets back. For example, running the real call and
+raising afterwards, to simulate a response lost after the operation
+actually succeeded:
 
 ```python
 def charge_then_drop(wrapped, instance, args, kwargs):
@@ -111,32 +140,12 @@ is going to see the raised exception instead, so there is nothing to pass
 it back to. The real call still happened, which is the point, and its side
 effects stand.
 
-### Wrapping with a decorator
-
-`decorates()` takes a function with wrapt's decorator signature, so an
-existing `@wrapt.decorator` function can be passed directly:
-
-```python
-def around(wrapped, instance, args, kwargs):
-    kwargs.setdefault("currency", "EUR")
-    return wrapped(*args, **kwargs)
-
-charge.on_call.decorates(around)
-```
-
-It decides whether and how the real callable is invoked.
-
-### Transforming and validating
-
-```python
-charge.on_call.transforms_args(fn)      # fn(args, kwargs) -> (args, kwargs)
-charge.on_call.transforms_result(fn)    # fn(result) -> result
-charge.on_call.validates_args(check)    # check(*args, **kwargs); call unchanged
-charge.on_call.validates_result(check)  # check(result); result unchanged
-```
-
-A validation check that raises fails the call; anything it returns is
-ignored.
+`decorates()` takes a plain function with wrapt's wrapper signature,
+`fn(wrapped, instance, args, kwargs)`: the same function you would apply
+`@wrapt.decorator` to, or hand to `FunctionWrapper` directly. A wrapper
+written for a production decorator can therefore move to `decorates()`
+unedited. Pass that undecorated function, not the result of applying
+`@wrapt.decorator` to it, which is a decorator rather than a wrapper.
 
 ### The behaviour pipeline
 
@@ -293,7 +302,9 @@ status.on_delete.rejects()          # AttributeError instead of deleting
 ```
 
 Each namespace is an independent pipeline with the same composing and
-terminal rules as `on_call`, and each has its own `passes_through()`. In
+terminal rules as `on_call`, each has its own `passes_through()`, and
+validation checks fail the operation by raising, exactly as in
+`on_call`. In
 the `decorates()` forms, `read()`, `write(value)` and `erase()` perform
 the real operation, so the function decides whether and how it happens.
 
