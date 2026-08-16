@@ -150,9 +150,9 @@ leave running for a whole test suite or a long-lived process:
 - `Counter()` counts operations as they begin, failures included. One
   number, no retention.
 - `Aggregate()` keeps one row per path: how many operations began, and
-  the total, fastest and slowest durations of the ones that completed,
-  exceptions included. Memory is bounded by the number of bound
-  locations, however many events flow.
+  the total, self, fastest and slowest execution times of the ones
+  that completed, exceptions included. Memory is bounded by the number
+  of bound locations, however many events flow.
 
 Both declare `"none"` on both capture axes, which matters: when no
 other active sink asks for more, recording skips value capture
@@ -196,14 +196,31 @@ without retaining a single event:
 hot = wrapture.add_sink(wrapture.Aggregate())
 ...
 for path, row in sorted(
-    hot.stats.items(), key=lambda item: item[1].total, reverse=True
+    hot.stats.items(), key=lambda item: item[1].self_total, reverse=True
 ):
-    print(f"{path}: {row.count} calls, {row.total:.3f}s total")
+    print(
+        f"{path}: {row.count} calls,"
+        f" {row.total:.3f}s total, {row.self_total:.3f}s self"
+    )
 ```
 
+`self_total` is the figure profilers rank by: the time spent in the
+operation itself, excluding the time its observed children account
+for. A method that is slow because of what it calls ranks low on self
+time; a method that is slow in its own right ranks high, and that
+distinction is what tells you where to look. No external profiler can
+compute it for an arbitrary handful of bindings, because it only sees
+whole call stacks; wrapture computes it from the parent links as
+events close, retaining nothing.
+
 Every recorded event carries `started` and `duration` (exceptions
-included; generators additionally separate wall time from time spent
-in the body), which is what the aggregate rows are built from.
+included), which is what the rows are built from. For generators the
+accumulated body time stands in for the wall duration, since the wall
+figure includes the consumer's time between yields, which is not the
+generator's to spend. The same numbers are available on a tape:
+`tape.self_time(event)` for one event, and `tape.tree(times=True)`
+for the whole picture, covered on the
+[unit testing page](unit-testing.md).
 
 ## Composing sinks
 

@@ -48,7 +48,7 @@ from .capture import (
     summarize,
     type_name,
 )
-from .events import Event
+from .events import Event, _own_time
 from .exceptions import SinkErrorWarning
 
 
@@ -385,11 +385,19 @@ class Counter(Sink):
 @dataclass(frozen=True)
 class PathStats:
     """Aggregated figures for one path: how many operations began, and
-    the total, fastest and slowest wall durations of those that closed
-    with a duration."""
+    the total, self, fastest and slowest execution times of those that
+    closed with one.
+
+    Execution time is the event's duration, except for generators,
+    whose accumulated body time is used instead, since their wall
+    duration includes the consumer's time between yields. self_total
+    is total minus the time spent in observed children: the figure
+    profilers rank by.
+    """
 
     count: int
     total: float
+    self_total: float
     min: float | None
     max: float | None
 
@@ -397,13 +405,13 @@ class PathStats:
 class Aggregate(Sink):
     """Per-path statistics in bounded memory.
 
-    One row per path: how many operations began, and the total,
-    fastest and slowest durations of the ones that completed,
-    exceptions included. Memory is bounded by the number of bound
-    locations, however many events flow, which is what makes this
-    safe to leave running in a long-lived process. Like Counter, it
-    declares "none" capture on both axes, so it never causes values
-    to be captured.
+    One row per path: how many operations began, and the total, self,
+    fastest and slowest execution times of the ones that completed,
+    exceptions included. Self time is computed as events close, from
+    the parent links alone, so no events are retained; memory is
+    bounded by the number of bound locations plus the operations in
+    flight at any moment. Like Counter, it declares "none" capture on
+    both axes, so it never causes values to be captured.
     """
 
     capture_args: CapturePolicy | str = "none"
@@ -413,40 +421,60 @@ class Aggregate(Sink):
         self._lock = threading.Lock()
         self._rows: dict[str, list[Any]] = {}
 
+        # Children's execution time accumulated against each event
+        # still in flight, keyed by seq; an event's self time is its
+        # own time minus what its children deposited here.
+
+        self._pending: dict[int, float] = {}
+
     @property
     def stats(self) -> dict[str, PathStats]:
         """A snapshot of the per-path figures, keyed by event path."""
 
         with self._lock:
             return {
-                path: PathStats(row[0], row[1], row[2], row[3])
+                path: PathStats(row[0], row[1], row[4], row[2], row[3])
                 for path, row in self._rows.items()
             }
 
     def on_enter(self, event: Event) -> None:
-        """Count the operation against its path."""
+        """Count the operation against its path and mark it in flight."""
 
         with self._lock:
-            row = self._rows.setdefault(event.path, [0, 0.0, None, None])
+            row = self._rows.setdefault(event.path, [0, 0.0, None, None, 0.0])
             row[0] += 1
 
+            self._pending[event.seq] = 0.0
+
     def _observe(self, event: Event) -> None:
-        if event.duration is None:
-            return
+        own = _own_time(event)
 
         with self._lock:
-            row = self._rows.setdefault(event.path, [0, 0.0, None, None])
-            row[1] += event.duration
-            row[2] = event.duration if row[2] is None else min(row[2], event.duration)
-            row[3] = event.duration if row[3] is None else max(row[3], event.duration)
+            children = self._pending.pop(event.seq, 0.0)
+
+            if own is None:
+                return
+
+            # Deposit this event's time with its parent, if the parent
+            # is still in flight; a parent that already closed (a late
+            # child) can no longer be adjusted.
+
+            if event.parent_id is not None and event.parent_id in self._pending:
+                self._pending[event.parent_id] += own
+
+            row = self._rows.setdefault(event.path, [0, 0.0, None, None, 0.0])
+            row[1] += own
+            row[2] = own if row[2] is None else min(row[2], own)
+            row[3] = own if row[3] is None else max(row[3], own)
+            row[4] += max(0.0, own - children)
 
     def on_exit(self, event: Event) -> None:
-        """Fold the completed operation's duration into its row."""
+        """Fold the completed operation's time into its row."""
 
         self._observe(event)
 
     def on_error(self, event: Event) -> None:
-        """Fold the failed operation's duration into its row."""
+        """Fold the failed operation's time into its row."""
 
         self._observe(event)
 

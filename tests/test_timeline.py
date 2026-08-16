@@ -20,7 +20,7 @@ from wrapture import (
     timeline,
 )
 from wrapture.sinks import _active_sinks, _record_event
-from wrapture.timeline import _current_tape, _pop, _push, _stack
+from wrapture.timeline import _current_tape, _format_time, _pop, _push, _stack
 
 
 class Gateway:
@@ -195,6 +195,59 @@ def test_the_tape_closes_at_exit_and_reopens_on_reuse() -> None:
 
     assert [event.path for event in tape.all] == ["a", "b"]
     assert tape.discarded == 1
+
+
+def test_self_time_subtracts_observed_children() -> None:
+    tape = Tape()
+    outer = _record_event(Event("call", "outer"), (tape,))
+    inner = _record_event(Event("call", "inner", parent_id=outer.seq, depth=1), (tape,))
+
+    outer.duration = 0.010
+    inner.duration = 0.004
+
+    assert tape.self_time(outer) == pytest.approx(0.006)
+    assert tape.self_time(inner) == 0.004
+    assert tape.self_time(Event("call", "open")) is None
+
+
+def test_self_time_uses_body_time_for_generators() -> None:
+    tape = Tape()
+    stream = _record_event(Event("call", "stream"), (tape,))
+    fetch = _record_event(
+        Event("call", "fetch", parent_id=stream.seq, depth=1), (tape,)
+    )
+
+    # The generator's wall duration includes the consumer's time
+    # between yields; only its body time is its own to spend.
+
+    stream.duration = 0.100
+    stream.body_duration = 0.030
+    fetch.duration = 0.010
+
+    assert tape.self_time(stream) == pytest.approx(0.020)
+
+
+def test_tree_with_times_shows_durations_and_self_time() -> None:
+    tape = Tape()
+    outer = _record_event(Event("call", "outer"), (tape,))
+    inner = _record_event(Event("call", "inner", parent_id=outer.seq, depth=1), (tape,))
+
+    outer.duration = 0.010
+    inner.duration = 0.004
+
+    rendered = tape.tree(times=True)
+    assert "[10.0ms, self 6.0ms]" in rendered
+    assert "[4.0ms]" in rendered
+
+    # The default rendering stays free of timing noise.
+
+    assert "ms" not in tape.tree()
+
+
+def test_time_formatting_adapts_units() -> None:
+    assert _format_time(2.5) == "2.50s"
+    assert _format_time(0.0123) == "12.3ms"
+    assert _format_time(0.000045) == "45us"
 
 
 def test_tape_repr_shows_the_event_and_discard_counts() -> None:

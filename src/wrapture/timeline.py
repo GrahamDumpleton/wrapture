@@ -27,8 +27,19 @@ from wrapt import MISSING
 
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
-from .events import Event
+from .events import Event, _own_time
 from .sinks import Sink, _in_recorder, _scoped_sinks
+
+
+def _format_time(seconds: float) -> str:
+    # Adaptive units so a tree of mixed magnitudes stays readable:
+    # seconds, milliseconds, then microseconds.
+
+    if seconds >= 1.0:
+        return f"{seconds:.2f}s"
+    if seconds >= 0.001:
+        return f"{seconds * 1000:.1f}ms"
+    return f"{seconds * 1_000_000:.0f}us"
 
 
 @runtime_checkable
@@ -177,13 +188,38 @@ class Tape(Sink):
 
         return [entry for entry in self._snapshot() if entry.parent_id == event.seq]
 
-    def tree(self) -> str:
+    def self_time(self, event: Event) -> float | None:
+        """The time spent in the operation itself: its execution time
+        minus its observed children's, the figure profilers rank by.
+
+        The basis is the event's duration, except for a generator,
+        whose wall duration includes the consumer's time between
+        yields; its accumulated body time is used instead, and the
+        same rule applies to the children being subtracted. Returns
+        None when the event has not closed with a time.
+        """
+
+        own = _own_time(event)
+        if own is None:
+            return None
+
+        spent = 0.0
+        for child in self.children_of(event):
+            child_time = _own_time(child)
+            if child_time is not None:
+                spent += child_time
+
+        return max(0.0, own - spent)
+
+    def tree(self, *, times: bool = False) -> str:
         """The call graph as it actually ran, one event per line,
         indented by nesting depth.
 
         A completed event shows its result after `->`; one that raised
         shows `!!` and the exception type; one still in progress shows
-        neither.
+        neither. With times=True a timed event also shows its
+        execution time and, where observed children account for part
+        of it, its self time.
         """
 
         entries = self._snapshot()
@@ -202,6 +238,22 @@ class Tape(Sink):
 
         lines: list[str] = []
 
+        def timing(event: Event) -> str:
+            own = _own_time(event)
+            if own is None:
+                return ""
+
+            spent = 0.0
+            for child in children.get(event.seq, []):
+                child_time = _own_time(child)
+                if child_time is not None:
+                    spent += child_time
+
+            if spent > 0.0:
+                self_time = max(0.0, own - spent)
+                return f"  [{_format_time(own)}, self {_format_time(self_time)}]"
+            return f"  [{_format_time(own)}]"
+
         def emit(event: Event) -> None:
             injected = " (injected)" if event.injected else ""
 
@@ -212,7 +264,11 @@ class Tape(Sink):
             else:
                 marker = ""
 
-            lines.append("  " * event.depth + str(event) + marker)
+            line = "  " * event.depth + str(event) + marker
+            if times:
+                line += timing(event)
+
+            lines.append(line)
 
             for child in children.get(event.seq, []):
                 emit(child)

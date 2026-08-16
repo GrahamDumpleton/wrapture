@@ -142,6 +142,18 @@ class Event:
         return ", ".join(positional + keyword)
 
 
+def _own_time(event: Event) -> float | None:
+    # The execution-time basis for self-time arithmetic. A generator's
+    # wall duration includes the consumer's time between yields, so its
+    # accumulated body time is the honest measure of the code itself;
+    # everything else uses its duration. None when the event has not
+    # closed with a time.
+
+    if event.body_duration is not None:
+        return event.body_duration
+    return event.duration
+
+
 # Signature lookup is cached because inspect.signature costs microseconds
 # per call and would dominate the recording path. The cache is keyed on
 # the function itself via weak references, never on id(): ids are reused

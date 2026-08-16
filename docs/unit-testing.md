@@ -646,6 +646,15 @@ Each line is one event, indented by nesting depth. A completed call
 shows its result after `->`, a call that raised shows `!!` with the
 exception type, and a call still in progress shows neither.
 
+`tape.tree(times=True)` appends each timed event's execution time,
+and, where observed children account for part of it, its self time,
+as `[12.3ms, self 4.1ms]`. The same figure is available for one event
+as `tape.self_time(event)`: the event's time minus its observed
+children's, which is what separates "slow itself" from "slow because
+of what it calls". For a generator the accumulated body time stands
+in for the wall duration in both, since the wall figure includes the
+consumer's time between yields.
+
 Cross-binding ordering has its own assertion:
 
 ```python

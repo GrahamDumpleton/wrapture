@@ -124,6 +124,31 @@ def test_aggregate_collects_per_path_stats() -> None:
     assert refunded.min == refunded.max == refunded.total
 
 
+def test_aggregate_computes_self_time_from_parent_links() -> None:
+    aggregate = Aggregate()
+    process = binding(Processor, "process")
+    charge = binding(Gateway, "charge")
+
+    with process, charge, listening(aggregate):
+        Processor().process()
+        Processor().process()
+
+    stats = aggregate.stats
+    processed = stats[f"{Processor.__module__}:Processor.process"]
+    charged = stats[f"{Gateway.__module__}:Gateway.charge"]
+
+    # A leaf keeps all of its time; the parent's self time excludes
+    # exactly what its child deposited while in flight.
+
+    assert charged.self_total == charged.total
+    assert processed.self_total == pytest.approx(processed.total - charged.total)
+    assert processed.self_total < processed.total
+
+    # Nothing stays behind once every event has closed.
+
+    assert aggregate._pending == {}
+
+
 # ---------------------------------------------------------------------------
 # Fanout
 # ---------------------------------------------------------------------------
