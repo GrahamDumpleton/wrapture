@@ -682,9 +682,10 @@ class Binding:
                 f"{self._label}: an observed operation ran on a thread"
                 f" with no recording context while a timeline was active"
                 f" elsewhere, so it was not recorded (behaviour still"
-                f" applied). To record work on this thread, hand it a"
-                f" copied context: contextvars.copy_context().run(...)."
-                f" Misses are counted on Binding.missed_calls.",
+                f" applied). To record work on this thread, wrap its"
+                f" target with wrapture.propagate(...), which hands it a"
+                f" copy of the recording context. Misses are counted on"
+                f" Binding.missed_calls.",
                 RecordingGapWarning,
                 stacklevel=2,
             )

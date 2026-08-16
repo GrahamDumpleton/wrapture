@@ -18,8 +18,9 @@ records its own correctly nested tree.
 from __future__ import annotations
 
 import contextvars
+import functools
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from wrapt import MISSING
@@ -64,13 +65,66 @@ class Tape(Sink):
     def __init__(self) -> None:
         self._entries: list[Event] = []
         self._lock = threading.Lock()
+        self._closed = False
+        self._discarded = 0
 
     def on_enter(self, event: Event) -> None:
         """Retain the event. It stays live: the recorder fills in the
-        outcome fields as the operation completes."""
+        outcome fields as the operation completes.
+
+        A closed tape discards instead: an event arriving after the
+        enclosing timeline exited (from a task or thread that outlived
+        the scope) is counted on `discarded` rather than appended, so
+        a result cannot grow after it has been asserted on, and the
+        loss is a visible fact rather than a silent race.
+        """
 
         with self._lock:
+            if self._closed:
+                self._discarded += 1
+                return
+
             self._entries.append(event)
+
+    @property
+    def closed(self) -> bool:
+        """True after the enclosing timeline exits, until it is next
+        entered. A closed tape still serves every view and assertion;
+        it just no longer accepts new events."""
+
+        with self._lock:
+            return self._closed
+
+    @property
+    def discarded(self) -> int:
+        """Events that arrived after the tape closed and were dropped.
+
+        A non-zero count means work observed by this timeline was still
+        running when the scope exited; wrapture.propagate() and the
+        known limitations page cover how that happens.
+        """
+
+        with self._lock:
+            return self._discarded
+
+    def _open(self) -> None:
+        with self._lock:
+            self._closed = False
+
+    def _close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+    def __repr__(self) -> str:
+        with self._lock:
+            count = len(self._entries)
+            discarded = self._discarded
+
+        plural = "" if count == 1 else "s"
+
+        if discarded:
+            return f"<Tape: {count} event{plural}, {discarded} discarded after close>"
+        return f"<Tape: {count} event{plural}>"
 
     def _snapshot(self) -> list[Event]:
         # A consistent view in sequence order. Arrival order can differ
@@ -315,9 +369,12 @@ class Timeline:
 
     Entering pushes the timeline's tape onto the scoped sinks and
     applies the bindings given at creation, rolling back if any of them
-    fails to apply. Exiting removes them in reverse order and restores
-    the previous ambient state. The same timeline can be reused
-    sequentially; its tape keeps accumulating across uses.
+    fails to apply. Exiting removes them in reverse order, restores the
+    previous ambient state, and closes the tape: an event arriving
+    after that, from a task or thread that outlived the scope, is
+    discarded and counted rather than appended. The same timeline can
+    be reused sequentially; entering again reopens the tape, which
+    keeps accumulating across uses.
     """
 
     def __init__(self, appliables: list[_Appliable]) -> None:
@@ -350,11 +407,21 @@ class Timeline:
             self._restore()
             raise
 
+        # Open (or on reuse, reopen) the tape only once entry cannot
+        # fail, so a rolled-back reuse leaves it closed.
+
+        self.tape._open()
+
         _timeline_started()
         return self.tape
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         _timeline_finished()
+
+        # Close first: the recording scope is over, and anything still
+        # running elsewhere should discard visibly from here on.
+
+        self.tape._close()
 
         for applied in reversed(self._applied):
             applied.remove()
@@ -381,6 +448,43 @@ class Timeline:
 
         self._sinks_token = None
         self._stack_token = None
+
+
+def propagate(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Make fn record to this context's timeline from another thread.
+
+    Threads do not inherit context variables, so work handed to a
+    thread from inside a timeline is invisible to that timeline (see
+    the known limitations page). propagate() captures the recording
+    context where it is called and returns a callable that runs fn
+    inside a copy of it, so the thread records exactly as the caller
+    would:
+
+        threading.Thread(target=wrapture.propagate(work)).start()
+
+    Each invocation runs in its own copy of the captured context, so
+    one propagated callable can be shared by several threads at once.
+    A propagated thread that outlives the timeline is safe by
+    construction: the tape closes when the scope exits, and anything
+    the thread records after that is discarded and counted on the
+    tape's `discarded` rather than appended.
+    """
+
+    context = contextvars.copy_context()
+    lock = threading.Lock()
+
+    @functools.wraps(fn)
+    def call(*args: Any, **kwargs: Any) -> Any:
+        # Context.run is not reentrant, so each invocation gets its
+        # own copy of the captured context, minted under a lock since
+        # copying requires briefly entering the original.
+
+        with lock:
+            current = context.run(contextvars.copy_context)
+
+        return current.run(fn, *args, **kwargs)
+
+    return call
 
 
 def timeline(*bindings: _Appliable | Iterable[_Appliable]) -> Timeline:

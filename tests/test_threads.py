@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from wrapture import RecordingGapWarning, binding, timeline
+from wrapture import RecordingGapWarning, binding, propagate, timeline
 
 _THREADS_TAKE_CONTEXT = sys.version_info >= (3, 14)
 _THREADS_INHERIT = bool(getattr(sys.flags, "thread_inherit_context", 0))
@@ -86,7 +86,7 @@ def test_a_thread_call_during_a_timeline_warns_and_counts() -> None:
     (warning,) = caught
     assert issubclass(warning.category, RecordingGapWarning)
     assert "Ledger.record" in str(warning.message)
-    assert "copy_context" in str(warning.message)
+    assert "propagate" in str(warning.message)
 
 
 def test_every_miss_is_counted_but_only_the_first_warns() -> None:
@@ -257,3 +257,68 @@ def test_a_thread_with_a_copied_context_records_onto_the_tape() -> None:
     assert threaded.args == ("threaded",)
     assert threaded.depth == 0
     assert direct.args == ("direct",)
+
+
+def test_propagate_carries_the_timeline_into_a_thread() -> None:
+    record = binding(Ledger, "record")
+
+    with timeline(record) as tape:
+        # propagate() wraps the manual copy above: called inside the
+        # timeline, so the recording context is part of what it takes.
+
+        work = propagate(Ledger().record)
+        thread = threading.Thread(target=work, args=("threaded",))
+        thread.start()
+        thread.join()
+
+        record.events.assert_once()
+        assert record.missed_calls == 0
+
+    assert tape.all[0].args == ("threaded",)
+
+
+def test_one_propagated_callable_is_shared_by_several_threads() -> None:
+    record = binding(Ledger, "record")
+
+    with timeline(record):
+        # Each invocation runs in its own copy of the captured context,
+        # so concurrent threads never contend for one Context object.
+
+        work = propagate(Ledger().record)
+        threads = [threading.Thread(target=work, args=(f"t{n}",)) for n in range(4)]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        record.events.assert_times(4)
+        assert record.missed_calls == 0
+
+
+def test_a_propagated_thread_outliving_the_timeline_discards_visibly() -> None:
+    record = binding(Ledger, "record")
+    release = threading.Event()
+
+    def late() -> None:
+        release.wait(timeout=5)
+        Ledger().record("late")
+
+    # The binding outlives the timeline, so the late call is still
+    # observed; only the recording scope has ended by then.
+
+    with record:
+        with timeline() as tape:
+            Ledger().record("in time")
+            thread = threading.Thread(target=propagate(late))
+            thread.start()
+
+        release.set()
+        thread.join()
+
+    # The late event is dropped and counted, never appended: the tape
+    # a test asserted on cannot change shape afterwards.
+
+    assert [event.args for event in tape.all] == [("in time",)]
+    assert tape.discarded == 1
+    assert repr(tape) == "<Tape: 1 event, 1 discarded after close>"

@@ -171,6 +171,44 @@ def test_timeline_reuse_accumulates_on_the_same_tape() -> None:
     assert second.seq == first.seq + 1
 
 
+def test_the_tape_closes_at_exit_and_reopens_on_reuse() -> None:
+    scope = timeline()
+
+    with scope as tape:
+        assert not tape.closed
+        _record_event(Event("call", "a"), _active_sinks())
+
+    # Closed: a late arrival is discarded and counted, not appended,
+    # so a tape already asserted on cannot change shape.
+
+    assert tape.closed
+    _record_event(Event("call", "late"), (tape,))
+
+    assert [event.path for event in tape.all] == ["a"]
+    assert tape.discarded == 1
+
+    # Reuse reopens the tape; the discard count is history and stays.
+
+    with scope as again:
+        assert not again.closed
+        _record_event(Event("call", "b"), _active_sinks())
+
+    assert [event.path for event in tape.all] == ["a", "b"]
+    assert tape.discarded == 1
+
+
+def test_tape_repr_shows_the_event_and_discard_counts() -> None:
+    tape = Tape()
+    assert repr(tape) == "<Tape: 0 events>"
+
+    _record_event(Event("call", "a"), (tape,))
+    assert repr(tape) == "<Tape: 1 event>"
+
+    tape._close()
+    _record_event(Event("call", "late"), (tape,))
+    assert repr(tape) == "<Tape: 1 event, 1 discarded after close>"
+
+
 def test_reentering_an_active_timeline_raises() -> None:
     scope = timeline()
 

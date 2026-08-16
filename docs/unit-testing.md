@@ -213,6 +213,14 @@ made inside its body nest under its event even when other tasks run in
 between. Concurrent asyncio tasks each record their own correctly nested
 subtree onto the shared tape.
 
+The tape closes when its timeline exits. Work that outlives the scope,
+a task never awaited or a thread still running, is discarded from then
+on and counted on `Tape.discarded`, so the tape a test asserted on
+cannot quietly grow afterwards; a non-zero count shows in the tape's
+repr as `<Tape: 3 events, 1 discarded after close>` and is the clue
+that the test finished before its work did. Entering the same timeline
+again reopens the tape.
+
 ### Attribute events
 
 Attribute bindings record onto the same tape, as events of kind `get`,
@@ -349,8 +357,9 @@ Four situations produce no event, each deliberate:
   stubbed out stays stubbed out.
 - **Calls on a thread without the caller's context**, on builds where
   threads do not inherit it. These raise `RecordingGapWarning` and are
-  counted in `missed_calls`, so the gap is loud rather than silent; the
-  known limitations page covers the details and the workaround.
+  counted in `missed_calls`, so the gap is loud rather than silent. To
+  opt a thread in, wrap its target with `wrapture.propagate()`; the
+  known limitations page covers the details.
 
 ### How much is captured
 

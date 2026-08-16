@@ -105,16 +105,26 @@ What wrapture guarantees is that the gap is loud rather than silent:
 an observed operation that runs with no context while a timeline is
 active elsewhere raises `RecordingGapWarning` (once per binding per
 apply) and is counted on `Binding.missed_calls`, so a shorter tape than
-expected can be explained. To record thread work deliberately, hand the
-thread a copy of the context taken inside the timeline:
+expected can be explained. To record thread work deliberately, wrap the
+thread's target with `propagate()`, called inside the timeline:
 
 ```python
-context = contextvars.copy_context()
-thread = threading.Thread(target=context.run, args=(work,))
+thread = threading.Thread(target=wrapture.propagate(work))
 ```
 
-or on Python 3.14+ pass `context=` to `Thread` directly. The tape is
+Underneath this is just `contextvars.copy_context()`: each invocation
+of the propagated callable runs in its own copy of the context that
+was current when `propagate()` was called, so one propagated callable
+can be shared by several threads, and on Python 3.14+ passing
+`context=` to `Thread` directly achieves the same thing. The tape is
 safe to record onto from several threads at once.
+
+A propagated thread that outlives the timeline is safe by
+construction: the tape closes when the scope exits, and events
+arriving after that are discarded and counted on `Tape.discarded`
+rather than appended, so a result already asserted on cannot change
+shape. The count is visible in the tape's repr:
+`<Tape: 7 events, 2 discarded after close>`.
 
 Asyncio tasks are unaffected: every task runs in a copy of the context
 it was created under. Copying a context copies variable bindings, not

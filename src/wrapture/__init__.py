@@ -77,6 +77,7 @@ from .timeline import (
     Timeline,
     annotate,
     current_event,
+    propagate,
     timeline,
 )
 
@@ -115,6 +116,7 @@ __all__ = [
     "current_event",
     "flush_sinks",
     "iterator",
+    "propagate",
     "redact",
     "remove_sink",
     "stack_frames",
