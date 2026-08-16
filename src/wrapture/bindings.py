@@ -13,7 +13,7 @@ import time
 import types
 import warnings
 import weakref
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from typing import Any, Self, TypeVar
 
 import wrapt
@@ -387,6 +387,7 @@ class Binding:
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         stack: int | str | None = None,
+        when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
@@ -398,6 +399,12 @@ class Binding:
             raise ValueError(
                 f"stack must be None, 'caller', 'full' or a positive"
                 f" frame count, got {stack!r}"
+            )
+
+        if when is not None and not callable(when):
+            raise ValueError(
+                f"when must be a callable taking (instance, args, kwargs)"
+                f" or None, got {when!r}"
             )
 
         if mode is None:
@@ -425,6 +432,7 @@ class Binding:
             capture_result if capture_result is not None else capture
         )
         self._stack_depth = stack
+        self._when = when
 
         # The behaviour pipelines, keyed by operation ("call", "get",
         # "set" or "delete"): composing stages around one terminal, with
@@ -443,6 +451,7 @@ class Binding:
         self._suspended_calls = 0
         self._apply_count = 0
         self._missed_calls = 0
+        self._filtered_calls = 0
         self._gap_warned = False
 
         # Declared expectations, verified by the enclosing timeline at
@@ -674,6 +683,16 @@ class Binding:
 
         return self._missed_calls
 
+    @property
+    def filtered_calls(self) -> int:
+        """Operations the `when=` predicate declined to record.
+
+        Deliberate silence, but counted, so a shorter tape than
+        expected can be explained rather than guessed at.
+        """
+
+        return self._filtered_calls
+
     def _note_missed_call(self) -> None:
         # Count every miss, but warn only once per apply cycle: a
         # worker thread in a loop must not emit thousands of warnings.
@@ -824,6 +843,25 @@ class Binding:
                 if behaviour is None:
                     return wrapped(*args, **kwargs)
                 return behaviour(wrapped, instance, args, kwargs)
+
+            # The per-call predicate decides whether this operation is
+            # recorded at all, before any event is constructed. It runs
+            # under the recorder guard, so observed code it consults
+            # passes through, and if it raises the caller sees it.
+
+            if bnd._when is not None:
+                guard = _in_recorder.set(True)
+                try:
+                    wanted = bnd._when(instance, args, kwargs)
+                finally:
+                    _in_recorder.reset(guard)
+
+                if not wanted:
+                    bnd._filtered_calls += 1
+
+                    if behaviour is None:
+                        return wrapped(*args, **kwargs)
+                    return behaviour(wrapped, instance, args, kwargs)
 
             # Create the event under the recorder guard, so anything
             # the bookkeeping calls that is itself observed passes
@@ -1106,6 +1144,7 @@ def binding(
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
 ) -> Binding:
     """Create a binding for one target attribute.
 
@@ -1132,6 +1171,15 @@ def binding(
     the whole stack. The default None captures nothing and costs
     nothing.
 
+    `when=` decides per operation whether to record it: a callable
+    taking (instance, args, kwargs), consulted only while something is
+    listening, before any event is constructed. A falsey answer skips
+    recording for that operation (behaviour still applies) and counts
+    it on `filtered_calls`. The predicate runs in the call path, so it
+    should be fast, and if it raises the caller sees the exception.
+    For an attribute binding a set passes the written value as the
+    single positional argument; a get or delete passes empty args.
+
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.
     """
@@ -1146,6 +1194,7 @@ def binding(
         capture_args=capture_args,
         capture_result=capture_result,
         stack=stack,
+        when=when,
     )
 
 

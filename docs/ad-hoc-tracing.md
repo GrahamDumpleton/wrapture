@@ -258,6 +258,58 @@ takes the highest of its inner sinks'), read at construction, so
 capture negotiation sees through the composition and the aggregate
 above never forces values to be captured for the printer's sake.
 
+## Deciding at the binding: when=
+
+Sink-side narrowing with `Filter` or `Sample` happens after an event
+has been constructed and its values captured; the recording cost is
+already paid by the time the sink declines it. When the point is to
+keep a hot binding cheap, decide before any of that exists:
+
+```python
+charge = wrapture.binding(
+    PaymentGateway, "charge",
+    when=lambda instance, args, kwargs: kwargs.get("tenant") == "acme",
+)
+```
+
+The predicate is consulted once per operation, only while something is
+listening, and a falsey answer means no event is constructed at all:
+no signature binding, no capture, no delivery. The operation itself
+still runs and behaviour still applies, and the skip is counted on the
+binding's `filtered_calls`, so a shorter trace than expected can be
+explained rather than guessed at. On an attribute binding a set passes
+the written value as the one positional argument and a get or delete
+passes empty args, the same mapping onto call shape the behaviour
+pipeline uses. For a generator target the decision is made once, at
+the call, and covers the whole iteration.
+
+Because the answer comes from a callable, adjusting the filter at
+runtime needs no API: write the predicate to consult state you
+control, and change that state while the process runs.
+
+```python
+TRACED_TENANTS: set[str] = set()
+
+def traced_tenant(instance, args, kwargs):
+    return kwargs.get("tenant") in TRACED_TENANTS
+
+wrapture.binding(PaymentGateway, "charge", when=traced_tenant).apply()
+
+# later, in a live process: start tracing one tenant, then stop
+TRACED_TENANTS.add("acme")
+TRACED_TENANTS.discard("acme")
+```
+
+Two cautions. The predicate runs in the application's call path on
+every operation while recording is active, so keep it fast. And it is
+ordinary user code: if it raises, the caller sees the exception, the
+same contract as a custom capture policy.
+
+Per-operation sampling fits here too
+(`when=lambda instance, args, kwargs: random.random() < 0.01`), but
+where nesting matters prefer `Sample`, which decides at the root and
+keeps whole trees together.
+
 ## Streaming to disk: JSONLines
 
 `JSONLines(path)` writes each completed event to a file as one JSON

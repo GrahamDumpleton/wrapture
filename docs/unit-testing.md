@@ -364,6 +364,12 @@ Four situations produce no event, each deliberate:
   counted in `missed_calls`, so the gap is loud rather than silent. To
   opt a thread in, wrap its target with `wrapture.propagate()`; the
   known limitations page covers the details.
+- **Operations a `when=` predicate declined.** A binding created with
+  `when=fn` consults `fn(instance, args, kwargs)` per operation while
+  recording is active, before any event is constructed; a falsey
+  answer skips recording that operation and counts it on
+  `filtered_calls`. Deliberate silence, but counted. The
+  [ad-hoc tracing page](ad-hoc-tracing.md) covers it fully.
 
 ### How much is captured
 

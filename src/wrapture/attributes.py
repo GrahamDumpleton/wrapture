@@ -135,6 +135,23 @@ def _record(
 
         return operate()
 
+    # The per-access predicate, mapped onto call shape the same way
+    # behaviour stages are: a set passes the written value as the one
+    # positional argument, a get or delete passes empty args.
+
+    if binding._when is not None:
+        call_args = (value,) if value is not MISSING else ()
+
+        guard = _in_recorder.set(True)
+        try:
+            wanted = binding._when(instance, call_args, {})
+        finally:
+            _in_recorder.reset(guard)
+
+        if not wanted:
+            binding._filtered_calls += 1
+            return operate()
+
     # The written value and the prior value are inbound data, so they
     # capture on the arguments axis, under the attribute's name so a
     # by-name policy such as redact() applies to writes too.
