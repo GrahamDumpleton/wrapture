@@ -13,7 +13,9 @@ the safe monkey-patching machinery wrapt provides.
 ```{note}
 wrapture is in early development. The monkey patching and unit testing
 layers are implemented; the tracing and profiling layers are designed
-but not built. The library is not yet released.
+but not built. Development previews are published to
+[PyPI](https://pypi.org/project/wrapture/); the API may still shift
+before 1.0.0.
 ```
 
 ## What it does
