@@ -186,10 +186,11 @@ fields a test typically reads:
   `arguments` is the signature-normalized form with defaults applied, so
   `charge(500)` and `charge(amount=500)` record identically. Assert
   against `arguments`.
-- `result` holds the return value, or the wrapt MISSING sentinel when the
-  call raised instead; `exception` holds the exception that propagated. A
-  call that returned None records `result=None`, which stays
-  distinguishable from no result at all.
+- `result` holds the return value, or the `MISSING` sentinel
+  (`wrapture.MISSING`, re-exported from wrapt) when the call raised
+  instead; `exception` holds the exception that propagated. A call that
+  returned None records `result=None`, which stays distinguishable from
+  no result at all.
 - `parent`, `children` and `depth` place the event in the call tree, and
   `seq` is its position in overall recording order.
 
@@ -355,29 +356,30 @@ by-reference record lie retroactively, so capture is a policy, set per
 binding:
 
 ```python
-record = wrapture.binding(Ledger, "record", capture=wrapture.SUMMARY)
+record = wrapture.binding(Ledger, "record", capture="summary")
 ```
 
-The levels, ordered by cost:
+The levels, named by string and ordered by cost:
 
-- `NONE` records the event but no values: the call stays visible, its
+- `"none"` records the event but no values: the call stays visible, its
   arguments and result do not, and the signature binding that dominates
   recording cost is skipped entirely.
-- `TYPES` stores type names only (`<list>`), and never calls user code.
-- `REFERENCE` stores references; the default.
-- `SUMMARY` stores a bounded, type-aware repr. It survives locks and
+- `"types"` stores type names only (`<list>`), and never calls user
+  code.
+- `"reference"` stores references; the default.
+- `"summary"` stores a bounded, type-aware repr. It survives locks and
   sockets and retains nothing, but repr is user code and may have side
   effects: summarising a lazy ORM object can issue the very query being
   observed.
-- `SNAPSHOT` deep-copies for full fidelity, falling back to `SUMMARY`
-  for values that refuse (locks, sockets, connections) rather than
-  failing the call under test.
+- `"snapshot"` deep-copies for full fidelity, falling back to the
+  summary form for values that refuse (locks, sockets, connections)
+  rather than failing the call under test.
 
 Arguments and results are separate axes, since one is a time cost and
 the other a retention cost: `capture=` sets both, and `capture_args=` /
 `capture_result=` override it individually.
 
-A policy is either one of the levels above or any callable
+A policy is either a level named above or any callable
 `fn(name, value)` returning what to store, called once per captured
 value with the parameter's name (None for a result). Writing one is
 ordinary code, and the levels' building blocks, `summarize()` and
@@ -403,19 +405,21 @@ one level, is packaged as `redact()`:
 ```python
 charge = wrapture.binding(
     Gateway, "charge",
-    capture_args=wrapture.redact("card_number", level=wrapture.SUMMARY),
+    capture_args=wrapture.redact("card_number", level="summary"),
 )
 ```
 
 Redaction matches by parameter name against the normalized arguments,
 so positional and keyword calls redact identically, and everything not
-named is captured at `level=` (`REFERENCE` unless given). Results have
-no parameter name, so pair it with `capture_result=NONE` when the
-secret comes back out.
+named is captured at `level=` (`"reference"` unless given). Results
+have no parameter name, so pair it with `capture_result="none"` when
+the secret comes back out.
 
 One bookkeeping note for custom callables: the level recorded on
 `event.capture` is read from an optional `.level` attribute on the
-callable, defaulting to `REFERENCE`; `redact()` sets it for you.
+callable, defaulting to the reference level; `redact()` sets it for
+you. The numeric level constants behind the string names live in
+`wrapture.capture` for policies that want them.
 
 A result supplied by `returns()`, `raises()` or `rejects()` is recorded,
 not suppressed, because the stubbed value is precisely what flowed
@@ -451,18 +455,18 @@ between. Stack capture gives the physical route, answering "which line
 of code triggered this", and is priced per binding:
 
 ```python
-charge = wrapture.binding(Gateway, "charge", stack=wrapture.caller)
+charge = wrapture.binding(Gateway, "charge", stack="caller")
 ```
 
 - `stack=None`, the default, captures nothing and costs nothing.
-- `stack=wrapture.caller` captures just the calling frame, adding a few
+- `stack="caller"` captures just the calling frame, adding a few
   hundred nanoseconds to each recorded event: the sweet spot, since
   "who touched this?" is usually the whole question. Recording an event
   already costs single-digit microseconds, so this is a small fraction
   on top.
 - `stack=5` captures that many frames, walking outward from the caller,
   with cost growing roughly per frame.
-- `stack=wrapture.full` captures everything, for diagnosis rather than
+- `stack="full"` captures everything, for diagnosis rather than
   routine use.
 
 The event stores a small integer, `event.stack`, rather than the frames
@@ -480,7 +484,7 @@ for frame in wrapture.stack_frames(event.stack):
 Frames are innermost first, and wrapture's and wrapt's own machinery
 frames are elided, so the first frame is the code that actually made
 the call. Stack capture pairs especially well with attribute events:
-`stack=wrapture.caller` on a lazy-loading property names the exact
+`stack="caller"` on a lazy-loading property names the exact
 source line that triggered the load, which is normally the hard part
 of diagnosing an accidental query.
 

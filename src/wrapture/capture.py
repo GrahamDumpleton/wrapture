@@ -35,6 +35,32 @@ SNAPSHOT = 4
 
 CapturePolicy = int | Callable[[str | None, Any], Any]
 
+# The user-facing spellings of the levels: binding() and redact() accept
+# these strings and resolve them to the numeric levels above.
+
+_LEVEL_NAMES = {
+    "none": NONE,
+    "types": TYPES,
+    "reference": REFERENCE,
+    "summary": SUMMARY,
+    "snapshot": SNAPSHOT,
+}
+
+
+def _resolve_policy(policy: CapturePolicy | str | None) -> CapturePolicy | None:
+    if isinstance(policy, str):
+        try:
+            return _LEVEL_NAMES[policy]
+        except KeyError:
+            raise ValueError(
+                f"capture level must be one of {sorted(_LEVEL_NAMES)}, a"
+                f" numeric level, or a fn(name, value) callable, got"
+                f" {policy!r}"
+            ) from None
+
+    return policy
+
+
 _ATOMIC = (bool, int, float, complex, type(None))
 
 
@@ -100,7 +126,9 @@ def summarize(value: Any, *, limit: int = 200, items: int = 10) -> Any:
 
 
 def redact(
-    *names: str, level: CapturePolicy = REFERENCE, marker: str = "<redacted>"
+    *names: str,
+    level: CapturePolicy | str = REFERENCE,
+    marker: str = "<redacted>",
 ) -> CapturePolicy:
     """A capture policy that replaces named parameters with a marker.
 
@@ -119,6 +147,8 @@ def redact(
     """
 
     wanted = set(names)
+    resolved = _resolve_policy(level)
+    level = REFERENCE if resolved is None else resolved
 
     def policy(name: str | None, value: Any) -> Any:
         if name in wanted:

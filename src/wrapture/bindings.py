@@ -37,6 +37,7 @@ from .capture import (
     CapturePolicy,
     _capture_value,
     _level_of,
+    _resolve_policy,
 )
 from .eventlogs import EventLog
 from .events import Event, normalized_arguments
@@ -49,6 +50,7 @@ from .exceptions import (
     WrongModeError,
 )
 from .stacks import _capture as _capture_stack
+from .stacks import _resolve_depth
 from .timeline import (
     Tape,
     _capture_result,
@@ -356,20 +358,21 @@ class Binding:
         label: str | None = None,
         mode: str | None = None,
         missing_ok: bool = False,
-        capture: CapturePolicy | None = None,
-        capture_args: CapturePolicy | None = None,
-        capture_result: CapturePolicy | None = None,
-        stack: int | None = None,
+        capture: CapturePolicy | str | None = None,
+        capture_args: CapturePolicy | str | None = None,
+        capture_result: CapturePolicy | str | None = None,
+        stack: int | str | None = None,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
 
         _reject_deferred(target)
 
+        stack = _resolve_depth(stack)
         if stack is not None and stack < 1:
             raise ValueError(
-                f"stack must be None, wrapture.caller, wrapture.full or a"
-                f" positive frame count, got {stack!r}"
+                f"stack must be None, 'caller', 'full' or a positive"
+                f" frame count, got {stack!r}"
             )
 
         if mode is None:
@@ -390,8 +393,12 @@ class Binding:
         # consuming the events declares; capture= is shorthand for both
         # axes, with the specific parameters winning.
 
-        self._capture_args = capture_args if capture_args is not None else capture
-        self._capture_result = capture_result if capture_result is not None else capture
+        self._capture_args = _resolve_policy(
+            capture_args if capture_args is not None else capture
+        )
+        self._capture_result = _resolve_policy(
+            capture_result if capture_result is not None else capture
+        )
         self._stack_depth = stack
 
         # The behaviour pipelines, keyed by operation ("call", "get",
@@ -1052,10 +1059,10 @@ def binding(
     label: str | None = None,
     mode: str | None = None,
     missing_ok: bool = False,
-    capture: CapturePolicy | None = None,
-    capture_args: CapturePolicy | None = None,
-    capture_result: CapturePolicy | None = None,
-    stack: int | None = None,
+    capture: CapturePolicy | str | None = None,
+    capture_args: CapturePolicy | str | None = None,
+    capture_result: CapturePolicy | str | None = None,
+    stack: int | str | None = None,
 ) -> Binding:
     """Create a binding for one target attribute.
 
@@ -1071,15 +1078,16 @@ def binding(
     AttributeError, because it is indistinguishable from a typo.
 
     `capture=` overrides how much of the recorded values this binding
-    stores (a level such as SUMMARY, or a fn(name, value) callable),
-    with `capture_args=` and `capture_result=` controlling the two axes
-    separately and winning over the shorthand. Left unset, the binding
+    stores: a level named by string ("none", "types", "reference",
+    "summary" or "snapshot"), or a fn(name, value) callable.
+    `capture_args=` and `capture_result=` control the two axes
+    separately and win over the shorthand. Left unset, the binding
     follows what the sink consuming the events declares.
 
     `stack=` captures how control reached each recorded event:
-    wrapture.caller for just the calling frame, a frame count, or
-    wrapture.full for the whole stack. The default None captures
-    nothing and costs nothing.
+    "caller" for just the calling frame, a frame count, or "full" for
+    the whole stack. The default None captures nothing and costs
+    nothing.
 
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.

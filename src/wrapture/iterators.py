@@ -227,7 +227,7 @@ class _IteratorBehaviour:
         self._factory = factory
 
 
-class ItemBehaviour(_IteratorBehaviour):
+class IteratorItemBehaviour(_IteratorBehaviour):
     """`iterator().on_item`: behaviour applied to each item.
 
     Mirrors the composing half of a binding's on_call: stages accumulate
@@ -260,7 +260,7 @@ class ItemBehaviour(_IteratorBehaviour):
         return self._factory._clear(self._factory._item_stages)
 
 
-class FinishBehaviour(_IteratorBehaviour):
+class IteratorFinishBehaviour(_IteratorBehaviour):
     """`iterator().on_finish`: behaviour for normal exhaustion.
 
     Checks receive the wrapped generator's return value, or None for
@@ -280,7 +280,7 @@ class FinishBehaviour(_IteratorBehaviour):
         return self._factory._clear(self._factory._finish_checks)
 
 
-class ErrorBehaviour(_IteratorBehaviour):
+class IteratorErrorBehaviour(_IteratorBehaviour):
     """`iterator().on_error`: behaviour for a failed iteration.
 
     Hooks receive the exception about to reach the consumer, whether it
@@ -302,7 +302,7 @@ class ErrorBehaviour(_IteratorBehaviour):
         return self._factory._clear(self._factory._error_hooks)
 
 
-class AbandonBehaviour(_IteratorBehaviour):
+class IteratorAbandonBehaviour(_IteratorBehaviour):
     """`iterator().on_abandon`: behaviour for an abandoned iteration.
 
     Hooks fire when a started, unexhausted wrapped generator is closed,
@@ -343,28 +343,28 @@ class IteratorProxy:
         self._abandon_hooks: list[AbandonFunction] = []
 
     @property
-    def on_item(self) -> ItemBehaviour:
+    def on_item(self) -> IteratorItemBehaviour:
         """The behaviour namespace for items."""
 
-        return ItemBehaviour(self)
+        return IteratorItemBehaviour(self)
 
     @property
-    def on_finish(self) -> FinishBehaviour:
+    def on_finish(self) -> IteratorFinishBehaviour:
         """The behaviour namespace for normal exhaustion."""
 
-        return FinishBehaviour(self)
+        return IteratorFinishBehaviour(self)
 
     @property
-    def on_error(self) -> ErrorBehaviour:
+    def on_error(self) -> IteratorErrorBehaviour:
         """The behaviour namespace for a failed iteration."""
 
-        return ErrorBehaviour(self)
+        return IteratorErrorBehaviour(self)
 
     @property
-    def on_abandon(self) -> AbandonBehaviour:
+    def on_abandon(self) -> IteratorAbandonBehaviour:
         """The behaviour namespace for an abandoned iteration."""
 
-        return AbandonBehaviour(self)
+        return IteratorAbandonBehaviour(self)
 
     def _add(self, hooks: list[Any], fn: Any) -> Self:
         hooks.append(fn)

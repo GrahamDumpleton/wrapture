@@ -34,11 +34,28 @@ class StackFrame(NamedTuple):
     function: str
 
 
-# The stack= argument to binding(): capture just the calling frame, or
-# every frame. Any other positive integer captures that many frames.
+# The depths behind the stack= argument to binding(): "caller" captures
+# just the calling frame, "full" every frame, and any positive integer
+# captures that many frames.
 
 caller: Final[int] = 1
 full: Final[int] = sys.maxsize
+
+_DEPTH_NAMES = {"caller": caller, "full": full}
+
+
+def _resolve_depth(stack: int | str | None) -> int | None:
+    if isinstance(stack, str):
+        try:
+            return _DEPTH_NAMES[stack]
+        except KeyError:
+            raise ValueError(
+                f"stack must be None, 'caller', 'full' or a positive"
+                f" frame count, got {stack!r}"
+            ) from None
+
+    return stack
+
 
 # Frames of the observation machinery itself are elided, so a captured
 # stack starts at the code under observation.

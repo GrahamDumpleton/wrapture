@@ -24,6 +24,15 @@ def charge(amount: int, currency: str = "USD", *, retries: int = 3) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_missing_is_reexported_from_wrapture() -> None:
+    # Docs teach `event.result is MISSING`; the sentinel is reachable
+    # without knowing it comes from wrapt.
+
+    import wrapture
+
+    assert wrapture.MISSING is MISSING
+
+
 def test_call_event_defaults() -> None:
     event = Event("call", "Gateway.charge")
 

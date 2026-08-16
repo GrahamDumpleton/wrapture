@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from wrapture import binding, caller, full, stack_frames, timeline
+from wrapture import binding, stack_frames, timeline
 from wrapture.stacks import _stacks
 
 
@@ -44,7 +44,7 @@ def test_no_capture_by_default() -> None:
 
 
 def test_caller_captures_exactly_the_calling_frame() -> None:
-    charge = binding(Gateway, "charge", stack=caller)
+    charge = binding(Gateway, "charge", stack="caller")
 
     with timeline(charge):
         place_order(Gateway())
@@ -75,7 +75,7 @@ def test_a_frame_count_walks_outward_from_the_caller() -> None:
 
 
 def test_full_captures_more_than_caller() -> None:
-    charge = binding(Gateway, "charge", stack=full)
+    charge = binding(Gateway, "charge", stack="full")
 
     with timeline(charge):
         place_order(Gateway())
@@ -92,6 +92,9 @@ def test_an_invalid_depth_is_rejected_at_creation() -> None:
     with pytest.raises(ValueError, match="stack must be"):
         binding(Gateway, "charge", stack=0)
 
+    with pytest.raises(ValueError, match="stack must be"):
+        binding(Gateway, "charge", stack="fll")
+
 
 # ---------------------------------------------------------------------------
 # interning
@@ -99,7 +102,7 @@ def test_an_invalid_depth_is_rejected_at_creation() -> None:
 
 
 def test_repeated_captures_from_one_site_intern_to_one_stack() -> None:
-    charge = binding(Gateway, "charge", stack=caller)
+    charge = binding(Gateway, "charge", stack="caller")
 
     with timeline(charge):
         gateway = Gateway()
@@ -114,7 +117,7 @@ def test_repeated_captures_from_one_site_intern_to_one_stack() -> None:
 
 
 def test_different_call_sites_intern_to_different_stacks() -> None:
-    charge = binding(Gateway, "charge", stack=caller)
+    charge = binding(Gateway, "charge", stack="caller")
 
     with timeline(charge):
         gateway = Gateway()
@@ -134,7 +137,7 @@ def test_different_call_sites_intern_to_different_stacks() -> None:
 
 
 def test_an_attribute_read_names_the_line_that_triggered_it() -> None:
-    total = binding(Model, "total", stack=caller)
+    total = binding(Model, "total", stack="caller")
 
     def render(model: Model) -> str:
         return f"total: {model.total}"
@@ -164,7 +167,7 @@ def test_no_wrapture_or_wrapt_frames_appear() -> None:
         os.path.dirname(os.path.abspath(wrapt.__file__)),
     )
 
-    charge = binding(Gateway, "charge", stack=full)
+    charge = binding(Gateway, "charge", stack="full")
 
     with timeline(charge):
         place_order(Gateway())
@@ -180,7 +183,7 @@ def test_capture_works_through_behaviour() -> None:
     def note(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         return args, kwargs
 
-    charge = binding(Gateway, "charge", stack=caller).on_call.transforms_args(note)
+    charge = binding(Gateway, "charge", stack="caller").on_call.transforms_args(note)
 
     with timeline(charge):
         place_order(Gateway())

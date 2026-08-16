@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from wrapt import MISSING
 
-from wrapture import SUMMARY, annotate, binding, redact, timeline
+from wrapture import annotate, binding, redact, timeline
 
 
 class Model:
@@ -216,7 +216,7 @@ def test_calls_triggered_by_a_property_read_nest_under_the_get_event() -> None:
 
 
 def test_set_values_capture_at_the_argument_level() -> None:
-    status = binding(Model, "status", missing_ok=True, capture=SUMMARY)
+    status = binding(Model, "status", missing_ok=True, capture="summary")
     model = Model()
     tags = ["a", "b"]
 

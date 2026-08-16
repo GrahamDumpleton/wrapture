@@ -12,17 +12,13 @@ from typing import Any
 from wrapt import MISSING
 
 from wrapture import (
-    NONE,
-    SNAPSHOT,
-    SUMMARY,
-    TYPES,
     annotate,
     binding,
     current_event,
     redact,
     timeline,
 )
-from wrapture.capture import summarize, type_name
+from wrapture.capture import NONE, summarize, type_name
 
 
 class Ledger:
@@ -59,7 +55,7 @@ def test_reference_default_stores_references() -> None:
 
 
 def test_summary_snapshots_a_bounded_repr() -> None:
-    record = binding(Ledger, "record", capture=SUMMARY)
+    record = binding(Ledger, "record", capture="summary")
     entries = ["a", "b"]
 
     with timeline(record):
@@ -75,7 +71,7 @@ def test_summary_snapshots_a_bounded_repr() -> None:
 
 
 def test_types_records_type_names_only() -> None:
-    record = binding(Ledger, "record", capture=TYPES)
+    record = binding(Ledger, "record", capture="types")
 
     with timeline(record):
         Ledger().record(["a"])
@@ -87,7 +83,7 @@ def test_types_records_type_names_only() -> None:
 
 
 def test_none_keeps_the_event_but_no_values() -> None:
-    record = binding(Ledger, "record", capture=NONE)
+    record = binding(Ledger, "record", capture="none")
 
     with timeline(record):
         Ledger().record(["a"])
@@ -100,7 +96,7 @@ def test_none_keeps_the_event_but_no_values() -> None:
 
 
 def test_snapshot_deepcopies_and_falls_back_where_it_cannot() -> None:
-    record = binding(Ledger, "record", capture=SNAPSHOT)
+    record = binding(Ledger, "record", capture="snapshot")
     entries = ["a", "b"]
 
     with timeline(record):
@@ -121,7 +117,7 @@ def test_snapshot_deepcopies_and_falls_back_where_it_cannot() -> None:
 
 
 def test_specific_axis_wins_over_the_shorthand() -> None:
-    record = binding(Ledger, "record", capture=NONE, capture_result=SUMMARY)
+    record = binding(Ledger, "record", capture="none", capture_result="summary")
 
     with timeline(record):
         Ledger().record(["a"])
@@ -152,6 +148,25 @@ def test_redact_matches_by_name_however_the_caller_passed_it() -> None:
 
         assert vault.events.last.arguments["attempts"] == 3  # type: ignore[index]
         assert vault.events.first.result == "opened:hunter2"
+
+
+def test_a_misspelled_capture_level_raises_at_creation() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="capture level must be"):
+        binding(Ledger, "record", capture="sumary")
+
+
+def test_redact_accepts_a_level_name_for_everything_unnamed() -> None:
+    vault = binding(Vault, "open", capture_args=redact("secret", level="types"))
+
+    with timeline(vault):
+        Vault().open("hunter2", attempts=3)
+
+        event = vault.events.first
+        assert event.arguments is not None
+        assert event.arguments["secret"] == "<redacted>"
+        assert event.arguments["attempts"] == "<int>"
 
 
 def test_a_custom_callable_is_a_policy() -> None:

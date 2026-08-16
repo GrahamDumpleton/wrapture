@@ -20,6 +20,8 @@ def _format_version(parts: tuple[str, ...]) -> str:
 __version_info__ = ("1", "0", "0", "dev1")
 __version__ = _format_version(__version_info__)
 
+from wrapt import MISSING
+
 from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
@@ -33,11 +35,6 @@ from .bindings import (
     bindings,
 )
 from .capture import (
-    NONE,
-    REFERENCE,
-    SNAPSHOT,
-    SUMMARY,
-    TYPES,
     redact,
 )
 from .eventlogs import (
@@ -56,17 +53,15 @@ from .exceptions import (
     WrongModeError,
 )
 from .iterators import (
-    AbandonBehaviour,
-    ErrorBehaviour,
-    FinishBehaviour,
-    ItemBehaviour,
+    IteratorAbandonBehaviour,
+    IteratorErrorBehaviour,
+    IteratorFinishBehaviour,
+    IteratorItemBehaviour,
     IteratorProxy,
     iterator,
 )
 from .stacks import (
     StackFrame,
-    caller,
-    full,
     stack_frames,
 )
 from .timeline import (
@@ -78,25 +73,21 @@ from .timeline import (
 )
 
 __all__ = [
-    "NONE",
-    "REFERENCE",
-    "SNAPSHOT",
-    "SUMMARY",
-    "TYPES",
-    "AbandonBehaviour",
+    "MISSING",
     "AlreadyAppliedError",
     "Binding",
     "BindingGroup",
     "CallBehaviour",
     "DeferredTargetError",
     "DeleteBehaviour",
-    "ErrorBehaviour",
     "Event",
     "EventLog",
     "ExpectationNotMetError",
-    "FinishBehaviour",
     "GetBehaviour",
-    "ItemBehaviour",
+    "IteratorAbandonBehaviour",
+    "IteratorErrorBehaviour",
+    "IteratorFinishBehaviour",
+    "IteratorItemBehaviour",
     "IteratorProxy",
     "NeverAppliedError",
     "NotImplementedYetError",
@@ -109,9 +100,7 @@ __all__ = [
     "annotate",
     "binding",
     "bindings",
-    "caller",
     "current_event",
-    "full",
     "iterator",
     "redact",
     "stack_frames",
