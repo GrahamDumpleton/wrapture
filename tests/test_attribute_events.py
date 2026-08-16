@@ -190,6 +190,18 @@ def test_filters_bridge_and_narrow_across_kinds() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_attribute_events_record_durations() -> None:
+    total = binding(Basket, "total")
+
+    with timeline(total) as tape:
+        _ = Basket().total
+
+    (event,) = tape.all
+    assert event.started is not None
+    assert event.duration is not None
+    assert event.duration >= 0.0
+
+
 def test_calls_triggered_by_a_property_read_nest_under_the_get_event() -> None:
     total = binding(Basket, "total")
     price = binding(Basket, "price")

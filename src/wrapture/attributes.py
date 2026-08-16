@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -173,19 +174,27 @@ def _record(
         _in_recorder.reset(guard)
 
     # Position before delivery: pushed first, so sinks hearing
-    # on_enter see the event's final depth and parent link.
+    # on_enter see the event's final depth and parent link. Timing
+    # starts after the bookkeeping, so its overhead is not charged to
+    # the observed operation.
 
     token = _push(event)
     _record_event(event, active)
 
+    started = time.perf_counter()
+    event.started = started
+
     try:
         outcome = operate()
     except BaseException as exc:
+        event.duration = time.perf_counter() - started
         event.exception = exc
         _notify_error(event, active)
         raise
     finally:
         _pop(token)
+
+    event.duration = time.perf_counter() - started
 
     # The value a read produced is its outcome, so it captures on the
     # result axis, exactly as a call's return value does.

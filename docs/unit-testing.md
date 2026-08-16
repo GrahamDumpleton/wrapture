@@ -198,6 +198,10 @@ fields a test typically reads:
   event stands alone if it ever leaves the process; `tape.parent_of()`
   and `tape.children_of()` resolve the links back to event objects when
   a test wants to walk the tree.
+- `started` and `duration` place the event in time: when the operation
+  began (on the `perf_counter` clock) and how long it ran, exceptions
+  included. Recording's own bookkeeping is excluded from the figure.
+  Generators refine this with a second number, covered below.
 
 Events record what actually flowed, behaviour included. A call stubbed
 with `returns()` records the stubbed result; a failure injected with

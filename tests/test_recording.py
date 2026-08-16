@@ -65,6 +65,42 @@ def test_a_call_records_one_event_with_its_details() -> None:
     assert event.forwarded is None
 
 
+def test_a_call_records_when_it_started_and_how_long_it_took() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge) as tape:
+        Gateway().charge(500)
+
+    (event,) = tape.all
+    assert event.started is not None
+    assert event.duration is not None
+    assert event.duration >= 0.0
+
+
+def test_a_raising_call_still_records_a_duration() -> None:
+    refund = binding(Gateway, "refund")
+
+    with timeline(refund) as tape:
+        with pytest.raises(TimeoutError):
+            Gateway().refund(100)
+
+    (event,) = tape.all
+    assert event.duration is not None
+    assert event.duration >= 0.0
+
+
+def test_an_awaited_call_records_a_duration() -> None:
+    charge = binding(AsyncGateway, "charge")
+
+    with timeline(charge) as tape:
+        asyncio.run(AsyncGateway().charge(500))
+
+    (event,) = tape.all
+    assert event.started is not None
+    assert event.duration is not None
+    assert event.duration >= 0.0
+
+
 def test_call_forms_record_the_same_normalized_arguments() -> None:
     charge = binding(Gateway, "charge")
 

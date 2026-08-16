@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import atexit
 import contextvars
+import random
 import sys
 import threading
 import warnings
-from typing import TextIO
+import weakref
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, TextIO
 
 from wrapt import MISSING
 
@@ -325,3 +329,327 @@ class Printer(Sink):
         where = event.label or event.path
         exception = type(event.exception).__name__
         self._write("  " * event.depth + f"{where} !! {exception}")
+
+
+def _forward(sink: Sink, notification: str, event: Event) -> None:
+    # Combinators forward with the same isolation the registry gives
+    # top-level sinks, so the count and the warning land on the sink
+    # that actually broke, and its siblings still get the event.
+
+    try:
+        getattr(sink, notification)(event)
+    except Exception:
+        _note_sink_error(sink)
+
+
+class Counter(Sink):
+    """A sink that counts events and retains nothing.
+
+    The count is of operations observed beginning, whether or not they
+    completed. Declaring "none" on both capture axes matters: when no
+    other active sink asks for more, recording skips value capture
+    entirely, including signature binding, the dominant cost, so a
+    counter over a hot method is cheap enough to leave on for a whole
+    test suite.
+    """
+
+    capture_args: CapturePolicy | str = "none"
+    capture_result: CapturePolicy | str = "none"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    @property
+    def count(self) -> int:
+        """How many operations this sink has heard begin."""
+
+        with self._lock:
+            return self._count
+
+    def on_enter(self, event: Event) -> None:
+        """Count the event."""
+
+        with self._lock:
+            self._count += 1
+
+    def __repr__(self) -> str:
+        return f"<Counter: {self.count}>"
+
+
+@dataclass(frozen=True)
+class PathStats:
+    """Aggregated figures for one path: how many operations began, and
+    the total, fastest and slowest wall durations of those that closed
+    with a duration."""
+
+    count: int
+    total: float
+    min: float | None
+    max: float | None
+
+
+class Aggregate(Sink):
+    """Per-path statistics in bounded memory.
+
+    One row per path: how many operations began, and the total,
+    fastest and slowest durations of the ones that completed,
+    exceptions included. Memory is bounded by the number of bound
+    locations, however many events flow, which is what makes this
+    safe to leave running in a long-lived process. Like Counter, it
+    declares "none" capture on both axes, so it never causes values
+    to be captured.
+    """
+
+    capture_args: CapturePolicy | str = "none"
+    capture_result: CapturePolicy | str = "none"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rows: dict[str, list[Any]] = {}
+
+    @property
+    def stats(self) -> dict[str, PathStats]:
+        """A snapshot of the per-path figures, keyed by event path."""
+
+        with self._lock:
+            return {
+                path: PathStats(row[0], row[1], row[2], row[3])
+                for path, row in self._rows.items()
+            }
+
+    def on_enter(self, event: Event) -> None:
+        """Count the operation against its path."""
+
+        with self._lock:
+            row = self._rows.setdefault(event.path, [0, 0.0, None, None])
+            row[0] += 1
+
+    def _observe(self, event: Event) -> None:
+        if event.duration is None:
+            return
+
+        with self._lock:
+            row = self._rows.setdefault(event.path, [0, 0.0, None, None])
+            row[1] += event.duration
+            row[2] = event.duration if row[2] is None else min(row[2], event.duration)
+            row[3] = event.duration if row[3] is None else max(row[3], event.duration)
+
+    def on_exit(self, event: Event) -> None:
+        """Fold the completed operation's duration into its row."""
+
+        self._observe(event)
+
+    def on_error(self, event: Event) -> None:
+        """Fold the failed operation's duration into its row."""
+
+        self._observe(event)
+
+
+class Fanout(Sink):
+    """One sink that delivers to several.
+
+    Each notification is forwarded to every inner sink in order, with
+    the same isolation the registry gives top-level sinks: a broken
+    inner sink is counted and skipped, and the others still hear the
+    event. The capture declarations are the highest any inner sink
+    declares, read when the Fanout is constructed, so capture
+    negotiation sees through the composition.
+    """
+
+    def __init__(self, *sinks: Sink) -> None:
+        self._sinks = sinks
+        self.capture_args = _required_policy(sinks, "capture_args")
+        self.capture_result = _required_policy(sinks, "capture_result")
+
+    def on_enter(self, event: Event) -> None:
+        """Forward to every inner sink."""
+
+        for sink in self._sinks:
+            _forward(sink, "on_enter", event)
+
+    def on_exit(self, event: Event) -> None:
+        """Forward to every inner sink."""
+
+        for sink in self._sinks:
+            _forward(sink, "on_exit", event)
+
+    def on_error(self, event: Event) -> None:
+        """Forward to every inner sink."""
+
+        for sink in self._sinks:
+            _forward(sink, "on_error", event)
+
+    def flush(self) -> None:
+        """Flush every inner sink."""
+
+        for sink in self._sinks:
+            try:
+                sink.flush()
+            except Exception:
+                _note_sink_error(sink)
+
+
+class Filter(Sink):
+    """Forward only the events a predicate accepts.
+
+    The predicate is consulted once, when the event enters, and the
+    decision sticks: an accepted event's exit or error is forwarded
+    even if the fields the predicate looked at have changed since, so
+    the inner sink always sees properly paired notifications. The
+    capture declarations are the inner sink's, read at construction.
+    """
+
+    def __init__(self, predicate: Callable[[Event], bool], sink: Sink) -> None:
+        self._predicate = predicate
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._accepted: weakref.WeakSet[Event] = weakref.WeakSet()
+
+        self.capture_args = getattr(sink, "capture_args", REFERENCE)
+        self.capture_result = getattr(sink, "capture_result", REFERENCE)
+
+    def on_enter(self, event: Event) -> None:
+        """Consult the predicate; forward and remember an accept."""
+
+        if self._predicate(event):
+            with self._lock:
+                self._accepted.add(event)
+
+            _forward(self._sink, "on_enter", event)
+
+    def _close(self, notification: str, event: Event) -> None:
+        with self._lock:
+            accepted = event in self._accepted
+            self._accepted.discard(event)
+
+        if accepted:
+            _forward(self._sink, notification, event)
+
+    def on_exit(self, event: Event) -> None:
+        """Forward the close of an accepted event."""
+
+        self._close("on_exit", event)
+
+    def on_error(self, event: Event) -> None:
+        """Forward the failure of an accepted event."""
+
+        self._close("on_error", event)
+
+    def flush(self) -> None:
+        """Flush the inner sink."""
+
+        self._sink.flush()
+
+
+class Depth(Sink):
+    """Forward only the top levels of the call tree.
+
+    An event at depth below `max_depth` passes; deeper ones are
+    dropped, so Depth(1, ...) is roots only and Depth(2, ...) is roots
+    and their direct children. Depth is fixed when an event is
+    recorded, so pairing is consistent without any bookkeeping. The
+    capture declarations are the inner sink's, read at construction.
+    """
+
+    def __init__(self, max_depth: int, sink: Sink) -> None:
+        if max_depth < 1:
+            raise ValueError(
+                f"max_depth must be a positive number of levels, got {max_depth!r}"
+            )
+
+        self._max_depth = max_depth
+        self._sink = sink
+
+        self.capture_args = getattr(sink, "capture_args", REFERENCE)
+        self.capture_result = getattr(sink, "capture_result", REFERENCE)
+
+    def on_enter(self, event: Event) -> None:
+        """Forward events above the depth cut."""
+
+        if event.depth < self._max_depth:
+            _forward(self._sink, "on_enter", event)
+
+    def on_exit(self, event: Event) -> None:
+        """Forward the close of events above the depth cut."""
+
+        if event.depth < self._max_depth:
+            _forward(self._sink, "on_exit", event)
+
+    def on_error(self, event: Event) -> None:
+        """Forward the failure of events above the depth cut."""
+
+        if event.depth < self._max_depth:
+            _forward(self._sink, "on_error", event)
+
+    def flush(self) -> None:
+        """Flush the inner sink."""
+
+        self._sink.flush()
+
+
+class Sample(Sink):
+    """Forward a random fraction of call trees.
+
+    The keep-or-drop decision is made once per tree, when its root
+    enters, and inherited by everything beneath: sampling per event
+    would emit children whose parents were never seen, orphaning them
+    in the output. `rate` is the probability a tree is kept, from 0.0
+    (nothing) to 1.0 (everything). The capture declarations are the
+    inner sink's, read at construction.
+    """
+
+    def __init__(self, rate: float, sink: Sink) -> None:
+        if not 0.0 <= rate <= 1.0:
+            raise ValueError(f"rate must be between 0.0 and 1.0, got {rate!r}")
+
+        self._rate = rate
+        self._sink = sink
+        self._random = random.random
+        self._lock = threading.Lock()
+        self._kept: set[int] = set()
+
+        self.capture_args = getattr(sink, "capture_args", REFERENCE)
+        self.capture_result = getattr(sink, "capture_result", REFERENCE)
+
+    def on_enter(self, event: Event) -> None:
+        """Decide at the root; inherit the decision below it."""
+
+        with self._lock:
+            if event.parent_id is None:
+                keep = self._random() < self._rate
+            else:
+                keep = event.parent_id in self._kept
+
+            if keep:
+                self._kept.add(event.seq)
+
+        if keep:
+            _forward(self._sink, "on_enter", event)
+
+    def _close(self, notification: str, event: Event) -> None:
+        # Children close before their parent does, so the parent's
+        # entry is still present for them and can be dropped at the
+        # parent's own close.
+
+        with self._lock:
+            kept = event.seq in self._kept
+            self._kept.discard(event.seq)
+
+        if kept:
+            _forward(self._sink, notification, event)
+
+    def on_exit(self, event: Event) -> None:
+        """Forward the close of a sampled tree's event."""
+
+        self._close("on_exit", event)
+
+    def on_error(self, event: Event) -> None:
+        """Forward the failure of a sampled tree's event."""
+
+        self._close("on_error", event)
+
+    def flush(self) -> None:
+        """Flush the inner sink."""
+
+        self._sink.flush()

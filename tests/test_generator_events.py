@@ -376,8 +376,13 @@ def test_a_decorator_that_materializes_the_iteration_records_a_plain_result() ->
 
     (event,) = tape.all
     assert event.result == [0, 1, 2]
+
+    # No iteration tracking: no item count, no body time. The plain
+    # call duration every event now carries is unrelated to iteration.
+
     assert event.items is None
-    assert event.duration is None
+    assert event.body_duration is None
+    assert event.duration is not None
 
 
 # ---------------------------------------------------------------------------

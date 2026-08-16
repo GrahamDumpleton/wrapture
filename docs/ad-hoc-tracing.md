@@ -141,31 +141,131 @@ come in, with no timeline and no changes to the code being observed.
 after the fact. In a test, both can run at once, since sinks compose:
 keep the timeline for assertions and add a `Printer` while debugging.
 
+## Counting without retaining
+
+Not every question needs the events themselves; often a number is the
+answer. Two sinks keep numbers and nothing else, so they are safe to
+leave running for a whole test suite or a long-lived process:
+
+- `Counter()` counts operations as they begin, failures included. One
+  number, no retention.
+- `Aggregate()` keeps one row per path: how many operations began, and
+  the total, fastest and slowest durations of the ones that completed,
+  exceptions included. Memory is bounded by the number of bound
+  locations, however many events flow.
+
+Both declare `"none"` on both capture axes, which matters: when no
+other active sink asks for more, recording skips value capture
+entirely, including signature binding, the dominant cost of recording
+a call. A counter over a hot method costs a fraction of what a
+recording tape does.
+
+Counting across a whole suite is how the classic N+1 query regression
+gets caught. Bind the database layer's entry point once, register a
+`Counter`, and give every test a query budget:
+
+```python
+# conftest.py
+import pytest
+import wrapture
+
+from myapp.database import Database
+
+queries = wrapture.Counter()
+
+def pytest_configure(config):
+    wrapture.binding(Database, "execute").apply()
+    wrapture.add_sink(queries)
+
+@pytest.fixture(autouse=True)
+def query_budget():
+    before = queries.count
+    yield
+    used = queries.count - before
+    assert used <= 25, f"test issued {used} queries; N+1 regression?"
+```
+
+A test that quietly starts issuing a query per row now fails with a
+number attached, and because the counter asks for no values, the whole
+suite pays almost nothing for the guarantee.
+
+`Aggregate` answers the follow-up question, "where is the time going",
+without retaining a single event:
+
+```python
+hot = wrapture.add_sink(wrapture.Aggregate())
+...
+for path, row in sorted(
+    hot.stats.items(), key=lambda item: item[1].total, reverse=True
+):
+    print(f"{path}: {row.count} calls, {row.total:.3f}s total")
+```
+
+Every recorded event carries `started` and `duration` (exceptions
+included; generators additionally separate wall time from time spent
+in the body), which is what the aggregate rows are built from.
+
+## Composing sinks
+
+Combinators make sinks compose like building blocks. Each is itself a
+sink wrapping others, so they nest freely:
+
+- `Fanout(*sinks)` delivers every notification to several sinks, with
+  the same isolation the registry gives top-level sinks: one broken
+  inner sink is counted and skipped, its siblings still hear the event.
+- `Filter(predicate, sink)` forwards only events the predicate
+  accepts. The predicate is consulted once, when the event enters, and
+  the decision sticks, so the inner sink always sees properly paired
+  enter and exit notifications even for fields that change as the
+  operation completes.
+- `Depth(max_depth, sink)` forwards only the top levels of the call
+  tree: `Depth(1, ...)` is roots only, `Depth(2, ...)` roots and their
+  direct children.
+- `Sample(rate, sink)` keeps a random fraction of whole call trees.
+  The decision is made once per tree, at its root, and inherited by
+  everything beneath, because sampling per event would emit children
+  whose parents were never seen.
+
+One registration can therefore serve several needs at different costs:
+
+```python
+wrapture.add_sink(wrapture.Fanout(
+    wrapture.Aggregate(),                      # always on, numbers only
+    wrapture.Depth(2, wrapture.Printer()),     # live view, top of tree
+    wrapture.Sample(0.01, detailed_sink),      # 1% of trees, in full
+))
+```
+
+A combinator declares the capture levels of what it wraps (`Fanout`
+takes the highest of its inner sinks'), read at construction, so
+capture negotiation sees through the composition and the aggregate
+above never forces values to be captured for the printer's sake.
+
 ## Writing a sink
 
 The protocol is small enough that special-purpose sinks are cheap to
-write. A sink that counts calls per path, retains nothing, and asks for
-no values at all:
+write. A sink that remembers which operations ran longer than a
+threshold, keeping numbers rather than events:
 
 ```python
-class Counting(wrapture.Sink):
-    """Count events per path; keep no values, no references."""
+class SlowCalls(wrapture.Sink):
+    """Remember the operations that ran longer than a threshold."""
 
     capture_args = "none"
     capture_result = "none"
 
-    def __init__(self):
-        self.counts = {}
+    def __init__(self, threshold):
+        self.threshold = threshold
+        self.slow = []
 
-    def on_enter(self, event):
-        self.counts[event.path] = self.counts.get(event.path, 0) + 1
+    def on_exit(self, event):
+        if event.duration is not None and event.duration > self.threshold:
+            self.slow.append((event.path, event.duration))
 ```
 
-Declaring `"none"` on both axes matters: if no other active sink asks
-for more, recording skips value capture entirely, including signature
-binding, which is the dominant cost of recording a call. A counting
-sink over a hot method is therefore far cheaper than a recording tape
-over the same method.
+Declaring `"none"` on both axes keeps it near-free, exactly as with
+the counting sinks above; drop the declarations if the sink needs to
+look at argument or result values.
 
 One caveat for sinks that hold state, like the dictionary above:
 notifications arrive from whatever thread ran the observed operation,

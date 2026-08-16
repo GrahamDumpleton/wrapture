@@ -190,12 +190,16 @@ async def _record_awaited(
     try:
         result = await awaitable
     except BaseException as exc:
+        if event.started is not None:
+            event.duration = time.perf_counter() - event.started
         event.exception = exc
         _notify_error(event, active)
         raise
     finally:
         _stack.reset(token)
 
+    if event.started is not None:
+        event.duration = time.perf_counter() - event.started
     _capture_result(event, result, policy)
     _notify_exit(event, active)
     return result
@@ -840,6 +844,13 @@ class Binding:
             base = _stack.get()
             token = _push(event)
             _record_event(event, active)
+
+            # Time from here, after the recording bookkeeping, so its
+            # overhead is not charged to the observed code.
+
+            started = time.perf_counter()
+            event.started = started
+
             try:
                 if behaviour is None:
                     outcome = wrapped(*args, **kwargs)
@@ -848,6 +859,7 @@ class Binding:
                         _forwarder(wrapped, event), instance, args, kwargs
                     )
             except BaseException as exc:
+                event.duration = time.perf_counter() - started
                 event.exception = exc
                 _notify_error(event, active)
                 raise
@@ -876,6 +888,7 @@ class Binding:
             if inspect.isawaitable(outcome):
                 return _record_awaited(outcome, event, base, result_policy, active)
 
+            event.duration = time.perf_counter() - started
             _capture_result(event, outcome, result_policy)
             _notify_exit(event, active)
             return outcome
