@@ -136,4 +136,5 @@ testing assertion library, a tracing tool, or both at once.
 
 ## License
 
-BSD 2-Clause. See [LICENSE](LICENSE).
+BSD 2-Clause. See
+[LICENSE](https://github.com/GrahamDumpleton/wrapture/blob/develop/LICENSE).
