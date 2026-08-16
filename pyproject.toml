@@ -68,7 +68,10 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# The docs are on the test paths so the interpreter transcripts in the
+# getting started page run as doctests and cannot rot.
+testpaths = ["tests", "docs"]
+addopts = "--doctest-glob=*.md"
 
 [tool.mypy]
 python_version = "3.12"

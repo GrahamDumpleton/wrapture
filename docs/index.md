@@ -47,11 +47,38 @@ the code to have been written with them in mind, or can only be switched on
 for the whole program at once. wrapture needs neither: you point at a
 method by name and a trace appears.
 
+## Thirty seconds of it
+
+None of the classes below import wrapture or know they are observed:
+
+```python
+place = wrapture.binding(OrderService, "place")
+charge = wrapture.binding(Gateway, "charge")
+record = wrapture.binding(Ledger, "record")
+
+with wrapture.timeline(place, charge, record) as tape:
+    OrderService().place(500)
+
+print(tape.tree())
+```
+
+```
+OrderService.place(amount=500)  -> {'id': 'ch_500', 'amount': 500}
+  Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
+  Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> 'led_ch_500'
+```
+
+New here? Start with the getting started page; everything on it can be
+pasted into an interpreter. Coming from `unittest.mock`? The comparison
+page maps each mock idiom to its wrapture counterpart.
+
 ## Documentation
 
 ```{toctree}
 :maxdepth: 2
 
+getting-started
+coming-from-mock
 design-philosophy
 monkey-patching
 unit-testing

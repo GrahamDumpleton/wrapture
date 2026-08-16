@@ -7,6 +7,11 @@ separate from the package code in src/wrapture/. Test files are named
 `test_*.py` and are discovered by pytest, which is configured via the
 `[tool.pytest.ini_options]` section of [pyproject.toml](pyproject.toml).
 
+The docs/ directory is also on the test paths, with doctest collection
+enabled for markdown files: the interpreter transcripts in the getting
+started page run as doctests on every test run, so the examples in the
+documentation cannot silently rot.
+
 ## Running the tests
 
 All tooling in this project goes through [uv](https://docs.astral.sh/uv/),
