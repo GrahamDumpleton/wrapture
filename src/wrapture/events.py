@@ -54,13 +54,15 @@ class Event:
     binding: Any = field(default=None, repr=False)
 
     # Position on the tape: allocation order, nesting depth, and the
-    # enclosing and enclosed events. Excluded from repr() because parent
-    # and children reference each other cyclically.
+    # sequence number of the enclosing event. The link is an id rather
+    # than an object reference, so an event can be serialised and leave
+    # the process without dragging its tree along, and so a retained
+    # event does not keep its ancestors alive. The tape resolves the id
+    # back to an event with parent_of() and children_of().
 
     seq: int = 0
     depth: int = 0
-    parent: Event | None = field(default=None, repr=False)
-    children: list[Event] = field(default_factory=list, repr=False)
+    parent_id: int | None = None
 
     started: float | None = None
     duration: float | None = None

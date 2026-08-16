@@ -130,9 +130,9 @@ def test_body_calls_nest_under_the_generator_event() -> None:
     # generator's event. handle() runs in the consumer between yields,
     # so it does not.
 
-    assert [e.parent for e in fetch_events] == [generator_event]
-    assert [e.parent for e in handle_events] == [None, None]
-    assert generator_event.children == fetch_events
+    assert [e.parent_id for e in fetch_events] == [generator_event.seq]
+    assert [e.parent_id for e in handle_events] == [None, None]
+    assert tape.children_of(generator_event) == fetch_events
 
 
 # ---------------------------------------------------------------------------

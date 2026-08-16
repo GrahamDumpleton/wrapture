@@ -104,9 +104,10 @@ def test_nested_calls_record_a_tree() -> None:
 
     assert outer.label == "Gateway.charge"
     assert inner.label == "Ledger.record"
-    assert inner.parent is outer
+    assert inner.parent_id == outer.seq
     assert inner.depth == 1
-    assert outer.children == [inner]
+    assert tape.children_of(outer) == [inner]
+    assert tape.parent_of(inner) is outer
     assert (outer.seq, inner.seq) == (1, 2)
 
 
@@ -306,8 +307,8 @@ def test_calls_inside_a_coroutine_body_nest_under_its_event() -> None:
 
     assert outer.label == "AsyncGateway.charge"
     assert inner.label == "Ledger.record"
-    assert inner.parent is outer
-    assert outer.children == [inner]
+    assert inner.parent_id == outer.seq
+    assert tape.children_of(outer) == [inner]
 
 
 # ---------------------------------------------------------------------------

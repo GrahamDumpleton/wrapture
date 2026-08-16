@@ -205,8 +205,8 @@ def test_calls_triggered_by_a_property_read_nest_under_the_get_event() -> None:
     assert outer.label == "Basket.total"
     assert inner.kind == "call"
     assert inner.label == "Basket.price"
-    assert inner.parent is outer
-    assert outer.children == [inner]
+    assert inner.parent_id == outer.seq
+    assert tape.children_of(outer) == [inner]
     assert outer.result == 10
 
 

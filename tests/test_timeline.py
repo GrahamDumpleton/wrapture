@@ -62,29 +62,33 @@ def test_tape_all_returns_a_copy() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_push_assigns_parent_depth_and_children() -> None:
-    outer = Event("call", "outer")
-    inner = Event("call", "inner")
+def test_push_assigns_parent_id_and_depth() -> None:
+    # Events are recorded before they are pushed, so a pushed event
+    # always carries the seq its children link to.
+
+    tape = Tape()
+    outer = tape.record(Event("call", "outer"))
+    inner = tape.record(Event("call", "inner"))
 
     outer_token = _push(outer)
     assert outer.depth == 0
-    assert outer.parent is None
+    assert outer.parent_id is None
 
     inner_token = _push(inner)
     assert inner.depth == 1
-    assert inner.parent is outer
-    assert outer.children == [inner]
+    assert inner.parent_id == outer.seq
 
     # Popping the inner event makes the next push a sibling, not a
     # grandchild.
 
     _pop(inner_token)
-    sibling = Event("call", "sibling")
+    sibling = tape.record(Event("call", "sibling"))
     sibling_token = _push(sibling)
 
     assert sibling.depth == 1
-    assert sibling.parent is outer
-    assert outer.children == [inner, sibling]
+    assert sibling.parent_id == outer.seq
+    assert tape.children_of(outer) == [inner, sibling]
+    assert tape.parent_of(sibling) is outer
 
     _pop(sibling_token)
     _pop(outer_token)
@@ -408,7 +412,7 @@ def test_concurrent_tasks_record_isolated_trees() -> None:
 
     for root in roots:
         assert root.depth == 0
-        assert root.parent is None
-        assert [child.parent for child in root.children] == [root]
+        assert root.parent_id is None
+        assert [child.parent_id for child in tape.children_of(root)] == [root.seq]
 
     assert sorted(event.seq for event in tape.all) == [1, 2, 3, 4, 5, 6]

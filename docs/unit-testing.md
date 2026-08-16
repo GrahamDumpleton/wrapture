@@ -159,7 +159,7 @@ def test_order_writes_the_ledger():
     outer, inner = tape.all
     assert outer.label == "Gateway.charge"
     assert inner.label == "Ledger.record"
-    assert inner.parent is outer
+    assert inner.parent_id == outer.seq
 ```
 
 `timeline()` accepts bindings, binding groups, or iterables of either, and
@@ -191,8 +191,12 @@ fields a test typically reads:
   instead; `exception` holds the exception that propagated. A call that
   returned None records `result=None`, which stays distinguishable from
   no result at all.
-- `parent`, `children` and `depth` place the event in the call tree, and
-  `seq` is its position in overall recording order.
+- `parent_id` and `depth` place the event in the call tree, and `seq` is
+  its position in overall recording order. The parent link is the
+  enclosing event's `seq`, an integer rather than a reference, so an
+  event stands alone if it ever leaves the process; `tape.parent_of()`
+  and `tape.children_of()` resolve the links back to event objects when
+  a test wants to walk the tree.
 
 Events record what actually flowed, behaviour included. A call stubbed
 with `returns()` records the stubbed result; a failure injected with

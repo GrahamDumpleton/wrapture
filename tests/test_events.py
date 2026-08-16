@@ -42,8 +42,7 @@ def test_call_event_defaults() -> None:
     assert event.exception is None
     assert event.value is MISSING
     assert event.previous is MISSING
-    assert event.parent is None
-    assert event.children == []
+    assert event.parent_id is None
     assert event.depth == 0
 
 
@@ -63,16 +62,16 @@ def test_recorded_none_is_distinguishable_from_no_result() -> None:
     assert returned_none.result is None
 
 
-def test_parent_and_children_link_without_repr_recursion() -> None:
+def test_events_link_to_their_parent_by_sequence_number() -> None:
     parent = Event("call", "outer", seq=1, depth=0)
-    child = Event("call", "inner", seq=2, depth=1, parent=parent)
-    parent.children.append(child)
+    child = Event("call", "inner", seq=2, depth=1, parent_id=1)
 
-    assert child.parent is parent
-    assert parent.children == [child]
+    assert parent.parent_id is None
+    assert child.parent_id == parent.seq
 
-    # The cyclic links are excluded from repr(), so neither direction
-    # recurses.
+    # The link is a plain integer, not a reference: an event can be
+    # serialised without dragging its tree along, and repr() has no
+    # cycle to recurse through.
 
     assert "inner" in repr(child)
     assert "outer" in repr(parent)

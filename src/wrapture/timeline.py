@@ -93,7 +93,32 @@ class Tape:
         """The top-level events: those recorded with no observed caller."""
 
         with self._lock:
-            return [event for event in self._entries if event.parent is None]
+            return [event for event in self._entries if event.parent_id is None]
+
+    def parent_of(self, event: Event) -> Event | None:
+        """The event the given one was recorded inside, or None for a
+        root.
+
+        Events link to their parent by sequence number rather than by
+        reference; this resolves the link back to the event object.
+        """
+
+        if event.parent_id is None:
+            return None
+
+        with self._lock:
+            for entry in self._entries:
+                if entry.seq == event.parent_id:
+                    return entry
+
+        return None
+
+    def children_of(self, event: Event) -> list[Event]:
+        """The events recorded directly inside the given one, in
+        recording order."""
+
+        with self._lock:
+            return [entry for entry in self._entries if entry.parent_id == event.seq]
 
     def tree(self) -> str:
         """The call graph as it actually ran, one event per line,
@@ -103,6 +128,21 @@ class Tape:
         shows `!!` and the exception type; one still in progress shows
         neither.
         """
+
+        with self._lock:
+            entries = list(self._entries)
+
+        # Rebuild the nesting from the id links: roots in recording
+        # order, and each event's children grouped under its seq.
+
+        roots: list[Event] = []
+        children: dict[int, list[Event]] = {}
+
+        for event in entries:
+            if event.parent_id is None:
+                roots.append(event)
+            else:
+                children.setdefault(event.parent_id, []).append(event)
 
         lines: list[str] = []
 
@@ -118,10 +158,10 @@ class Tape:
 
             lines.append("  " * event.depth + str(event) + marker)
 
-            for child in event.children:
+            for child in children.get(event.seq, []):
                 emit(child)
 
-        for root in self.roots():
+        for root in roots:
             emit(root)
 
         return "\n".join(lines)
@@ -210,16 +250,17 @@ _in_recorder: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
     # Nest the event under whatever is currently in progress, then make
-    # it the innermost in-progress event. The returned token restores
-    # the previous stack in _pop, which must run in the same context.
+    # it the innermost in-progress event. Nesting links by sequence
+    # number, so recording always precedes pushing: an in-progress
+    # event on the stack already carries its seq. The returned token
+    # restores the previous stack in _pop, which must run in the same
+    # context.
 
     stack = _stack.get()
     parent = stack[-1] if stack else None
 
-    event.parent = parent
+    event.parent_id = parent.seq if parent is not None else None
     event.depth = len(stack)
-    if parent is not None:
-        parent.children.append(event)
 
     return _stack.set(stack + (event,))
 
