@@ -50,6 +50,7 @@ from .exceptions import (
     NeverAppliedError,
     NotImplementedYetError,
     RecordingGapWarning,
+    SinkErrorWarning,
     WrongModeError,
 )
 from .iterators import (
@@ -59,6 +60,13 @@ from .iterators import (
     IteratorItemBehaviour,
     IteratorProxy,
     iterator,
+)
+from .sinks import (
+    Printer,
+    Sink,
+    add_sink,
+    flush_sinks,
+    remove_sink,
 )
 from .stacks import (
     StackFrame,
@@ -91,18 +99,24 @@ __all__ = [
     "IteratorProxy",
     "NeverAppliedError",
     "NotImplementedYetError",
+    "Printer",
     "RecordingGapWarning",
     "SetBehaviour",
+    "Sink",
+    "SinkErrorWarning",
     "StackFrame",
     "Tape",
     "Timeline",
     "WrongModeError",
+    "add_sink",
     "annotate",
     "binding",
     "bindings",
     "current_event",
+    "flush_sinks",
     "iterator",
     "redact",
+    "remove_sink",
     "stack_frames",
     "timeline",
 ]

@@ -820,9 +820,9 @@ class Binding:
                     return wrapped(*args, **kwargs)
                 return behaviour(wrapped, instance, args, kwargs)
 
-            # Create and record the event under the recorder guard, so
-            # anything the bookkeeping calls that is itself observed
-            # passes through instead of recording recursively.
+            # Create the event under the recorder guard, so anything
+            # the bookkeeping calls that is itself observed passes
+            # through instead of recording recursively.
 
             guard = _in_recorder.set(True)
             try:
@@ -830,11 +830,15 @@ class Binding:
             finally:
                 _in_recorder.reset(guard)
 
-            # Run the call with the event on the in-progress stack, so
-            # calls made inside the body nest under it.
+            # Position before delivery: the event is pushed first, so
+            # sinks hearing on_enter see its final depth and parent
+            # link. Then the call runs with the event on the
+            # in-progress stack, so calls made inside the body nest
+            # under it.
 
             base = _stack.get()
             token = _push(event)
+            _record_event(event, active)
             try:
                 if behaviour is None:
                     outcome = wrapped(*args, **kwargs)
@@ -938,7 +942,7 @@ class Binding:
                     for name, value in kwargs.items()
                 }
 
-        return _record_event(event, active)
+        return event
 
     # -- behaviour pipelines -------------------------------------------------
 

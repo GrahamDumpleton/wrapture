@@ -30,6 +30,13 @@ class RecordingGapWarning(RuntimeWarning):
     """
 
 
+class SinkErrorWarning(RuntimeWarning):
+    """A sink raised from one of its notification methods. The error
+    was suppressed so the observed application is unaffected; it is
+    counted on the sink's `errors` attribute, and this warning is
+    emitted for the sink's first failure only."""
+
+
 class NeverAppliedError(RuntimeError):
     """events was read on a binding that was never applied, so nothing
     could possibly have been recorded for it."""

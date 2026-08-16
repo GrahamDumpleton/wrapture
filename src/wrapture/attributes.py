@@ -169,11 +169,15 @@ def _record(
             if previous is not MISSING:
                 event.previous = _capture_value(policy, attribute, previous)
 
-        _record_event(event, active)
     finally:
         _in_recorder.reset(guard)
 
+    # Position before delivery: pushed first, so sinks hearing
+    # on_enter see the event's final depth and parent link.
+
     token = _push(event)
+    _record_event(event, active)
+
     try:
         outcome = operate()
     except BaseException as exc:

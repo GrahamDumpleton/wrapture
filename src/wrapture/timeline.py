@@ -250,10 +250,12 @@ def _timelines_active() -> bool:
 def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
     # Nest the event under whatever is currently in progress, then make
     # it the innermost in-progress event. Nesting links by sequence
-    # number, so recording always precedes pushing: an in-progress
-    # event on the stack already carries its seq. The returned token
-    # restores the previous stack in _pop, which must run in the same
-    # context.
+    # number, and the parent on the stack already carries its seq: its
+    # delivery ran before its body, and nothing can record in between.
+    # The event being pushed gets its own seq at delivery, immediately
+    # after this push, so sinks hear on_enter with position complete.
+    # The returned token restores the previous stack in _pop, which
+    # must run in the same context.
 
     stack = _stack.get()
     parent = stack[-1] if stack else None
@@ -384,9 +386,9 @@ class Timeline:
 def timeline(*bindings: _Appliable | Iterable[_Appliable]) -> Timeline:
     """Open a recording scope.
 
-    Bindings passed here are applied on entry and removed on exit: a
-    binding applied outside a timeline records nothing anyway, so the
-    recording scope and the useful patch lifetime are the same interval.
+    Bindings passed here are applied on entry and removed on exit: in
+    a test nothing else is listening, so the recording scope and the
+    useful patch lifetime are the same interval.
     Accepts bindings, binding groups, or iterables of either; a group is
     applied as a unit, keeping its own rollback behaviour. With no
     arguments the scope only records, for bindings whose lifetime is

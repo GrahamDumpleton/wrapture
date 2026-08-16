@@ -84,6 +84,7 @@ coming-from-mock
 design-philosophy
 monkey-patching
 unit-testing
+ad-hoc-tracing
 known-limitations
 release-notes
 ```

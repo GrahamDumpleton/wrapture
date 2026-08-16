@@ -80,12 +80,19 @@ Import the module first and bind against it.
 
 ## Calls on other threads may not be recorded
 
-The ambient recording state (which tape is active, what call is in
+This limitation is about scoped recording, timelines and their tapes,
+not about recording itself: a process sink registered with
+`add_sink()` is visible to every thread and hears thread work with
+nesting intact, see [ad-hoc tracing](ad-hoc-tracing.md). What follows
+applies to
+recording onto a timeline's tape.
+
+The scoped recording state (which tapes are listening, what call is in
 progress) lives in context variables, which is what makes concurrent
 asyncio tasks record correctly isolated trees. Threads are the other
 side of that coin: a thread that does not carry the caller's context
-sees no ambient tape, so its calls run normally, with behaviour still
-applied, but record nothing.
+sees no scoped sinks, so its calls run normally, with behaviour still
+applied, but record nothing onto the timeline's tape.
 
 Whether a plain `threading.Thread` carries context depends on the
 Python build. From Python 3.14, `Thread` accepts a `context=` argument

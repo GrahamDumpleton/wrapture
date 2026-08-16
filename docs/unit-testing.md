@@ -164,10 +164,11 @@ def test_order_writes_the_ledger():
 
 `timeline()` accepts bindings, binding groups, or iterables of either, and
 with no arguments it only records, for bindings whose lifetime is managed
-elsewhere. A binding applied outside any timeline records nothing and
-costs almost nothing beyond wrapt's own dispatch, so leaving bindings
-applied while only occasionally recording is a supported pattern, not a
-mistake.
+elsewhere. An applied binding with no timeline open (and no other sink
+listening, see [ad-hoc tracing](ad-hoc-tracing.md)) records nothing and
+costs almost
+nothing beyond wrapt's own dispatch, so leaving bindings applied while
+only occasionally recording is a supported pattern, not a mistake.
 
 ### What one event contains
 

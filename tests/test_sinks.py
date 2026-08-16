@@ -8,15 +8,29 @@ fast path a bound but unmonitored call takes.
 """
 
 import importlib
+import io
+import threading
 import time
+import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
+import pytest
 from wrapt import MISSING
 
-from wrapture import Event, binding, timeline
-from wrapture.sinks import Sink, _active_sinks, _process_sinks, _scoped_sinks
+from wrapture import (
+    Event,
+    Printer,
+    Sink,
+    SinkErrorWarning,
+    add_sink,
+    binding,
+    flush_sinks,
+    remove_sink,
+    timeline,
+)
+from wrapture.sinks import _active_sinks, _process_sinks, _scoped_sinks
 
 # The package exports binding() and bindings() from these submodules, so
 # the submodule attributes on the package are shadowed by the functions;
@@ -164,16 +178,56 @@ def test_process_sinks_hear_events_alongside_scoped_ones() -> None:
     scoped_probe = Probe()
     charge = binding(Gateway, "charge")
 
-    _process_sinks.append(process_probe)
+    assert add_sink(process_probe) is process_probe
     try:
         with charge, listening(scoped_probe):
             assert _active_sinks() == (process_probe, scoped_probe)
             Gateway().charge(500)
     finally:
-        _process_sinks.remove(process_probe)
+        remove_sink(process_probe)
 
     assert [kind for kind, _ in process_probe.notified] == ["enter", "exit"]
     assert [kind for kind, _ in scoped_probe.notified] == ["enter", "exit"]
+    assert _process_sinks == []
+
+
+def test_removing_an_unregistered_sink_raises() -> None:
+    with pytest.raises(ValueError, match="not a registered process sink"):
+        remove_sink(Probe())
+
+
+class Worker:
+    def outer(self) -> str:
+        return self.inner()
+
+    def inner(self) -> str:
+        return "done"
+
+
+def test_a_process_sink_hears_worker_threads_with_nesting_intact() -> None:
+    probe = Probe()
+    outer = binding(Worker, "outer")
+    inner = binding(Worker, "inner")
+
+    with outer, inner:
+        add_sink(probe)
+        try:
+            thread = threading.Thread(target=Worker().outer)
+            thread.start()
+            thread.join()
+        finally:
+            remove_sink(probe)
+
+    entered = [event for kind, event in probe.notified if kind == "enter"]
+    assert [event.label for event in entered] == ["Worker.outer", "Worker.inner"]
+
+    # The thread carried no timeline context, but the process tier is a
+    # plain list visible everywhere, and nesting within the thread is
+    # intact.
+
+    outer_event, inner_event = entered
+    assert inner_event.parent_id == outer_event.seq
+    assert inner_event.depth == 1
 
 
 # ---------------------------------------------------------------------------
@@ -267,3 +321,134 @@ def test_bound_but_unmonitored_calls_stay_cheap() -> None:
         elapsed = time.perf_counter() - started
 
     assert elapsed / iterations < 25e-6
+
+
+# ---------------------------------------------------------------------------
+# sink errors never propagate
+# ---------------------------------------------------------------------------
+
+
+class Exploding(Sink):
+    """A sink that raises from every notification."""
+
+    def on_enter(self, event: Event) -> None:
+        raise RuntimeError("broken sink")
+
+    def on_exit(self, event: Event) -> None:
+        raise RuntimeError("broken sink")
+
+
+def test_a_broken_sink_never_breaks_the_observed_call() -> None:
+    exploding = Exploding()
+    probe = Probe()
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(exploding, probe):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+
+            assert Gateway().charge(500) == "ch_500"
+            assert Gateway().charge(501) == "ch_501"
+
+    # The failures are counted on the sink and warned about exactly
+    # once, and the sink behind it in the delivery order is unaffected.
+
+    assert exploding.errors == 4
+    assert [w for w in caught if w.category is SinkErrorWarning] != []
+    assert len([w for w in caught if w.category is SinkErrorWarning]) == 1
+    assert [kind for kind, _ in probe.notified] == ["enter", "exit"] * 2
+
+
+def test_process_sinks_are_flushed_at_shutdown_with_isolation() -> None:
+    flushed: list[bool] = []
+
+    class Buffered(Sink):
+        def flush(self) -> None:
+            flushed.append(True)
+
+    class Unflushable(Sink):
+        def flush(self) -> None:
+            raise RuntimeError("cannot flush")
+
+    broken = add_sink(Unflushable())
+    buffered = add_sink(Buffered())
+
+    # flush_sinks() is the same operation the atexit handler performs,
+    # for hosts whose shutdown fires outside atexit (mod_wsgi and other
+    # embeddings): the broken sink is counted and skipped, the one
+    # registered after it still flushes, and repeating is safe.
+
+    try:
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            flush_sinks()
+            flush_sinks()
+    finally:
+        remove_sink(broken)
+        remove_sink(buffered)
+
+    assert flushed == [True, True]
+    assert broken.errors == 2
+
+
+# ---------------------------------------------------------------------------
+# the Printer sink
+# ---------------------------------------------------------------------------
+
+
+class Processor:
+    def process(self) -> str:
+        try:
+            Gateway().refund(1)
+        except TimeoutError:
+            pass
+        return "ok"
+
+
+def test_printer_prints_the_call_and_its_outcome() -> None:
+    output = io.StringIO()
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(Printer(output)):
+        Gateway().charge(500)
+
+    assert output.getvalue() == (
+        "Gateway.charge(amount=500)\nGateway.charge -> 'ch_500'\n"
+    )
+
+
+def test_printer_indents_by_depth_and_marks_errors() -> None:
+    output = io.StringIO()
+    process = binding(Processor, "process")
+    refund = binding(Gateway, "refund")
+
+    with process, refund, listening(Printer(output)):
+        Processor().process()
+
+    assert output.getvalue() == (
+        "Processor.process()\n"
+        "  Gateway.refund(amount=1)\n"
+        "  Gateway.refund !! TimeoutError\n"
+        "Processor.process -> 'ok'\n"
+    )
+
+
+def test_printer_skips_the_outcome_line_when_nothing_was_captured() -> None:
+    output = io.StringIO()
+    charge = binding(Gateway, "charge", capture="none")
+
+    with charge, listening(Printer(output)):
+        Gateway().charge(500)
+
+    assert output.getvalue() == "Gateway.charge()\n"
+
+
+def test_printer_defaults_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(Printer()):
+        Gateway().charge(500)
+
+    captured = capsys.readouterr()
+    assert "Gateway.charge(amount=500)" in captured.err
+    assert captured.out == ""
