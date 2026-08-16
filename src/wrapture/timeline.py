@@ -1,16 +1,18 @@
-"""The recording scope: the tape events land on, and how they find it.
+"""The recording scope: the tape a test asserts against.
 
-Observed code calls its own methods normally; nothing threads a tape
-through those calls. So when a wrapper fires it answers two questions
-from ambient state: am I recording, and into what; and what call am I
-nested inside. Both live in context variables, set when a timeline is
-entered and restored on exit.
+A timeline is the scoped form of listening: entering pushes a Tape
+onto the scoped sink tier, so events recorded inside the block land on
+it, and exiting removes it again. The tape is one sink among many; the
+gate that decides whether anything records at all lives in the sinks
+module.
 
-Context variables specifically, because a module-level global would be
-shared by concurrent asyncio tasks, recording one task's calls as
-children of another's, and a thread-local would fail the same way for
-many tasks on one thread. Each task gets its own copy of the context,
-so each records its own correctly nested tree.
+The in-progress call stack also lives here, in a context variable, set
+when a timeline is entered and restored on exit. A context variable
+specifically, because a module-level global would be shared by
+concurrent asyncio tasks, recording one task's calls as children of
+another's, and a thread-local would fail the same way for many tasks
+on one thread. Each task gets its own copy of the context, so each
+records its own correctly nested tree.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from wrapt import MISSING
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
 from .events import Event
+from .sinks import Sink, _in_recorder, _scoped_sinks
 
 
 @runtime_checkable
@@ -38,12 +41,15 @@ class _Appliable(Protocol):
     def remove(self) -> Any: ...
 
 
-class Tape:
-    """The ordered record of events for one timeline.
+class Tape(Sink):
+    """The retained record of events for one timeline.
 
-    The tape assigns each event its sequence number as it is recorded,
-    so ordering assertions have a single authoritative order even when
-    events arrive from concurrently running tasks.
+    The tape is the sink the testing workflow is built on: it keeps
+    every event it hears about and serves the filtered views and
+    assertions. Sequence numbers are allocated process-wide by the
+    recording machinery, so ordering assertions have a single
+    authoritative order even when events arrive from concurrently
+    running tasks.
     """
 
     # The capture levels this sink requires of bindings that follow the
@@ -58,42 +64,40 @@ class Tape:
     def __init__(self) -> None:
         self._entries: list[Event] = []
         self._lock = threading.Lock()
-        self._seq = 0
 
-    def record(self, event: Event) -> Event:
-        """Assign the next sequence number to the event and append it.
-
-        Returns the event, which stays live: the recorder fills in the
-        outcome fields when the call completes.
-        """
+    def on_enter(self, event: Event) -> None:
+        """Retain the event. It stays live: the recorder fills in the
+        outcome fields as the operation completes."""
 
         with self._lock:
-            self._seq += 1
-            event.seq = self._seq
             self._entries.append(event)
 
-        return event
+    def _snapshot(self) -> list[Event]:
+        # A consistent view in sequence order. Arrival order can differ
+        # slightly under threads, because sequence allocation and
+        # delivery are two steps; sorting restores the authoritative
+        # order, and is near-linear on an almost-sorted list.
+
+        with self._lock:
+            return sorted(self._entries, key=lambda event: event.seq)
 
     @property
     def all(self) -> list[Event]:
         """Every recorded event, in sequence order."""
 
-        with self._lock:
-            return list(self._entries)
+        return self._snapshot()
 
     def for_binding(self, bnd: Any) -> EventLog:
         """A filterable view over this tape's events for one binding."""
 
-        with self._lock:
-            events = [event for event in self._entries if event.binding is bnd]
+        events = [event for event in self._snapshot() if event.binding is bnd]
 
         return EventLog(getattr(bnd, "label", repr(bnd)), events)
 
     def roots(self) -> list[Event]:
         """The top-level events: those recorded with no observed caller."""
 
-        with self._lock:
-            return [event for event in self._entries if event.parent_id is None]
+        return [event for event in self._snapshot() if event.parent_id is None]
 
     def parent_of(self, event: Event) -> Event | None:
         """The event the given one was recorded inside, or None for a
@@ -117,8 +121,7 @@ class Tape:
         """The events recorded directly inside the given one, in
         recording order."""
 
-        with self._lock:
-            return [entry for entry in self._entries if entry.parent_id == event.seq]
+        return [entry for entry in self._snapshot() if entry.parent_id == event.seq]
 
     def tree(self) -> str:
         """The call graph as it actually ran, one event per line,
@@ -129,8 +132,7 @@ class Tape:
         neither.
         """
 
-        with self._lock:
-            entries = list(self._entries)
+        entries = self._snapshot()
 
         # Rebuild the nesting from the id links: roots in recording
         # order, and each event's children grouped under its seq.
@@ -176,8 +178,7 @@ class Tape:
         naming where the expectation stalled, with the actual timeline.
         """
 
-        with self._lock:
-            entries = list(self._entries)
+        entries = self._snapshot()
 
         position = 0
         for event in entries:
@@ -196,17 +197,27 @@ class Tape:
         return self
 
 
-# The ambient state. The tape variable doubles as the recording switch:
-# None means no timeline is active and wrappers call straight through.
-# The stack variable holds the events currently in progress, innermost
-# last, and is the entire source of parent, depth and children.
+# The in-progress stack: the events currently open in this context,
+# innermost last, and the entire source of parent links and depth. The
+# recording switch is not here; it is "are any sinks active", answered
+# by the sinks module.
 
-_tape: contextvars.ContextVar[Tape | None] = contextvars.ContextVar(
-    "wrapture_tape", default=None
-)
 _stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar(
     "wrapture_stack", default=()
 )
+
+
+def _current_tape() -> Tape | None:
+    # The innermost scoped Tape, for the views that speak about "the
+    # enclosing timeline": Binding.events and the expectation verifier.
+    # Other kinds of sink have no such views, so only tapes count.
+
+    for sink in reversed(_scoped_sinks.get()):
+        if isinstance(sink, Tape):
+            return sink
+
+    return None
+
 
 # How many timelines are active process-wide, kept so a wrapper firing
 # with no ambient tape can tell "nothing is recording anywhere" from
@@ -234,18 +245,6 @@ def _timeline_finished() -> None:
 
 def _timelines_active() -> bool:
     return _active_count > 0
-
-
-# The reentrancy guard. Set while the recording machinery itself runs, so
-# an observed callable invoked from inside the recorder (rather than from
-# the code under observation) does not record recursively without bound.
-# Behaviour still applies on the guarded path: only recording is skipped,
-# so a call the user stubbed out stays stubbed even when the recorder
-# triggers it.
-
-_in_recorder: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "wrapture_in_recorder", default=False
-)
 
 
 def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
@@ -312,11 +311,11 @@ def annotate(**data: Any) -> None:
 class Timeline:
     """A recording scope, created by timeline().
 
-    Entering sets the ambient tape and applies the bindings given at
-    creation, rolling back if any of them fails to apply. Exiting
-    removes them in reverse order and restores the previous ambient
-    state. The same timeline can be reused sequentially; its tape keeps
-    accumulating across uses.
+    Entering pushes the timeline's tape onto the scoped sinks and
+    applies the bindings given at creation, rolling back if any of them
+    fails to apply. Exiting removes them in reverse order and restores
+    the previous ambient state. The same timeline can be reused
+    sequentially; its tape keeps accumulating across uses.
     """
 
     def __init__(self, appliables: list[_Appliable]) -> None:
@@ -324,14 +323,14 @@ class Timeline:
 
         self._appliables = appliables
         self._applied: list[_Appliable] = []
-        self._tape_token: contextvars.Token[Tape | None] | None = None
+        self._sinks_token: contextvars.Token[tuple[Sink, ...]] | None = None
         self._stack_token: contextvars.Token[tuple[Event, ...]] | None = None
 
     def __enter__(self) -> Tape:
-        if self._tape_token is not None:
+        if self._sinks_token is not None:
             raise RuntimeError("timeline is already active")
 
-        self._tape_token = _tape.set(self.tape)
+        self._sinks_token = _scoped_sinks.set(_scoped_sinks.get() + (self.tape,))
         self._stack_token = _stack.set(())
 
         # Apply every binding, rolling the whole entry back if one
@@ -372,13 +371,13 @@ class Timeline:
                     verify(self.tape)
 
     def _restore(self) -> None:
-        assert self._tape_token is not None
+        assert self._sinks_token is not None
         assert self._stack_token is not None
 
-        _tape.reset(self._tape_token)
+        _scoped_sinks.reset(self._sinks_token)
         _stack.reset(self._stack_token)
 
-        self._tape_token = None
+        self._sinks_token = None
         self._stack_token = None
 
 

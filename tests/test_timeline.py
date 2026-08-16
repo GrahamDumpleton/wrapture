@@ -19,7 +19,8 @@ from wrapture import (
     bindings,
     timeline,
 )
-from wrapture.timeline import _pop, _push, _stack, _tape
+from wrapture.sinks import _active_sinks, _record_event
+from wrapture.timeline import _current_tape, _pop, _push, _stack
 
 
 class Gateway:
@@ -40,18 +41,18 @@ class Ledger:
 # ---------------------------------------------------------------------------
 
 
-def test_tape_assigns_sequence_numbers_in_record_order() -> None:
+def test_recorded_events_get_increasing_sequence_numbers() -> None:
     tape = Tape()
-    first = tape.record(Event("call", "a"))
-    second = tape.record(Event("call", "b"))
+    first = _record_event(Event("call", "a"), (tape,))
+    second = _record_event(Event("call", "b"), (tape,))
 
-    assert (first.seq, second.seq) == (1, 2)
+    assert second.seq == first.seq + 1
     assert tape.all == [first, second]
 
 
 def test_tape_all_returns_a_copy() -> None:
     tape = Tape()
-    event = tape.record(Event("call", "a"))
+    event = _record_event(Event("call", "a"), (tape,))
 
     tape.all.clear()
     assert tape.all == [event]
@@ -67,8 +68,8 @@ def test_push_assigns_parent_id_and_depth() -> None:
     # always carries the seq its children link to.
 
     tape = Tape()
-    outer = tape.record(Event("call", "outer"))
-    inner = tape.record(Event("call", "inner"))
+    outer = _record_event(Event("call", "outer"), (tape,))
+    inner = _record_event(Event("call", "inner"), (tape,))
 
     outer_token = _push(outer)
     assert outer.depth == 0
@@ -82,7 +83,7 @@ def test_push_assigns_parent_id_and_depth() -> None:
     # grandchild.
 
     _pop(inner_token)
-    sibling = tape.record(Event("call", "sibling"))
+    sibling = _record_event(Event("call", "sibling"), (tape,))
     sibling_token = _push(sibling)
 
     assert sibling.depth == 1
@@ -100,14 +101,17 @@ def test_push_assigns_parent_id_and_depth() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_ambient_tape_outside_a_timeline() -> None:
-    assert _tape.get() is None
+def test_nothing_listens_outside_a_timeline() -> None:
+    assert _active_sinks() == ()
+    assert _current_tape() is None
 
     with timeline() as tape:
         assert isinstance(tape, Tape)
-        assert _tape.get() is tape
+        assert _active_sinks() == (tape,)
+        assert _current_tape() is tape
 
-    assert _tape.get() is None
+    assert _active_sinks() == ()
+    assert _current_tape() is None
 
 
 def test_timeline_applies_bindings_on_entry_and_removes_on_exit() -> None:
@@ -145,7 +149,7 @@ def test_partial_application_rolls_back_and_restores_state() -> None:
                 pass
 
         assert not first.active
-        assert _tape.get() is None
+        assert _active_sinks() == ()
         assert _stack.get() == ()
     finally:
         second.remove()
@@ -155,14 +159,16 @@ def test_timeline_reuse_accumulates_on_the_same_tape() -> None:
     scope = timeline()
 
     with scope as tape:
-        tape.record(Event("call", "a"))
+        _record_event(Event("call", "a"), _active_sinks())
 
     with scope as again:
         assert again is tape
-        again.record(Event("call", "b"))
+        _record_event(Event("call", "b"), _active_sinks())
 
     assert [event.path for event in tape.all] == ["a", "b"]
-    assert [event.seq for event in tape.all] == [1, 2]
+
+    first, second = tape.all
+    assert second.seq == first.seq + 1
 
 
 def test_reentering_an_active_timeline_raises() -> None:
@@ -181,15 +187,32 @@ def test_nested_timelines_restore_the_outer_scope() -> None:
 
         # An inner timeline starts with a fresh stack, so its events do
         # not nest under the outer scope's in-progress call, and exiting
-        # restores both the outer tape and the outer stack.
+        # restores both the outer sinks and the outer stack. While both
+        # scopes are open, both tapes listen: the inner one is pushed
+        # onto the scoped sinks, not swapped in.
 
         with timeline() as inner:
-            assert _tape.get() is inner
+            assert _active_sinks() == (outer, inner)
+            assert _current_tape() is inner
             assert _stack.get() == ()
 
-        assert _tape.get() is outer
+        assert _active_sinks() == (outer,)
         assert _stack.get() == (in_progress,)
         _pop(token)
+
+
+def test_a_nested_timeline_records_onto_the_outer_tape_too() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline() as outer:
+        with timeline(charge) as inner:
+            Gateway().charge(500)
+
+    # Scoped sinks stack rather than shadow: the outer scope stays
+    # listening, so both tapes hold the event.
+
+    assert [event.label for event in inner.all] == ["Gateway.charge"]
+    assert [event.label for event in outer.all] == ["Gateway.charge"]
 
 
 # ---------------------------------------------------------------------------
@@ -388,11 +411,11 @@ def test_expectation_declarations_chain_with_behaviour() -> None:
 
 def test_concurrent_tasks_record_isolated_trees() -> None:
     async def work(tape: Tape, name: str) -> Event:
-        root = tape.record(Event("call", f"{name}.root"))
+        root = _record_event(Event("call", f"{name}.root"), (tape,))
         root_token = _push(root)
         await asyncio.sleep(0)
 
-        child = tape.record(Event("call", f"{name}.child"))
+        child = _record_event(Event("call", f"{name}.child"), (tape,))
         child_token = _push(child)
         await asyncio.sleep(0)
 
@@ -415,4 +438,9 @@ def test_concurrent_tasks_record_isolated_trees() -> None:
         assert root.parent_id is None
         assert [child.parent_id for child in tape.children_of(root)] == [root.seq]
 
-    assert sorted(event.seq for event in tape.all) == [1, 2, 3, 4, 5, 6]
+    # Sequence numbers are process-wide, so the absolute values depend
+    # on what recorded before this test; the six events still allocate
+    # a contiguous, strictly ordered block.
+
+    seqs = sorted(event.seq for event in tape.all)
+    assert seqs == list(range(seqs[0], seqs[0] + 6))

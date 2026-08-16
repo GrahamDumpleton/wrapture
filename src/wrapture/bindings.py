@@ -49,16 +49,23 @@ from .exceptions import (
     RecordingGapWarning,
     WrongModeError,
 )
+from .sinks import (
+    Sink,
+    _active_sinks,
+    _in_recorder,
+    _notify_error,
+    _notify_exit,
+    _record_event,
+    _required_policy,
+)
 from .stacks import _capture as _capture_stack
 from .stacks import _resolve_depth
 from .timeline import (
-    Tape,
     _capture_result,
-    _in_recorder,
+    _current_tape,
     _pop,
     _push,
     _stack,
-    _tape,
     _timelines_active,
 )
 
@@ -168,7 +175,8 @@ async def _record_awaited(
     awaitable: Any,
     event: Event,
     stack: tuple[Event, ...],
-    policy: CapturePolicy = REFERENCE,
+    policy: CapturePolicy,
+    active: tuple[Sink, ...],
 ) -> Any:
     """Record around the await, so the event reflects the real outcome.
 
@@ -183,11 +191,13 @@ async def _record_awaited(
         result = await awaitable
     except BaseException as exc:
         event.exception = exc
+        _notify_error(event, active)
         raise
     finally:
         _stack.reset(token)
 
     _capture_result(event, result, policy)
+    _notify_exit(event, active)
     return result
 
 
@@ -197,13 +207,15 @@ def _close_iteration(
     body: float,
     items: int,
     policy: CapturePolicy,
+    active: tuple[Sink, ...],
     result: Any = MISSING,
     exception: BaseException | None = None,
 ) -> None:
     # Close a generator's event: durations and the final item count
     # always, then the outcome. An abandoned generator supplies neither
     # a result nor an exception, so its event closes with no outcome and
-    # stays visibly unfinished on the tape.
+    # stays visibly unfinished on the tape; abandonment is still an
+    # exit, not an error.
 
     event.duration = time.perf_counter() - started
     event.body_duration = body
@@ -211,8 +223,13 @@ def _close_iteration(
 
     if exception is not None:
         event.exception = exception
-    elif result is not MISSING:
+        _notify_error(event, active)
+        return
+
+    if result is not MISSING:
         _capture_result(event, result, policy)
+
+    _notify_exit(event, active)
 
 
 def _record_generator(
@@ -220,6 +237,7 @@ def _record_generator(
     event: Event,
     stack: tuple[Event, ...],
     policy: CapturePolicy,
+    active: tuple[Sink, ...],
 ) -> Generator[Any, Any, Any]:
     """A generator around a generator, recording as it runs.
 
@@ -254,12 +272,14 @@ def _record_generator(
         except StopIteration as stop:
             body += time.perf_counter() - resumed
             _stack.reset(token)
-            _close_iteration(event, started, body, items, policy, result=stop.value)
+            _close_iteration(
+                event, started, body, items, policy, active, result=stop.value
+            )
             return stop.value
         except BaseException as exc:
             body += time.perf_counter() - resumed
             _stack.reset(token)
-            _close_iteration(event, started, body, items, policy, exception=exc)
+            _close_iteration(event, started, body, items, policy, active, exception=exc)
             raise
         else:
             body += time.perf_counter() - resumed
@@ -272,7 +292,7 @@ def _record_generator(
             operation = ("send", (yield item))
         except GeneratorExit:
             generator.close()
-            _close_iteration(event, started, body, items, policy)
+            _close_iteration(event, started, body, items, policy, active)
             raise
         except BaseException as exc:
             operation = ("throw", exc)
@@ -283,6 +303,7 @@ async def _record_async_generator(
     event: Event,
     stack: tuple[Event, ...],
     policy: CapturePolicy,
+    active: tuple[Sink, ...],
 ) -> AsyncGenerator[Any, Any]:
     """The async twin of _record_generator, for async generators.
 
@@ -310,12 +331,12 @@ async def _record_async_generator(
         except StopAsyncIteration:
             body += time.perf_counter() - resumed
             _stack.reset(token)
-            _close_iteration(event, started, body, items, policy, result=None)
+            _close_iteration(event, started, body, items, policy, active, result=None)
             return
         except BaseException as exc:
             body += time.perf_counter() - resumed
             _stack.reset(token)
-            _close_iteration(event, started, body, items, policy, exception=exc)
+            _close_iteration(event, started, body, items, policy, active, exception=exc)
             raise
         else:
             body += time.perf_counter() - resumed
@@ -328,7 +349,7 @@ async def _record_async_generator(
             operation = ("send", (yield item))
         except GeneratorExit:
             await generator.aclose()
-            _close_iteration(event, started, body, items, policy)
+            _close_iteration(event, started, body, items, policy, active)
             raise
         except BaseException as exc:
             operation = ("throw", exc)
@@ -689,7 +710,7 @@ class Binding:
                 f" as a context manager"
             )
 
-        tape = _tape.get()
+        tape = _current_tape()
         if tape is None:
             raise RuntimeError(
                 f"{self._label}: events are only recorded inside a timeline()"
@@ -781,18 +802,18 @@ class Binding:
             kwargs: dict[str, Any],
         ) -> Any:
             behaviour = bnd._behaviour("call")
-            tape = _tape.get()
+            active = _active_sinks()
 
-            # Not recording: no timeline is active, or this call was
+            # Not recording: nothing is listening, or this call was
             # triggered by the recording machinery itself rather than by
             # the code under observation. Behaviour still applies; the
-            # call is just not recorded. A call with no context while a
-            # timeline runs elsewhere is a recording gap, typically a
-            # thread, and is counted and warned about rather than lost
-            # silently.
+            # call is just not recorded, and no event is constructed at
+            # all. A call with no listener while a timeline runs
+            # elsewhere is a recording gap, typically a thread, and is
+            # counted and warned about rather than lost silently.
 
-            if tape is None or _in_recorder.get():
-                if tape is None and not _in_recorder.get() and _timelines_active():
+            if not active or _in_recorder.get():
+                if not active and not _in_recorder.get() and _timelines_active():
                     bnd._note_missed_call()
 
                 if behaviour is None:
@@ -805,7 +826,7 @@ class Binding:
 
             guard = _in_recorder.set(True)
             try:
-                event = bnd._record_call(tape, wrapped, instance, args, kwargs)
+                event = bnd._record_call(active, wrapped, instance, args, kwargs)
             finally:
                 _in_recorder.reset(guard)
 
@@ -823,6 +844,7 @@ class Binding:
                     )
             except BaseException as exc:
                 event.exception = exc
+                _notify_error(event, active)
                 raise
             finally:
                 _pop(token)
@@ -836,36 +858,39 @@ class Binding:
 
             result_policy = bnd._capture_result
             if result_policy is None:
-                result_policy = getattr(tape, "capture_result", REFERENCE)
+                result_policy = _required_policy(active, "capture_result")
 
             if inspect.isgenerator(outcome):
-                return _record_generator(outcome, event, base, result_policy)
+                return _record_generator(outcome, event, base, result_policy, active)
 
             if inspect.isasyncgen(outcome):
-                return _record_async_generator(outcome, event, base, result_policy)
+                return _record_async_generator(
+                    outcome, event, base, result_policy, active
+                )
 
             if inspect.isawaitable(outcome):
-                return _record_awaited(outcome, event, base, result_policy)
+                return _record_awaited(outcome, event, base, result_policy, active)
 
             _capture_result(event, outcome, result_policy)
+            _notify_exit(event, active)
             return outcome
 
         return wrapper
 
     def _record_call(
         self,
-        tape: Tape,
+        active: tuple[Sink, ...],
         wrapped: WrappedFunction,
         instance: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Event:
         # Resolve the argument capture policy: the binding's override,
-        # else what the sink consuming the events declares.
+        # else the highest level the active sinks declare.
 
         policy = self._capture_args
         if policy is None:
-            policy = getattr(tape, "capture_args", REFERENCE)
+            policy = _required_policy(active, "capture_args")
         level = _level_of(policy)
 
         event = Event(
@@ -913,7 +938,7 @@ class Binding:
                     for name, value in kwargs.items()
                 }
 
-        return tape.record(event)
+        return _record_event(event, active)
 
     # -- behaviour pipelines -------------------------------------------------
 

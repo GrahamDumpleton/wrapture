@@ -16,7 +16,7 @@ import wrapt
 from wrapt import MISSING
 
 from wrapture import binding, bindings, timeline
-from wrapture.timeline import _in_recorder
+from wrapture.sinks import _in_recorder
 
 
 class Ledger:
@@ -56,7 +56,7 @@ def test_a_call_records_one_event_with_its_details() -> None:
     assert event.label == "Gateway.charge"
     assert event.binding is charge
     assert event.instance is gateway
-    assert event.seq == 1
+    assert event.seq > 0
     assert event.depth == 0
     assert event.args == (500,)
     assert event.arguments == {"amount": 500, "currency": "USD"}
@@ -108,7 +108,7 @@ def test_nested_calls_record_a_tree() -> None:
     assert inner.depth == 1
     assert tape.children_of(outer) == [inner]
     assert tape.parent_of(inner) is outer
-    assert (outer.seq, inner.seq) == (1, 2)
+    assert inner.seq == outer.seq + 1
 
 
 # ---------------------------------------------------------------------------

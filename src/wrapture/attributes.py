@@ -28,16 +28,22 @@ from typing import TYPE_CHECKING, Any
 import wrapt
 from wrapt import MISSING, BaseObjectProxy, apply_patch
 
-from .capture import REFERENCE, _capture_value, _level_of
+from .capture import _capture_value, _level_of
 from .events import Event, EventKind
 from .exceptions import NotImplementedYetError
+from .sinks import (
+    _active_sinks,
+    _in_recorder,
+    _notify_error,
+    _notify_exit,
+    _record_event,
+    _required_policy,
+)
 from .stacks import _capture as _capture_stack
 from .timeline import (
     _capture_result,
-    _in_recorder,
     _pop,
     _push,
-    _tape,
     _timelines_active,
 )
 
@@ -121,9 +127,9 @@ def _record(
     on the in-progress stack so anything it triggers nests under it.
     """
 
-    tape = _tape.get()
-    if tape is None or _in_recorder.get():
-        if tape is None and not _in_recorder.get() and _timelines_active():
+    active = _active_sinks()
+    if not active or _in_recorder.get():
+        if not active and not _in_recorder.get() and _timelines_active():
             binding._note_missed_call()
 
         return operate()
@@ -134,7 +140,7 @@ def _record(
 
     policy = binding._capture_args
     if policy is None:
-        policy = getattr(tape, "capture_args", REFERENCE)
+        policy = _required_policy(active, "capture_args")
 
     guard = _in_recorder.set(True)
     try:
@@ -163,7 +169,7 @@ def _record(
             if previous is not MISSING:
                 event.previous = _capture_value(policy, attribute, previous)
 
-        tape.record(event)
+        _record_event(event, active)
     finally:
         _in_recorder.reset(guard)
 
@@ -172,6 +178,7 @@ def _record(
         outcome = operate()
     except BaseException as exc:
         event.exception = exc
+        _notify_error(event, active)
         raise
     finally:
         _pop(token)
@@ -182,9 +189,10 @@ def _record(
     if kind == "get":
         result_policy = binding._capture_result
         if result_policy is None:
-            result_policy = getattr(tape, "capture_result", REFERENCE)
+            result_policy = _required_policy(active, "capture_result")
         _capture_result(event, outcome, result_policy)
 
+    _notify_exit(event, active)
     return outcome
 
 
