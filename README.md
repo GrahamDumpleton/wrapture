@@ -2,6 +2,8 @@
 
 **Trace assertions without instrumenting your code.**
 
+[![Documentation](https://readthedocs.org/projects/wrapture/badge/?version=latest)](https://wrapture.readthedocs.io)
+
 wrapture (`wrapt` + `capture`) is a Python library for attaching bindings to
 arbitrary call sites, without modifying the code being observed, and doing
 something useful with what flows through them.
@@ -13,6 +15,39 @@ safe monkey-patching machinery wrapt provides.
 > **Status: early development.** The monkey patching and unit testing layers
 > are implemented; the tracing and profiling layers are designed but not
 > built. Nothing is published to PyPI yet.
+
+## Documentation
+
+Full documentation is at [wrapture.readthedocs.io](https://wrapture.readthedocs.io).
+Start with the [getting started](https://wrapture.readthedocs.io/en/latest/getting-started.html)
+page: everything on it can be pasted into a Python interpreter. Coming
+from `unittest.mock`? There is a
+[comparison page](https://wrapture.readthedocs.io/en/latest/coming-from-mock.html)
+mapping each mock idiom to its wrapture counterpart.
+
+## Thirty seconds of it
+
+None of the classes below import wrapture or know they are observed:
+
+```python
+place = wrapture.binding(OrderService, "place")
+charge = wrapture.binding(Gateway, "charge")
+record = wrapture.binding(Ledger, "record")
+
+with wrapture.timeline(place, charge, record) as tape:
+    OrderService().place(500)
+
+print(tape.tree())
+```
+
+```
+OrderService.place(amount=500)  -> {'id': 'ch_500', 'amount': 500}
+  Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
+  Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> 'led_ch_500'
+```
+
+The same bindings intervene as well as observe: stub a result, inject a
+failure, or transform one argument while the real code keeps running.
 
 ## What it does
 

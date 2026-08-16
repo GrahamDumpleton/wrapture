@@ -30,6 +30,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/GrahamDumpleton/wrapture"
+Documentation = "https://wrapture.readthedocs.io"
 "Bug Tracker" = "https://github.com/GrahamDumpleton/wrapture/issues/"
 
 [project.optional-dependencies]
