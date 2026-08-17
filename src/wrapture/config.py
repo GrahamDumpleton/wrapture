@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import atexit
 import importlib
-import inspect
 import os
 import sys
 import threading
@@ -34,13 +33,12 @@ import tomllib
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from fnmatch import fnmatchcase
 from importlib import metadata
 from typing import Any
 
 import wrapt
 
-from .bindings import Binding, binding
+from .bindings import Binding, _select_members, binding
 from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
 from .exceptions import ConfigError, ConfigWarning
@@ -624,45 +622,6 @@ def _resolve_container(entry: ObserveEntry) -> tuple[str, str, Any]:
     return module_name, path, container
 
 
-def _matched_members(entry: ObserveEntry, container: Any) -> list[str]:
-    # Pattern selection is deliberately confined: immediate members
-    # from the container's own vars() only, never inherited and never
-    # traversing into nested classes or submodules, matched with
-    # fnmatchcase against the bare names. Only routines are eligible;
-    # properties, other descriptors, nested classes and plain data are
-    # skipped, as is anything already wrapped, and a module's imported
-    # functions and classes are skipped so a module pattern selects
-    # only what the module itself defines. name= is the escape hatch
-    # that binds any of the skipped kinds explicitly.
-
-    is_module = inspect.ismodule(container)
-
-    selected: list[str] = []
-    for member, value in vars(container).items():
-        if not any(fnmatchcase(member, pattern) for pattern in entry.match):
-            continue
-        if any(fnmatchcase(member, pattern) for pattern in entry.exclude):
-            continue
-
-        if isinstance(value, wrapt.BaseObjectProxy):
-            continue
-
-        if is_module:
-            eligible = (
-                inspect.isroutine(value)
-                and getattr(value, "__module__", None) == container.__name__
-            )
-        else:
-            eligible = isinstance(
-                value, (staticmethod, classmethod)
-            ) or inspect.isfunction(value)
-
-        if eligible:
-            selected.append(member)
-
-    return selected
-
-
 def _bindings_for(
     entry: ObserveEntry, capture: CapturePolicy | str | None
 ) -> list[Binding]:
@@ -680,7 +639,7 @@ def _bindings_for(
                 )
         members = list(entry.name)
     else:
-        members = _matched_members(entry, container)
+        members = _select_members(container, entry.match, entry.exclude)
         if not members:
             warnings.warn(
                 f"{where}: match {list(entry.match)!r} selected no"

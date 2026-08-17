@@ -140,6 +140,56 @@ the outer scope's patch. If a fixture owns the binding, tests should only
 reconfigure behaviour, never call `apply()`, `remove()` or enter it as a
 context manager themselves.
 
+## Discovering members by pattern
+
+`binding()` and `bindings()` name every member explicitly. When the point
+is to observe a whole family of members rather than stub one,
+`discover()` selects them by pattern and returns a `BindingGroup` keyed
+by member name:
+
+```python
+def test_gateway_calls_are_recorded():
+    group = wrapture.discover(Gateway, "*", exclude="_*")
+
+    with wrapture.timeline(group):
+        place_order("widget")
+
+        group.charge.events.assert_once()
+```
+
+The target is a module, a class, or a string naming one (`"module"` or
+`"module:path"`, the spelling `binding()` and a config file observe
+entry use). `match`
+is one `fnmatchcase` pattern or a sequence of them, and `exclude`
+subtracts from whatever matched. The remaining keyword options
+(`capture=`, `capture_args=`, `capture_result=`, `stack=`, `when=`) are
+the uniform subset of `binding()`'s options, applied to every selected
+member.
+
+Selection is deliberately confined, and is shared with the config file's
+`match` entries so a pattern selects the same members however it is
+spelt: only the target's own immediate members, never inherited ones,
+with no traversal into nested classes or submodules, and only routines
+the target itself defines. Properties, other descriptors, plain data,
+nested classes, anything already wrapped, and a module's imported
+functions are all skipped. `binding()` is the escape hatch that binds
+any of the skipped kinds by exact name.
+
+Two behaviours differ from a config observe entry, both because
+`discover()` answers "what is here right now" rather than riding a
+future import:
+
+- **Discovery is immediate.** Enumerating members requires the target to
+  exist, so a string target is imported when `discover()` is called;
+  there is no deferral. In a config file the same pattern waits for the
+  application to import the module (see
+  [ad-hoc tracing](ad-hoc-tracing.md)).
+- **An empty selection raises.** A pattern that selects nothing raises
+  `ValueError` rather than returning an empty group, so a mistyped
+  pattern cannot produce a test that vacuously observes nothing. The
+  config file form warns instead, because at startup there is no return
+  value to inspect and the process should still come up.
+
 ## Recording calls on a timeline
 
 A binding does more than intervene: inside a recording scope it also

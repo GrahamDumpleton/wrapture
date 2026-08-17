@@ -8,12 +8,14 @@ call until the binding is removed, suspended or reconfigured.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import time
 import types
 import warnings
 import weakref
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Callable, Generator, Sequence
+from fnmatch import fnmatchcase
 from typing import Any, Self, TypeVar
 
 import wrapt
@@ -135,6 +137,52 @@ def _detect_mode(target: Any, name: str, missing_ok: bool = False) -> str:
         return "callable"
 
     return "attribute"
+
+
+def _select_members(
+    container: Any, match: Sequence[str], exclude: Sequence[str]
+) -> list[str]:
+    """Select the members of a container that match a pattern.
+
+    Pattern selection is deliberately confined: immediate members from
+    the container's own vars() only, never inherited and never
+    traversing into nested classes or submodules, matched with
+    fnmatchcase against the bare names. Only routines are eligible;
+    properties, other descriptors, nested classes and plain data are
+    skipped, as is anything already wrapped, and a module's imported
+    functions and classes are skipped so a module pattern selects only
+    what the module itself defines. Binding by exact name is the escape
+    hatch for any of the skipped kinds. Shared by discover() and the
+    config layer's match entries, so a pattern selects the same members
+    however it is spelt.
+    """
+
+    is_module = inspect.ismodule(container)
+
+    selected: list[str] = []
+    for member, value in vars(container).items():
+        if not any(fnmatchcase(member, pattern) for pattern in match):
+            continue
+        if any(fnmatchcase(member, pattern) for pattern in exclude):
+            continue
+
+        if isinstance(value, wrapt.BaseObjectProxy):
+            continue
+
+        if is_module:
+            eligible = (
+                inspect.isroutine(value)
+                and getattr(value, "__module__", None) == container.__name__
+            )
+        else:
+            eligible = isinstance(
+                value, (staticmethod, classmethod)
+            ) or inspect.isfunction(value)
+
+        if eligible:
+            selected.append(member)
+
+    return selected
 
 
 def _derive_path(target: Any, name: str) -> str:
@@ -393,6 +441,19 @@ class Binding:
         # stored, so a bad binding fails on the line that created it.
 
         _reject_deferred(target)
+
+        # A string target may spell the member's owner with the colon
+        # convention ("module:path"), as observe targets, discover()
+        # and event paths do. Fold the path half into the name, so the
+        # colon spelling and the dotted-name spelling of the same
+        # member are one binding from here on.
+
+        if isinstance(target, str) and ":" in target:
+            module_name, _, path = target.partition(":")
+
+            target = module_name
+            if path:
+                name = f"{path}.{name}"
 
         stack = _resolve_depth(stack)
         if stack is not None and stack < 1:
@@ -1048,11 +1109,19 @@ class BindingGroup:
     removes in reverse order of application.
     """
 
-    def __init__(self, points: dict[str, tuple[Any, str]]) -> None:
-        self._bindings = {
-            key: Binding(target, name, label=key)
-            for key, (target, name) in points.items()
-        }
+    def __init__(self, points: dict[str, tuple[Any, str] | Binding]) -> None:
+        # bindings() supplies (target, name) tuples to construct here,
+        # named by the caller; discover() supplies Binding objects it
+        # has already configured, keyed by the member name.
+
+        self._bindings: dict[str, Binding] = {}
+
+        for key, point in points.items():
+            if isinstance(point, Binding):
+                self._bindings[key] = point
+            else:
+                target, name = point
+                self._bindings[key] = Binding(target, name, label=key)
 
     def __getitem__(self, key: str) -> Binding:
         return self._bindings[key]
@@ -1154,8 +1223,13 @@ def binding(
 ) -> Binding:
     """Create a binding for one target attribute.
 
-    `target` is a module, class, instance, or a string naming a module.
-    `name` is a dotted path to the attribute.
+    `target` is a module, class, instance, or a string: "module" or
+    "module:path", the colon convention observe targets, discover()
+    and event paths use. `name` is the path from the target to the
+    attribute, so "module:Class" with "member" and "module" with
+    "Class.member" are the same binding. Prefer the colon form for a
+    member owned by a class: point `target` at the owner and keep
+    `name` the bare member name, as discover() spells it.
 
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
@@ -1214,3 +1288,100 @@ def bindings(**points: tuple[Any, str]) -> BindingGroup:
     """
 
     return BindingGroup(dict(points))
+
+
+def discover(
+    target: Any,
+    match: str | Sequence[str],
+    *,
+    exclude: str | Sequence[str] = (),
+    capture: CapturePolicy | str | None = None,
+    capture_args: CapturePolicy | str | None = None,
+    capture_result: CapturePolicy | str | None = None,
+    stack: int | str | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
+) -> BindingGroup:
+    """Create bindings for every member of a target matching a pattern.
+
+    `target` is a module, a class, or a string naming one: "module" or
+    "module:path". `match` is one fnmatchcase pattern or a sequence of
+    them, tried against the target's own immediate member names, and
+    `exclude` subtracts from whatever matched. Selection is the same as
+    a config file match entry: never inherited members, no traversal
+    into nested classes or submodules, only routines the target itself
+    defines, skipping properties, other descriptors, plain data and
+    anything already wrapped. Use binding() or bindings() to bind any
+    of the skipped kinds by exact name.
+
+    The remaining keyword options are the uniform subset of binding()'s
+    options, applied to every selected member.
+
+    Discovery enumerates members, so unlike a config observe entry it
+    cannot defer: the target must exist when discover() is called, and
+    a string target is imported on the spot. A selection that comes up
+    empty raises ValueError rather than returning an empty group, so a
+    mistyped pattern cannot silently observe nothing.
+
+    Returns a BindingGroup keyed by member name, unapplied: apply() or
+    the context-manager form installs the wrappers, exactly as for
+    bindings().
+
+        group = discover("shop:OrderService", "place_*")
+
+        with timeline(group):
+            ...
+            group.place_order.events.assert_once()
+    """
+
+    # Normalize the pattern arguments, so a lone string is one pattern
+    # rather than a sequence of single characters.
+
+    patterns = (match,) if isinstance(match, str) else tuple(match)
+    excludes = (exclude,) if isinstance(exclude, str) else tuple(exclude)
+
+    if not patterns:
+        raise ValueError("discover requires at least one match pattern")
+
+    # Resolve a string target now: import the module half and walk the
+    # path half to the container whose members are selected from. The
+    # created bindings are handed the original spelling; Binding folds
+    # a colon target into module plus dotted name itself.
+
+    if isinstance(target, str):
+        _reject_deferred(target)
+
+        module_name, _, path = target.partition(":")
+        container: Any = importlib.import_module(module_name)
+        for part in path.split(".") if path else ():
+            container = getattr(container, part)
+    else:
+        container = target
+
+    # An empty selection is loud: the caller asked for these bindings
+    # on the spot, and a typo'd pattern must not vacuously bind nothing.
+
+    members = _select_members(container, patterns, excludes)
+    if not members:
+        described = (
+            target
+            if isinstance(target, str)
+            else getattr(container, "__name__", None) or repr(container)
+        )
+        raise ValueError(
+            f"discover: match {list(patterns)!r} selected no members of {described!r}"
+        )
+
+    return BindingGroup(
+        {
+            member: Binding(
+                target,
+                member,
+                capture=capture,
+                capture_args=capture_args,
+                capture_result=capture_result,
+                stack=stack,
+                when=when,
+            )
+            for member in members
+        }
+    )

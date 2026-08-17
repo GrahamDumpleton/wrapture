@@ -500,6 +500,13 @@ accepts a single string or a list:
 The blast radius of a pattern is thereby one level of one named
 container, stated on the line above it.
 
+The same selection is available in code as `discover()`, which takes
+the target and patterns an observe entry would and returns a binding
+group; the two share one implementation, so a pattern selects the
+same members however it is spelt. Unlike an observe entry it resolves
+immediately and an empty selection raises; the
+[unit testing page](unit-testing.md) covers it.
+
 Observe entries defer. Applying a config never imports a target
 module: it registers a post-import hook per target, which fires
 immediately when the module is already imported and otherwise when

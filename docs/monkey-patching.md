@@ -15,13 +15,21 @@ import wrapture
 charge = wrapture.binding(Gateway, "charge")
 ```
 
-`target` is a module, class, instance, or a string naming a module. `name`
-is a dotted path to the attribute:
+`target` is a module, class, instance, or a string. A string target uses
+the colon convention that event paths, config observe targets and
+`discover()` share: `"module"` or `"module:path"`. `name` is the path
+from the target to the attribute, so these three are the same binding:
 
 ```python
 wrapture.binding(myapp.gateway, "Gateway.charge")
+wrapture.binding("myapp.gateway:Gateway", "charge")
 wrapture.binding("myapp.gateway", "Gateway.charge")
 ```
+
+When the member has an owning class, prefer the colon form: point
+`target` at the owner and keep `name` the bare member name. That reads
+consistently with `discover()` and config observe entries, where the
+target is always the owner whose members are being selected.
 
 Creating a binding does not patch anything. Declaring bindings at class or
 module scope is safe; the patch is only installed when you ask for it.

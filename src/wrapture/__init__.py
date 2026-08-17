@@ -33,6 +33,7 @@ from .bindings import (
     BindingGroup,
     binding,
     bindings,
+    discover,
 )
 from .capture import (
     redact,
@@ -156,6 +157,7 @@ __all__ = [
     "chrome_trace",
     "clear_stacks",
     "current_event",
+    "discover",
     "find_config",
     "flush_sinks",
     "iterator",

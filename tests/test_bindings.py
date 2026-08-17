@@ -1,7 +1,10 @@
-"""Tests for binding lifecycle, modes, groups and deferred rejection."""
+"""Tests for binding lifecycle, modes, groups, discovery and deferred
+rejection."""
 
 import gc
+import textwrap
 import weakref
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +17,7 @@ from wrapture import (
     WrongModeError,
     binding,
     bindings,
+    discover,
 )
 
 
@@ -263,6 +267,27 @@ def test_a_string_target_labels_with_the_module_name() -> None:
 
     assert binding("os.path", "join").label == "os.path.join"
 
+
+def test_a_string_target_may_spell_the_owner_with_a_colon() -> None:
+    # "module:path" points the target at the member's owner, the
+    # spelling observe targets and discover() use; it is the same
+    # binding as the module string with a dotted name.
+
+    colon = binding(f"{__name__}:Gateway", "charge")
+    dotted = binding(__name__, "Gateway.charge")
+
+    assert colon.name == dotted.name == "Gateway.charge"
+    assert colon.label == dotted.label == f"{__name__}.Gateway.charge"
+    assert colon.path == dotted.path == f"{__name__}:Gateway.charge"
+
+    with colon.on_call.returns({"id": "stub"}):
+        assert Gateway().charge(5) == {"id": "stub"}
+
+
+def test_a_trailing_question_mark_is_rejected_on_the_colon_form_too() -> None:
+    with pytest.raises(DeferredTargetError):
+        binding(f"{__name__}:Gateway?", "charge")
+
     class WithProperty:
         @property
         def value(self) -> int:
@@ -407,3 +432,143 @@ def test_apply_remove_churn_does_not_leak() -> None:
     gc.collect()
     after = len(gc.get_objects())
     assert after - before < 100  # allow noise, catch per-cycle growth
+
+
+# ---------------------------------------------------------------------------
+# discovery
+# ---------------------------------------------------------------------------
+
+
+class Billing:
+    rate = 0.1
+
+    def charge(self, amount: int) -> str:
+        return f"charged {amount}"
+
+    def refund(self, amount: int) -> str:
+        return f"refunded {amount}"
+
+    def _reconcile(self) -> str:
+        return "reconciled"
+
+    @staticmethod
+    def validate(amount: int) -> int:
+        return amount
+
+    @classmethod
+    def create(cls) -> "Billing":
+        return cls()
+
+    @property
+    def total(self) -> int:
+        return 1
+
+    class Invoice:
+        pass
+
+
+def test_discover_selects_the_targets_own_routines_only() -> None:
+    # Same confinement as a config match entry: routines from the
+    # class's own dict, including static and class methods, but never
+    # the property, the nested class, or plain data; exclude subtracts.
+
+    group = discover(Billing, "*", exclude="_*")
+
+    assert {bnd.name for bnd in group} == {"charge", "refund", "validate", "create"}
+
+
+def test_discover_group_is_keyed_by_member_name() -> None:
+    group = discover(Billing, "charge")
+
+    assert group.charge is group["charge"]
+
+
+def test_discover_accepts_a_sequence_of_patterns() -> None:
+    group = discover(Billing, ("charge", "refund"))
+
+    assert {bnd.name for bnd in group} == {"charge", "refund"}
+
+
+def test_discover_accepts_a_string_target() -> None:
+    # The string spelling matches a config observe target, and the
+    # bindings keep it, so their labels read as the config layer's do.
+
+    group = discover(f"{__name__}:Billing", "charge")
+
+    assert group.charge.name == "Billing.charge"
+    assert group.charge.label == f"{__name__}.Billing.charge"
+
+
+def test_discover_on_a_module_selects_only_its_own_functions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A module pattern selects only the functions the module itself
+    # defines: imported functions and classes are skipped. A string
+    # module target is imported by discover() on the spot.
+
+    (tmp_path / "bndtest_widgets.py").write_text(
+        textwrap.dedent(
+            """
+            from os.path import join
+
+            def parse(text):
+                return text
+
+            def render(text):
+                return text
+
+            class Widget:
+                pass
+            """
+        )
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    group = discover("bndtest_widgets", "*")
+
+    assert {bnd.name for bnd in group} == {"parse", "render"}
+    assert group.parse.label == "bndtest_widgets.parse"
+
+
+def test_discover_group_applies_and_removes_as_a_unit() -> None:
+    group = discover(Billing, "*", exclude="_*")
+
+    with group:
+        assert group.active
+        assert Billing().charge(5) == "charged 5"
+
+    assert not group.active
+
+
+def test_discover_skips_already_wrapped_members() -> None:
+    with binding(Billing, "charge"):
+        group = discover(Billing, "*", exclude="_*")
+
+        assert {bnd.name for bnd in group} == {"refund", "validate", "create"}
+
+
+def test_discover_selecting_nothing_raises() -> None:
+    with pytest.raises(ValueError, match="selected no members"):
+        discover(Billing, "handle_*")
+
+
+def test_discover_requires_a_pattern() -> None:
+    with pytest.raises(ValueError, match="at least one match pattern"):
+        discover(Billing, ())
+
+
+def test_discover_rejects_deferred_target_syntax() -> None:
+    with pytest.raises(DeferredTargetError):
+        discover("bndtest_widgets?", "*")
+
+
+def test_discover_options_reach_every_binding() -> None:
+    # An invalid per-binding option surfacing from discover() shows the
+    # keyword options are handed to each constructed binding; a capture
+    # override lands as it would from binding() directly.
+
+    with pytest.raises(ValueError, match="stack"):
+        discover(Billing, "*", exclude="_*", stack=0)
+
+    group = discover(Billing, "charge", capture="snapshot")
+    assert group.charge._capture_args is not None
