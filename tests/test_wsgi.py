@@ -474,6 +474,19 @@ def test_when_declines_recording_but_the_app_still_runs() -> None:
     assert app.filtered_calls == 1
 
 
+def test_when_false_makes_a_behaviour_only_wsgi_binding() -> None:
+    app = binding(__name__, "application", mode="wsgi", when=False)
+    app.on_request.transforms_response(lambda status, headers: ("410 Gone", headers))
+
+    with app, timeline() as tape:
+        body, server = _serve(_environ())
+
+    assert body == b"hello world"
+    assert server.status == "410 Gone"
+    assert "request" not in [event.kind for event in tape.all]
+    assert app.filtered_calls == 0
+
+
 def test_namespace_gating_points_across_the_modes() -> None:
     app = binding(__name__, "application", mode="wsgi")
 

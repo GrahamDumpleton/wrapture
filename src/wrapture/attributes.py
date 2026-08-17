@@ -128,6 +128,12 @@ def _record(
     on the in-progress stack so anything it triggers nests under it.
     """
 
+    # when=False is a behaviour-only binding: it never records, counts
+    # nothing, and takes no part in gap detection.
+
+    if binding._when is False:
+        return operate()
+
     active = _active_sinks()
     if not active or _in_recorder.get():
         if not active and not _in_recorder.get() and _timelines_active():

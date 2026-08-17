@@ -180,10 +180,52 @@ def test_attribute_accesses_map_onto_call_shape() -> None:
 
 
 # ---------------------------------------------------------------------------
+# booleans
+# ---------------------------------------------------------------------------
+
+
+def test_when_false_is_a_behaviour_only_binding() -> None:
+    # As with wrapt's enabled, a boolean replaces the predicate: a
+    # static False never records and counts nothing, while behaviour
+    # still applies, for plumbing that must not put itself in the
+    # trace.
+
+    charge = binding(Gateway, "charge", when=False)
+    charge.on_call.returns("stubbed")
+
+    with timeline(charge) as tape:
+        assert Gateway().charge(500) == "stubbed"
+
+    assert len(tape.all) == 0
+    assert charge.filtered_calls == 0
+
+
+def test_when_true_is_the_always_record_default() -> None:
+    charge = binding(Gateway, "charge", when=True)
+
+    with timeline(charge) as tape:
+        Gateway().charge(500)
+
+    assert len(tape.all) == 1
+
+
+def test_when_false_on_an_attribute_binding() -> None:
+    status = binding(Model, "status", when=False)
+
+    with timeline(status) as tape:
+        model = Model()
+        model.status = "published"
+        _ = model.status
+
+    assert len(tape.all) == 0
+    assert model.status == "published"
+
+
+# ---------------------------------------------------------------------------
 # validation
 # ---------------------------------------------------------------------------
 
 
 def test_a_non_callable_predicate_is_rejected_at_creation() -> None:
-    with pytest.raises(ValueError, match="when must be a callable"):
-        binding(Gateway, "charge", when=True)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="when must be a boolean"):
+        binding(Gateway, "charge", when=42)  # type: ignore[arg-type]

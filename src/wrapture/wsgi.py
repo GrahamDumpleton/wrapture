@@ -375,24 +375,34 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
         hooks = _Hooks(binding)
 
-        active = _active_sinks()
-        recording = bool(active) and not _in_recorder.get()
+        # when=False makes this a behaviour-only binding: it never
+        # records, counts nothing, and takes no part in gap detection.
 
-        if not recording and not _in_recorder.get() and _timelines_active():
+        when = binding._when if binding is not None else None
+
+        active = _active_sinks()
+        recording = when is not False and bool(active) and not _in_recorder.get()
+
+        if (
+            when is not False
+            and not recording
+            and not _in_recorder.get()
+            and _timelines_active()
+        ):
             if binding is not None:
                 binding._note_missed_call()
 
         # The per-request predicate decides recording only; behaviour
         # still applies when it declines, matching when= elsewhere.
 
-        if recording and binding is not None and binding._when is not None:
+        if recording and callable(when):
             guard = _in_recorder.set(True)
             try:
-                wanted = binding._when(None, (environ,), {})
+                wanted = when(None, (environ,), {})
             finally:
                 _in_recorder.reset(guard)
 
-            if not wanted:
+            if not wanted and binding is not None:
                 binding._filtered_calls += 1
                 recording = False
 

@@ -438,7 +438,9 @@ class Binding:
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         stack: int | str | None = None,
-        when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
+        when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
+        | bool
+        | None = None,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
@@ -465,10 +467,16 @@ class Binding:
                 f" frame count, got {stack!r}"
             )
 
-        if when is not None and not callable(when):
+        # As with wrapt's `enabled`, when= accepts a boolean as well as
+        # a predicate: True is the always-record default, False makes
+        # this a behaviour-only binding that never records.
+
+        if when is True:
+            when = None
+        elif when is not False and when is not None and not callable(when):
             raise ValueError(
-                f"when must be a callable taking (instance, args, kwargs)"
-                f" or None, got {when!r}"
+                f"when must be a boolean, a callable taking (instance,"
+                f" args, kwargs), or None, got {when!r}"
             )
 
         if mode is None:
@@ -803,7 +811,9 @@ class Binding:
         """Operations the `when=` predicate declined to record.
 
         Deliberate silence, but counted, so a shorter tape than
-        expected can be explained rather than guessed at.
+        expected can be explained rather than guessed at. A static
+        `when=False` counts nothing: there is no per-operation
+        decision to report.
         """
 
         return self._filtered_calls
@@ -942,6 +952,15 @@ class Binding:
             kwargs: dict[str, Any],
         ) -> Any:
             behaviour = bnd._behaviour("call")
+
+            # when=False is a behaviour-only binding: it never records,
+            # counts nothing, and takes no part in gap detection.
+
+            if bnd._when is False:
+                if behaviour is None:
+                    return wrapped(*args, **kwargs)
+                return behaviour(wrapped, instance, args, kwargs)
+
             active = _active_sinks()
 
             # Not recording: nothing is listening, or this call was
@@ -1268,7 +1287,7 @@ def binding(
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
-    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
 ) -> Binding:
     """Create a binding for one target attribute.
 
@@ -1313,6 +1332,10 @@ def binding(
     For an attribute binding a set passes the written value as the
     single positional argument; a get or delete passes empty args. For a
     wsgi binding the environ mapping is the single positional argument.
+    As with wrapt's `enabled`, a boolean is accepted in place of the
+    predicate: `when=False` makes a behaviour-only binding that never
+    records and counts nothing, for plumbing that must not put itself
+    in the trace, and `when=True` is the always-record default.
 
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.
@@ -1353,7 +1376,7 @@ def discover(
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
-    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
 ) -> BindingGroup:
     """Create bindings for every member of a target matching a pattern.
 
