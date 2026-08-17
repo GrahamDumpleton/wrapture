@@ -496,7 +496,11 @@ module: it registers a post-import hook per target, which fires
 immediately when the module is already imported and otherwise when
 the application imports it, at which point the entry's members are
 resolved and its bindings applied. The application's import order is
-never changed by observing it. Deferral has one honest cost: a
+never changed by observing it. This holds under Python 3.15's lazy
+imports too: a `lazy import` statement imports nothing, and first
+use reifies the module through the normal import machinery, so the
+bindings land at that moment, before the touched attribute is even
+fetched. Deferral has one honest cost: a
 misspelled target module is indistinguishable from one not imported
 yet, so it is not an apply-time error; the applied record's
 `pending` view names the entries still waiting, and a target whose

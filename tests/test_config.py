@@ -8,6 +8,7 @@ primitive, with loud failures for anything it does not understand.
 """
 
 import importlib
+import subprocess
 import sys
 import textwrap
 import warnings
@@ -401,6 +402,62 @@ def test_revert_neutralises_hooks_that_have_not_fired(
 
     module.run("job")
     assert collector.entered == []
+
+
+LAZY_PROBE = """
+import sys
+import wrapture
+
+class Collector(wrapture.Sink):
+    def __init__(self):
+        self.entered = []
+    def on_enter(self, event):
+        self.entered.append(event)
+
+collector = Collector()
+applied = wrapture.Config(
+    observe=[wrapture.ObserveEntry(target="lazy_target", name="ping")],
+    sink=collector,
+).apply()
+
+lazy import lazy_target
+
+assert "lazy_target" not in sys.modules
+assert applied.bindings == ()
+
+assert lazy_target.ping("x") == "pong:x"
+
+assert [bound.name for bound in applied.bindings] == ["ping"]
+assert [event.path for event in collector.entered] == ["lazy_target:ping"]
+print("lazy-import-deferral-ok")
+"""
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 15), reason="lazy import syntax arrived in 3.15"
+)
+def test_deferral_fires_when_a_lazy_import_reifies(tmp_path: Path) -> None:
+    # The lazy import statement imports nothing, so the entry stays
+    # pending; first use reifies the module through the normal import
+    # machinery, so the hook fires and the binding lands before the
+    # touched attribute is fetched. The 3.15-only syntax lives in a
+    # subprocess script so this file parses everywhere.
+
+    (tmp_path / "lazy_target.py").write_text(
+        "def ping(text):\n    return f'pong:{text}'\n"
+    )
+    (tmp_path / "probe.py").write_text(LAZY_PROBE)
+
+    completed = subprocess.run(
+        [sys.executable, "probe.py"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "lazy-import-deferral-ok" in completed.stdout
 
 
 def test_report_lists_the_sink_applied_and_pending() -> None:
