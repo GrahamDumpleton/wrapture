@@ -613,6 +613,54 @@ pipeline streamed to disk and rendered in Perfetto, and an
 operator-code bundle showing `pythonpath`, a setup callback and a
 sink factory together. Each is a directory to `cd` into and run.
 
+## Injection without a launcher: autowrapt
+
+The runner still owns the command line. When even that is
+unavailable, because something else launches the process (a service
+manager, a container entry point, a WSGI server), the same config
+can be injected at interpreter startup through
+[autowrapt](https://github.com/GrahamDumpleton/autowrapt). Two
+opt-ins gate it, both outside wrapture:
+
+```console
+$ pip install autowrapt
+$ AUTOWRAPT_BOOTSTRAP=wrapture python myapp.py
+```
+
+Installing autowrapt is what makes interpreter startup do anything
+at all, and the environment variable names an entry point group that
+autowrapt hands to wrapt's post-import hook discovery once site
+initialisation completes; wrapture's entry in that group hooks a
+module that is always already imported, so its bootstrap fires
+immediately, at startup. Absent either opt-in, the entry point in
+wrapture's package metadata is inert: wrapture has no dependency on
+autowrapt and never imports it. When it fires, the bootstrap
+resolves the same config precedence chain the runner uses and
+applies what it finds, before the application's own code runs. The
+runner and autowrapt are two doorways into identical machinery;
+nothing is expressible through one and not the other.
+
+Positioning matters here. Injection is a development, staging and
+break-glass tool: the unwritten rule for autowrapt is that it is not
+installed on production systems in normal situations, precisely
+because of what it enables, and that installation gate is the
+feature. Production tracing is the code-level path from earlier on
+this page, an application registering its own process sink at
+startup. Two operational cautions follow from the mechanism:
+
+- The environment variable reaches every Python process launched
+  under it, not just the one you meant. For that reason a missing
+  config warns (`ConfigWarning`) and starts the process untraced
+  rather than failing it; a config that exists but is broken raises,
+  the loud development posture.
+- The bootstrap applies the config at interpreter startup, so
+  `[[observe]]` targets are imported then, before frameworks have
+  configured themselves. A module that cannot import that early (a
+  Django models module, say) belongs in a `[[setup]]` entry instead,
+  which fires only when the application itself imports the trigger
+  module; deferring `[[observe]]` entries the same way is the next
+  piece of this layer.
+
 ## Exporting traces
 
 Three exporters render a trace for existing tools rather than a

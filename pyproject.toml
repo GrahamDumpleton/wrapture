@@ -33,6 +33,18 @@ Homepage = "https://github.com/GrahamDumpleton/wrapture"
 Documentation = "https://wrapture.readthedocs.io"
 "Bug Tracker" = "https://github.com/GrahamDumpleton/wrapture/issues/"
 
+# The zero-code injection trigger, in the shape autowrapt consumes:
+# AUTOWRAPT_BOOTSTRAP=wrapture names this entry point group, which
+# autowrapt hands to wrapt.discover_post_import_hooks() at interpreter
+# startup. Each entry maps a trigger module to a callback; hooking os,
+# which is always already imported by then, makes the callback fire
+# immediately at startup. Inert metadata unless autowrapt is installed
+# and the environment variable is set; wrapture itself has no
+# dependency on autowrapt and never imports it.
+
+[project.entry-points.wrapture]
+os = "wrapture.bootstrap:bootstrap"
+
 [project.optional-dependencies]
 dev = [
     "mypy",
@@ -49,7 +61,7 @@ docs = [
 [tool.setuptools]
 package-dir = {"" = "src"}
 zip-safe = false
-packages = ["wrapture"]
+packages = ["wrapture", "wrapture.tools"]
 
 [tool.setuptools.package-data]
 wrapture = ["py.typed"]

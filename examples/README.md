@@ -29,6 +29,34 @@ With wrapture installed into an environment of your own, drop the
 `uv run` prefix and use plain `python -m wrapture main.py` anywhere
 below.
 
+## Running through autowrapt instead
+
+Every example also runs through the injection path, where no
+launcher is involved: autowrapt fires wrapture's bootstrap at
+interpreter startup, the same config is discovered from the working
+directory, and the program is started with plain `python`. From the
+checkout, uv supplies autowrapt for just that run:
+
+```console
+$ cd examples/live-printer
+$ AUTOWRAPT_BOOTSTRAP=wrapture uv run --with autowrapt python main.py
+```
+
+With wrapture and autowrapt both installed in an environment of your
+own, the same is:
+
+```console
+$ AUTOWRAPT_BOOTSTRAP=wrapture python main.py
+```
+
+The output is identical to the runner's, because the runner and
+autowrapt are two triggers for the same config machinery. One detail
+makes it work: the bootstrap applies the config during interpreter
+startup, before the script's directory joins `sys.path`, so the
+observed module must be importable some other way. That is what the
+`pythonpath = "."` entry in each example's `wrapture.toml` provides,
+anchored to the config file's directory.
+
 ## live-printer
 
 The quickest look at what observing feels like. A shop places three
