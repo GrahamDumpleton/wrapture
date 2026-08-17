@@ -132,3 +132,44 @@ Two charges print live and land in `trace.jsonl`; convert the file
 as in the previous example to see the same two from the other
 renderings. Edit `threshold` in `wrapture.toml` and run again to
 watch the selection change without touching any Python.
+
+## flask-app
+
+Request-tied tracing of a real framework with the same primitives: a
+small Flask shop whose code never mentions wrapture, where every
+HTTP request prints as one tree, the request line, the view handler
+and its helpers nested beneath it, and the status when the body
+closes. Three pieces in `wrapture.toml` do the work:
+
+- An observe entry with `mode = "wsgi"` on `myapp:app` / `wsgi_app`
+  installs the recording middleware on the Flask instance's own
+  `wsgi_app` attribute, the documented place Flask middleware goes,
+  reached here by config alone.
+- A `match = "*"` entry observes the application module's functions,
+  view handlers and helpers alike.
+- A setup hook (`wrapture_local/flask_support.py`) closes the gap
+  the framework creates: Flask captured each view function when
+  `@app.route` ran, before observation existed, so its dispatch
+  table still holds the originals. Observe hooks fire before setup
+  hooks for the same module, so by the time the hook runs the module
+  attributes are the observed forms, and it points
+  `app.view_functions` back at them.
+
+Flask is not a dependency of this repository, so uv supplies it for
+the run:
+
+```console
+$ cd examples/flask-app
+$ uv run --with flask python -m wrapture main.py
+```
+
+The script drives four requests through Flask's test client,
+including one that fails, so the last tree shows the `KeyError`
+inside the handler and the `500` the request becomes. The same
+config also traces the real development server, with the trees
+appearing in the server log as requests arrive:
+
+```console
+$ uv run --with flask python -m wrapture -m flask --app myapp run
+$ curl http://127.0.0.1:5000/quote/widget
+```
