@@ -12,8 +12,8 @@ the safe monkey-patching machinery wrapt provides.
 
 ```{note}
 wrapture is in early development. The monkey patching, unit testing
-and ad-hoc tracing layers are implemented, including WSGI request
-tracing. Development previews are published to
+and ad-hoc tracing layers are implemented, including WSGI and ASGI
+request tracing. Development previews are published to
 [PyPI](https://pypi.org/project/wrapture/); the API may still shift
 before 1.0.0.
 ```
@@ -87,6 +87,7 @@ monkey-patching
 unit-testing
 ad-hoc-tracing
 wsgi-tracing
+asgi-tracing
 known-limitations
 release-notes
 ```

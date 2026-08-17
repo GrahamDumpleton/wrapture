@@ -244,7 +244,9 @@ point substituting `observed()` on each view function, and one
 `[[setup]]` entry instruments the whole framework; shipped as an
 installed package with an entry point, the config reduces to
 `[[setup]]` with a `group` key. The flask-app example in the
-repository's examples directory is this pattern in full.
+repository's
+[examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
+is this pattern in full.
 
 ## Protocol obligations, honoured
 
@@ -266,9 +268,9 @@ middleware obligations of PEP 3333:
   request records, the body is necessarily wrapped, so sendfile is
   bypassed for that request; that is the cost of observing it.
 
-Two limitations, stated plainly: the legacy `write()` callable that
+One limitation, stated plainly: the legacy `write()` callable that
 `start_response` returns is passed through but not observed, so body
 content sent through it is not counted and does not extend the
 recorded timing (PEP 3333 keeps `write()` only for pre-WSGI
-backwards compatibility); and ASGI applications are a sibling design,
-not covered by this middleware.
+backwards compatibility). ASGI applications are the sibling design,
+covered by [ASGI request tracing](asgi-tracing.md).

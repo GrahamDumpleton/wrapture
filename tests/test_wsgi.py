@@ -664,5 +664,5 @@ def test_observe_entry_rejects_wsgi_mode_with_match() -> None:
 
 
 def test_observe_entry_rejects_unknown_modes() -> None:
-    with pytest.raises(ConfigError, match="mode must be omitted or 'wsgi'"):
-        ObserveEntry(target=__name__, name="application", mode="asgi")
+    with pytest.raises(ConfigError, match="mode must be omitted, 'wsgi' or 'asgi'"):
+        ObserveEntry(target=__name__, name="application", mode="grpc")

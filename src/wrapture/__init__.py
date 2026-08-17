@@ -22,6 +22,9 @@ __version__ = _format_version(__version_info__)
 
 from wrapt import MISSING
 
+from .asgi import (
+    ASGIMiddleware,
+)
 from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
@@ -116,6 +119,7 @@ from .wsgi import (
 
 __all__ = [
     "MISSING",
+    "ASGIMiddleware",
     "Aggregate",
     "AlreadyAppliedError",
     "AppliedConfig",

@@ -237,7 +237,8 @@ signature introspection, coroutine-function detection and equality
 all delegate to the wrapped callable, so registries that inspect what
 they are handed behave as if the wrapper were not there. That makes
 `observed()` safe to interpose at a framework's registration choke
-point; the flask-app example in the repository's examples directory
+point; the flask-app example in the repository's
+[examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
 wraps every view function as `Flask.add_url_rule` registers it, via
 one `transforms_args` stage.
 

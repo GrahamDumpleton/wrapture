@@ -136,10 +136,11 @@ class ObserveEntry:
     required, and `exclude` only accompanies `match`.
 
     `mode` is normally empty, leaving each binding to detect its own.
-    The one accepted value is "wsgi", which wraps the named members as
-    WSGI applications in the recording middleware; it requires `name`,
-    since a pattern must never bulk-install middleware. For a wsgi
-    entry, `redact` names query string parameters.
+    The accepted values are "wsgi" and "asgi", which wrap the named
+    members as applications of that protocol in the recording
+    middleware; each requires `name`, since a pattern must never
+    bulk-install middleware. For a wsgi or asgi entry, `redact` names
+    query string parameters.
     """
 
     target: str
@@ -189,9 +190,9 @@ class ObserveEntry:
                 f" leave the member out"
             )
 
-        if self.mode and self.mode != "wsgi":
+        if self.mode and self.mode not in ("wsgi", "asgi"):
             raise ConfigError(
-                f"{where}: mode must be omitted or 'wsgi', got {self.mode!r}"
+                f"{where}: mode must be omitted, 'wsgi' or 'asgi', got {self.mode!r}"
             )
 
         if self.mode and not self.name:

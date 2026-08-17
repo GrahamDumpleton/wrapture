@@ -14,9 +14,9 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on the
 safe monkey-patching machinery wrapt provides.
 
 > **Status: early development.** The monkey patching, unit testing and
-> ad-hoc tracing layers are implemented, including WSGI request tracing.
-> Development previews are published to PyPI; the API may still shift
-> before 1.0.0.
+> ad-hoc tracing layers are implemented, including WSGI and ASGI request
+> tracing. Development previews are published to PyPI; the API may still
+> shift before 1.0.0.
 
 ## Installation
 

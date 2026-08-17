@@ -174,26 +174,30 @@ def _content_headers(event: Event, headers: Iterable[tuple[str, str]]) -> None:
 
 
 class _Hooks:
-    """A snapshot of a binding's request behaviour at call time."""
+    """A snapshot of a binding's request behaviour at call time.
 
-    __slots__ = ("environ", "response", "body", "terminal")
+    Shared with the ASGI middleware: the inbound stages transform the
+    environ there and the scope here, but the phases are the same.
+    """
+
+    __slots__ = ("inbound", "response", "body", "terminal")
 
     def __init__(self, binding: Binding | None) -> None:
         hooks = binding._request_hooks if binding is not None else None
 
         if hooks is None:
-            self.environ: tuple[Callable[..., Any], ...] = ()
+            self.inbound: tuple[Callable[..., Any], ...] = ()
             self.response: tuple[Callable[..., Any], ...] = ()
             self.body: tuple[Callable[..., Any], ...] = ()
             self.terminal: tuple[str, Any] | None = None
         else:
-            self.environ = tuple(hooks["environ"])
+            self.inbound = tuple(hooks["inbound"])
             self.response = tuple(hooks["response"])
             self.body = tuple(hooks["body"])
             self.terminal = hooks["terminal"]
 
     def configured(self) -> bool:
-        return bool(self.environ or self.response or self.body or self.terminal)
+        return bool(self.inbound or self.response or self.body or self.terminal)
 
 
 class _ResponseIterator:
@@ -416,7 +420,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # Inbound stages see and may replace the environ before the
         # application (or a terminal) does.
 
-        for stage in hooks.environ:
+        for stage in hooks.inbound:
             environ = stage(environ)
 
         response: dict[str, Any] = {}
@@ -558,7 +562,7 @@ class RequestBehaviour:
         environ the application (and later stages) will see. Mutating
         and returning the same mapping is the usual form."""
 
-        self._hooks["environ"].append(fn)
+        self._hooks["inbound"].append(fn)
         return self._binding
 
     def transforms_response(
@@ -625,7 +629,7 @@ class RequestBehaviour:
     def passes_through(self) -> Binding:
         """Clear all configured request behaviour."""
 
-        self._hooks["environ"].clear()
+        self._hooks["inbound"].clear()
         self._hooks["response"].clear()
         self._hooks["body"].clear()
         self._hooks["terminal"] = None

@@ -14,9 +14,9 @@ import time
 import types
 import warnings
 import weakref
-from collections.abc import AsyncGenerator, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Sequence
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any, Self, TypeVar
+from typing import Any, Protocol, Self, TypeVar, cast
 
 import wrapt
 from wrapt import MISSING, is_wrapped_by, unwrap_object
@@ -71,8 +71,46 @@ from .timeline import (
     _timelines_active,
 )
 
-if TYPE_CHECKING:
-    from .wsgi import RequestBehaviour
+
+class RequestNamespace(Protocol):
+    """The static face of on_request: the combined WSGI and ASGI
+    vocabulary, permissively typed.
+
+    Which half is live depends on the binding's mode, which no type
+    checker can see, so the signatures here accept anything plausible
+    and the accurate per-protocol types are documented on the concrete
+    classes, wrapture.wsgi.RequestBehaviour and
+    wrapture.asgi.RequestBehaviour. Calling a stage from the wrong
+    protocol fails at runtime with an AttributeError.
+    """
+
+    def transforms_environ(
+        self, fn: Callable[[dict[str, Any]], dict[str, Any]]
+    ) -> Binding: ...
+
+    def transforms_scope(
+        self, fn: Callable[[dict[str, Any]], dict[str, Any]]
+    ) -> Binding: ...
+
+    def transforms_response(
+        self, fn: Callable[[Any, Any], tuple[Any, Any]]
+    ) -> Binding: ...
+
+    def transforms_body(self, fn: Callable[[Any], Any]) -> Binding: ...
+
+    def returns(
+        self,
+        status: Any,
+        headers: Iterable[tuple[str, str]] = (),
+        body: Any = (),
+    ) -> Binding: ...
+
+    def raises(self, exc: BaseException | type[BaseException]) -> Binding: ...
+
+    def decorates(self, fn: Callable[..., Any]) -> Binding: ...
+
+    def passes_through(self) -> Binding: ...
+
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
 
@@ -481,9 +519,9 @@ class Binding:
 
         if mode is None:
             mode = _detect_mode(target, name, missing_ok=missing_ok)
-        elif mode not in ("callable", "attribute", "wsgi"):
+        elif mode not in ("callable", "attribute", "wsgi", "asgi"):
             raise ValueError(
-                f"mode must be 'callable', 'attribute' or 'wsgi', got {mode!r}"
+                f"mode must be 'callable', 'attribute', 'wsgi' or 'asgi', got {mode!r}"
             )
 
         # What this binding is bound to.
@@ -512,13 +550,13 @@ class Binding:
         # "set" or "delete"): composing stages around one terminal, with
         # the composed form cached until either changes. Request
         # behaviour is phase-keyed rather than composed, so it lives in
-        # its own structure, consumed by the WSGI middleware.
+        # its own structure, consumed by the WSGI and ASGI middlewares.
 
         self._pipelines: dict[str, list[StageFunction]] = {}
         self._terminals: dict[str, WrapperFunction] = {}
         self._composed: dict[str, WrapperFunction] = {}
         self._request_hooks: dict[str, Any] = {
-            "environ": [],
+            "inbound": [],
             "response": [],
             "body": [],
             "terminal": None,
@@ -561,11 +599,12 @@ class Binding:
 
     @property
     def mode(self) -> str:
-        """'callable' or 'attribute'. Detected at creation.
+        """'callable', 'attribute', 'wsgi' or 'asgi'.
 
         Names what is bound, not the operation: a 'callable' binding
         exposes on_call, an 'attribute' binding exposes on_get / on_set /
-        on_delete.
+        on_delete, and the request modes expose on_request. Detected at
+        creation, except the request modes, which are always explicit.
         """
 
         return self._mode
@@ -622,6 +661,7 @@ class Binding:
             "callable": "on_call",
             "attribute": "on_get, on_set or on_delete",
             "wsgi": "on_request",
+            "asgi": "on_request",
         }[self._mode]
         article = "an" if self._mode == "attribute" else "a"
 
@@ -663,15 +703,27 @@ class Binding:
         return self._namespace("on_delete", "attribute", DeleteBehaviour)
 
     @property
-    def on_request(self) -> RequestBehaviour:
-        """The behaviour namespace for WSGI requests. WSGI mode only."""
+    def on_request(self) -> RequestNamespace:
+        """The behaviour namespace for requests. WSGI and ASGI modes only.
 
-        from .wsgi import RequestBehaviour
+        The vocabulary follows the binding's protocol: a wsgi binding
+        gets environ and body-iterable stages, an asgi binding gets
+        scope and per-chunk stages; the terminals are shared. See
+        wrapture.wsgi.RequestBehaviour and
+        wrapture.asgi.RequestBehaviour for the accurate signatures.
+        """
 
-        if self._mode != "wsgi":
-            raise self._wrong_mode("on_request")
+        if self._mode == "wsgi":
+            from .wsgi import RequestBehaviour
 
-        return RequestBehaviour(self)
+            return cast(RequestNamespace, RequestBehaviour(self))
+
+        if self._mode == "asgi":
+            from .asgi import RequestBehaviour as ASGIBehaviour
+
+            return cast(RequestNamespace, ASGIBehaviour(self))
+
+        raise self._wrong_mode("on_request")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -738,9 +790,10 @@ class Binding:
             _applied_bindings.add(self)
             return self
 
-        # WSGI mode installs the middleware through the same wrap_object
-        # path as a callable, so remove() and active work unchanged. The
-        # import is local because wsgi.py imports from this module.
+        # The request modes install their middleware through the same
+        # wrap_object path as a callable, so remove() and active work
+        # unchanged. The imports are local because both middleware
+        # modules import from this module.
 
         if self._mode == "wsgi":
             from .wsgi import WSGIMiddleware
@@ -749,6 +802,20 @@ class Binding:
                 return WSGIMiddleware(wrapped, binding=self)
 
             self._wrapper = wrapt.wrap_object(self._target, self._name, middleware)
+            self._suspended = suspended
+            self._apply_count += 1
+            _applied_bindings.add(self)
+            return self
+
+        if self._mode == "asgi":
+            from .asgi import ASGIMiddleware
+
+            def asgi_middleware(
+                wrapped: WrappedFunction, *args: Any, **kwargs: Any
+            ) -> Any:
+                return ASGIMiddleware(wrapped, binding=self)
+
+            self._wrapper = wrapt.wrap_object(self._target, self._name, asgi_middleware)
             self._suspended = suspended
             self._apply_count += 1
             _applied_bindings.add(self)
@@ -845,8 +912,8 @@ class Binding:
 
         One canonical name across the modes: a callable binding records
         "call" events, an attribute binding records "get", "set" and
-        "delete", and a wsgi binding records "request"; narrow with
-        .of_kind() where a mode has several.
+        "delete", and the wsgi and asgi bindings record "request";
+        narrow with .of_kind() where a mode has several.
 
         Raises rather than returning an empty log when no events could
         possibly exist, so "recorded nothing" can never be mistaken for
@@ -1302,10 +1369,11 @@ def binding(
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
     to override for the ambiguous case of a callable stored as data.
-    `mode="wsgi"` is never detected and must be passed explicitly: it
-    wraps a WSGI application object in the recording middleware, records
-    "request" events, and offers the on_request namespace; see the
-    wrapture.wsgi module.
+    `mode="wsgi"` and `mode="asgi"` are never detected and must be
+    passed explicitly: each wraps an application object of that
+    protocol in its recording middleware, records "request" events,
+    and offers the on_request namespace; see the wrapture.wsgi and
+    wrapture.asgi modules.
 
     `missing_ok=True` permits binding a name that is not on the class,
     typically one assigned in __init__. Without it such a name raises
@@ -1331,7 +1399,8 @@ def binding(
     should be fast, and if it raises the caller sees the exception.
     For an attribute binding a set passes the written value as the
     single positional argument; a get or delete passes empty args. For a
-    wsgi binding the environ mapping is the single positional argument.
+    wsgi binding the environ mapping is the single positional argument,
+    and for an asgi binding the scope mapping is.
     As with wrapt's `enabled`, a boolean is accepted in place of the
     predicate: `when=False` makes a behaviour-only binding that never
     records and counts nothing, for plumbing that must not put itself
