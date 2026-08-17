@@ -363,6 +363,11 @@ to a fresh file at the original path, with queued lines draining to
 the old file first. Copytruncate-style rotation needs no call at
 all, since the writer appends.
 
+Move-aside rotation is a POSIX pattern. Windows refuses to rename a
+file another process holds open, so a rotator cannot move the live
+trace aside there; rotate by copy and truncate instead, which works
+on every platform and needs no `reopen()`.
+
 This completes the inherited-dev-server story from the top of this
 page. The whole intervention is a few lines in the application's entry
 point, with no timeline and no changes to the code being observed:

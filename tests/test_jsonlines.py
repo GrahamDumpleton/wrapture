@@ -10,6 +10,7 @@ disk.
 """
 
 import json
+import sys
 import threading
 import warnings
 from collections.abc import Generator
@@ -276,6 +277,11 @@ def test_an_unopenable_path_breaks_the_sink_not_the_application(
     assert sink.errors >= 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot rename a file the writer holds open;"
+    " move-aside rotation is a POSIX pattern",
+)
 def test_reopen_switches_to_a_fresh_file_for_rotation(tmp_path: Path) -> None:
     # External rotation moves the file aside; reopen() makes the
     # writer release the old file and append to the path afresh, with
