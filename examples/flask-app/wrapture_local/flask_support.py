@@ -1,31 +1,65 @@
-"""Point Flask's dispatch at the observed forms of its view functions.
+"""Instrument Flask, entirely under the covers.
 
-Flask captures a reference to each view function at the moment
-@app.route runs, while the application module is still importing. The
-config's observe entries wrap the module attributes, but Flask's
-view_functions table still holds the originals it captured, so
-dispatch would bypass the observation entirely.
+A stand-in for what a wrapture-flask package would ship: one handler,
+triggered by the import of "flask" itself, that instruments every
+Flask application the process ever creates. Nothing here knows the
+application's module, its attribute names, or whether it uses the
+application-factory pattern; packaged with an entry point, the config
+would say `[[setup]]` with `group = "wrapture_flask"` and nothing
+else.
 
-This setup hook closes that gap. Post-import hooks fire in the order
-they were registered, and a config registers its observe entries
-before its setup entries, so by the time this runs the module
-attributes are the wrapped forms; pointing view_functions back at
-them routes dispatch through the observation. Views defined
-elsewhere, such as Flask's own static handler, are left untouched.
+Two patches, both at Flask's own choke points:
+
+- Flask.__init__ installs the recording WSGI middleware on each new
+  instance's wsgi_app attribute, the documented place Flask
+  middleware goes, so every request records as one tree however the
+  instance was made.
+- Flask.add_url_rule substitutes wrapture.observed(view_func) as
+  routes register, so every view handler records beneath its
+  request, wherever the view came from: module functions, closures,
+  blueprints from other modules. observed() is idempotent, so a view
+  registered twice is not wrapped twice.
+
+Both bindings are created with when=False, making them behaviour-only:
+the plumbing is not the trace, so they transform without ever
+recording their own calls.
 """
 
-import sys
+from __future__ import annotations
+
 from typing import Any
+
+import wrapture
 
 
 def instrument(module: Any) -> None:
-    """Repoint the module's Flask app at its observed view functions."""
+    """Instrument every Flask application this process creates."""
 
-    app = module.app
+    def wrap_app(
+        wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        outcome = wrapped(*args, **kwargs)
 
-    for endpoint, view in list(app.view_functions.items()):
-        owner = sys.modules.get(getattr(view, "__module__", ""))
-        replacement = getattr(owner, view.__name__, None) if owner else None
+        # Label with the app's own import name, so requests read as
+        # "myapp.wsgi_app" and two apps in one process stay distinct.
 
-        if replacement is not None and replacement is not view:
-            app.view_functions[endpoint] = replacement
+        instance.wsgi_app = wrapture.WSGIMiddleware(
+            instance.wsgi_app, label=f"{instance.name}.wsgi_app"
+        )
+        return outcome
+
+    constructor = wrapture.binding(module.Flask, "__init__", when=False)
+    constructor.on_call.decorates(wrap_app).apply()
+
+    def wrap_view(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        if kwargs.get("view_func") is not None:
+            kwargs = dict(kwargs, view_func=wrapture.observed(kwargs["view_func"]))
+        elif len(args) >= 3 and args[2] is not None:
+            args = (*args[:2], wrapture.observed(args[2]), *args[3:])
+
+        return args, kwargs
+
+    registrar = wrapture.binding(module.Flask, "add_url_rule", when=False)
+    registrar.on_call.transforms_args(wrap_view).apply()

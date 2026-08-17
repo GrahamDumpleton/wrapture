@@ -1,25 +1,21 @@
-# Request-tied tracing of a Flask application, with no changes to it.
+# Request-tied tracing of a Flask application, with no changes to it
+# and no knowledge of it.
 #
-# The first observe entry installs the recording WSGI middleware on
-# the Flask instance's own wsgi_app attribute, so every request
-# records one "request" event. The second observes the application
-# module's functions, view handlers and helpers alike. The setup hook
-# then points Flask's dispatch table at the observed handlers, since
-# Flask captured the originals before observation existed.
+# All the Flask instrumentation lives in the setup hook, triggered by
+# the import of flask itself: every application instance gets the
+# recording WSGI middleware at construction, and every view function
+# is observed as it registers. The config never names the app. The
+# one observe entry covers this application's own helper, the kind of
+# addition an operator layers on top of the out-of-box experience.
 
 pythonpath = "."
 
 [[observe]]
-target = "myapp:app"
-name = "wsgi_app"
-mode = "wsgi"
-
-[[observe]]
 target = "myapp"
-match = "*"
+name = "quote"
 
 [[setup]]
-module = "myapp"
+module = "flask"
 call = "wrapture_local.flask_support:instrument"
 
 [sink]

@@ -212,6 +212,40 @@ application with no code changes: the observe entry defers like any
 other, the middleware lands when the application module is imported,
 and every request appears in the trace as one tree.
 
+## Framework instrumentation under the covers
+
+The observe entry form requires knowing where the application object
+lives. For the out-of-box experience, where a config should not have
+to name the app at all, and for application-factory patterns where
+no importable attribute ever holds it, the middleware is also usable
+directly, and a setup hook triggered by the framework's own import
+can install it on every instance at construction:
+
+```python
+def instrument(module):
+    def wrap_app(wrapped, instance, args, kwargs):
+        outcome = wrapped(*args, **kwargs)
+        instance.wsgi_app = wrapture.WSGIMiddleware(
+            instance.wsgi_app, label=f"{instance.name}.wsgi_app"
+        )
+        return outcome
+
+    wrapture.binding(module.Flask, "__init__", when=False) \
+        .on_call.decorates(wrap_app).apply()
+```
+
+The `when=False` makes this a behaviour-only binding: it installs the
+middleware but never records its own calls, so the instrumentation
+plumbing (here, every `Flask()` construction) stays out of the trace
+it exists to produce.
+
+Pair it with a binding on the framework's route-registration choke
+point substituting `observed()` on each view function, and one
+`[[setup]]` entry instruments the whole framework; shipped as an
+installed package with an entry point, the config reduces to
+`[[setup]]` with a `group` key. The flask-app example in the
+repository's examples directory is this pattern in full.
+
 ## Protocol obligations, honoured
 
 The middleware sits between server and application, so it carries the

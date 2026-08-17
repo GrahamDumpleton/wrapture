@@ -135,25 +135,33 @@ watch the selection change without touching any Python.
 
 ## flask-app
 
-Request-tied tracing of a real framework with the same primitives: a
-small Flask shop whose code never mentions wrapture, where every
-HTTP request prints as one tree, the request line, the view handler
-and its helpers nested beneath it, and the status when the body
-closes. Three pieces in `wrapture.toml` do the work:
+The out-of-box APM experience: a small Flask shop whose code never
+mentions wrapture, and a config that never names the app, where
+every HTTP request prints as one tree, the request line, the view
+handler and its helpers nested beneath it, and the status when the
+body closes.
 
-- An observe entry with `mode = "wsgi"` on `myapp:app` / `wsgi_app`
-  installs the recording middleware on the Flask instance's own
-  `wsgi_app` attribute, the documented place Flask middleware goes,
-  reached here by config alone.
-- A `match = "*"` entry observes the application module's functions,
-  view handlers and helpers alike.
-- A setup hook (`wrapture_local/flask_support.py`) closes the gap
-  the framework creates: Flask captured each view function when
-  `@app.route` ran, before observation existed, so its dispatch
-  table still holds the originals. Observe hooks fire before setup
-  hooks for the same module, so by the time the hook runs the module
-  attributes are the observed forms, and it points
-  `app.view_functions` back at them.
+All the Flask knowledge lives in one setup hook
+(`wrapture_local/flask_support.py`), triggered by the import of
+`flask` itself, a stand-in for what a wrapture-flask package would
+ship; packaged with an entry point, the config would say `[[setup]]`
+with `group = "wrapture_flask"` and nothing else. The hook patches
+Flask's two choke points:
+
+- `Flask.__init__` installs the recording WSGI middleware on each
+  new instance's `wsgi_app` attribute, so every application the
+  process creates is covered however it was made, application
+  factories included, labelled with the app's own name.
+- `Flask.add_url_rule` substitutes `wrapture.observed(view_func)` as
+  routes register. Flask captures view functions into its dispatch
+  table the moment `@app.route` runs, before any observation could
+  exist, so the hook intercepts registration itself; every route
+  registered afterwards is captured, wherever the view came from:
+  module functions, closures, blueprints from other modules.
+
+The one observe entry in `wrapture.toml` covers this application's
+own `quote` helper, the kind of addition an operator layers on top
+of the out-of-box instrumentation.
 
 Flask is not a dependency of this repository, so uv supplies it for
 the run:
