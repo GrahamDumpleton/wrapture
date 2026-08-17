@@ -321,8 +321,9 @@ children before the operation that contains them, and sorting by
 `seq` with nesting rebuilt from `parent_id` recovers the tree.
 
 The form is deliberately stable. Every line has `seq`, `parent_id`
-(null for a root), `depth`, `kind` and `path`; everything else
-appears only when it was observed: `label`, `started` and `duration`
+(null for a root), `depth`, `kind`, `path`, and the `thread_id` and
+`thread_name` of where the operation began; everything else appears
+only when it was observed: `label`, `started` and `duration`
 (plus `body_duration` and `items` for generators), `arguments` or the
 raw `args`/`kwargs` shape, `forwarded`, `result`, `exception` (type
 and message), `value` and `previous` for attribute writes, `injected`,
@@ -597,3 +598,77 @@ dev-server scenario at the top of this page: the few lines in the
 entry point become a `wrapture.toml` next to the project, and
 `python -m wrapture manage.py runserver` traces the inherited
 application untouched.
+
+## Exporting traces
+
+Three exporters render a trace for existing tools rather than a
+viewer of wrapture's own. Each accepts either a `Tape` or event
+records in the serialised JSONLines form, so a trace can be exported
+live inside a test or long after the fact from a file the runner
+produced; `load_events(path)` reads such a file back. From a shell,
+`python -m wrapture.tools convert` does the same without writing any
+code (bare `python -m wrapture.tools` lists the available commands).
+
+### A timeline in Perfetto: chrome_trace
+
+`chrome_trace()` renders the trace in Chrome trace JSON, the format
+the [Perfetto UI](https://ui.perfetto.dev) (and the older
+`chrome://tracing`) opens directly:
+
+```console
+$ python -m wrapture.tools convert --format chrome -o trace.json trace.jsonl
+```
+
+Drop `trace.json` onto Perfetto and the trace becomes a navigable
+timeline: one lane per thread, one slice per event, nested slices
+for nested events, with widths proportional to duration. Clicking a
+slice shows the captured arguments, result or exception in the
+detail pane. The gaps between slices are unobserved time, which for
+a deliberately sparse trace is itself information. An event that
+never closed appears as a begin with no end, and a generator's slice
+spans creation to close with its accumulated body time alongside.
+
+### Architectural snapshots: canonical
+
+`canonical()` renders the call tree as a deterministic text
+fingerprint: kind and path per line, indented by nesting, `!!` with
+the exception type for failures, `(injected)` for outcomes supplied
+by behaviour. Everything unstable between runs (sequence numbers,
+timings, captured values, thread identity) is left out:
+
+```python
+with wrapture.timeline(place, charge, ledger) as tape:
+    checkout(order)
+
+assert wrapture.canonical(tape) == snapshot
+```
+
+Snapshot it once (a golden file, or a tool such as syrupy) and a
+refactor that silently changes what calls what fails the comparison
+as a diff a reviewer can read. This is the complement to
+`assert_order`: the assertion states the rules you thought of, the
+snapshot catches the changes you did not. From a shell,
+`convert --format canonical` renders a trace file the same way.
+
+### Diagrams where Mermaid renders: mermaid
+
+`mermaid()` renders the trace as a sequence diagram: participants
+are the classes and modules, messages are the members called on them
+in recorded order, failures return their exception type, and
+attribute events carry their kind (`status (set)`). Mermaid renders
+natively on GitHub and in most documentation tooling, so the output
+pastes straight into a pull request comment;
+`convert --format mermaid` writes it to standard output ready for
+the clipboard. Best kept to small traces; sequence diagrams stop
+being readable beyond a few dozen events.
+
+```text
+sequenceDiagram
+    participant caller
+    participant P1 as OrderService
+    participant P2 as PaymentGateway
+    caller->>+P1: place_order
+    P1->>+P2: charge
+    P2-->>-P1: TimeoutError
+    P1-->>-caller: return
+```

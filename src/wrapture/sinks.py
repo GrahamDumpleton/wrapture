@@ -718,12 +718,11 @@ def _jsonable(value: Any, depth: int = 8) -> Any:
 
 
 def _event_record(event: Event) -> dict[str, Any]:
-    # The stable serialised form of one event, shared by JSONLines now
-    # and the exporters later. Identity and position are always
-    # present; parent_id is null for a root. Everything else appears
-    # only when observed, so an absent "result" (nothing captured)
-    # stays distinguishable from "result": null (the call returned
-    # None).
+    # The stable serialised form of one event, shared by JSONLines and
+    # the exporters. Identity, position and thread are always present;
+    # parent_id is null for a root. Everything else appears only when
+    # observed, so an absent "result" (nothing captured) stays
+    # distinguishable from "result": null (the call returned None).
 
     record: dict[str, Any] = {
         "seq": event.seq,
@@ -731,6 +730,8 @@ def _event_record(event: Event) -> dict[str, Any]:
         "depth": event.depth,
         "kind": event.kind,
         "path": event.path,
+        "thread_id": event.thread_id,
+        "thread_name": event.thread_name,
     }
 
     if event.label is not None:
@@ -793,9 +794,10 @@ class JSONLines(Sink):
     order, children before the operation that contains them; sort by
     "seq" and rebuild nesting from "parent_id" to recover the tree.
     Fields present on every line: seq, parent_id (null for a root),
-    depth, kind and path. Everything else appears only when observed,
-    so an absent "result" (nothing captured) stays distinguishable
-    from "result": null (the operation returned None).
+    depth, kind, path, thread_id and thread_name. Everything else
+    appears only when observed, so an absent "result" (nothing
+    captured) stays distinguishable from "result": null (the
+    operation returned None).
 
     The observed application is never blocked on I/O: lines go onto a
     bounded queue drained by a background writer thread, and when the

@@ -63,6 +63,12 @@ from .exceptions import (
     SinkErrorWarning,
     WrongModeError,
 )
+from .export import (
+    canonical,
+    chrome_trace,
+    load_events,
+    mermaid,
+)
 from .iterators import (
     IteratorAbandonBehaviour,
     IteratorErrorBehaviour,
@@ -145,11 +151,15 @@ __all__ = [
     "annotate",
     "binding",
     "bindings",
+    "canonical",
+    "chrome_trace",
     "current_event",
     "find_config",
     "flush_sinks",
     "iterator",
     "load_config",
+    "load_events",
+    "mermaid",
     "propagate",
     "redact",
     "remove_sink",

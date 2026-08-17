@@ -33,6 +33,9 @@ the standard precedence chain locates one: a path in WRAPTURE_CONFIG,
 wrapture.toml in the current directory, then a [tool.wrapture] table
 in pyproject.toml. Everything after the target belongs to the target,
 so wrapture's own options must come before it.
+
+Trace files a run produces can be rendered in other formats with
+python -m wrapture.tools convert.
 """
 
 

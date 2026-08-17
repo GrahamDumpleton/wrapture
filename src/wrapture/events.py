@@ -13,6 +13,7 @@ consumed through the event log and tape interfaces built on top of them.
 from __future__ import annotations
 
 import inspect
+import threading
 import weakref
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -66,6 +67,15 @@ class Event:
 
     started: float | None = None
     duration: float | None = None
+
+    # The thread the operation began on, captured when the event is
+    # constructed. A generator or coroutine may run and complete on
+    # other threads; the identity recorded here is where it began.
+
+    thread_id: int = field(default_factory=threading.get_ident, repr=False)
+    thread_name: str = field(
+        default_factory=lambda: threading.current_thread().name, repr=False
+    )
 
     # Iteration, for a call that produced a generator: how many items it
     # has yielded so far, and the accumulated time its body ran across

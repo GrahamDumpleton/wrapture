@@ -202,6 +202,8 @@ fields a test typically reads:
   began (on the `perf_counter` clock) and how long it ran, exceptions
   included. Recording's own bookkeeping is excluded from the figure.
   Generators refine this with a second number, covered below.
+- `thread_id` and `thread_name` record the thread the operation began
+  on; a generator or coroutine may run and complete elsewhere.
 
 Events record what actually flowed, behaviour included. A call stubbed
 with `returns()` records the stubbed result; a failure injected with
@@ -673,6 +675,12 @@ bindings' events matters. Repeating a binding requires it to have
 recorded that many times in that order. On failure the message names
 which binding the expectation stalled waiting for and prints the actual
 timeline, which reads far better than a list diff.
+
+For the whole-tree counterpart, `wrapture.canonical(tape)` renders a
+deterministic fingerprint of the call tree (kinds, paths, nesting and
+outcomes, with everything unstable between runs left out) made for
+golden-file and snapshot comparisons; see the exporters section of
+the ad-hoc tracing page.
 
 ## The pytest plugin
 

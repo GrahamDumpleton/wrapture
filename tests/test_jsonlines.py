@@ -10,6 +10,7 @@ disk.
 """
 
 import json
+import threading
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -93,6 +94,12 @@ def test_each_completed_event_becomes_one_json_line(tmp_path: Path) -> None:
     assert inner["result"] == "ch_500"
     assert inner["duration"] >= 0.0
     assert inner["started"] > 0.0
+
+    # Thread identity is on every line, captured where the operation
+    # began, so lines can be grouped by lane after the fact.
+
+    assert inner["thread_id"] == threading.get_ident()
+    assert inner["thread_name"] == threading.current_thread().name
 
 
 def test_a_raising_call_serialises_its_exception(tmp_path: Path) -> None:
