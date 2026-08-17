@@ -1,7 +1,7 @@
 """
 Wrapture is a library for attaching bindings to arbitrary Python call sites,
 without modifying the code being observed, for use in monkey patching,
-testing, tracing and profiling.
+testing and tracing.
 """
 
 

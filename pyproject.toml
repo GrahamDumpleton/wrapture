@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wrapture"
 dynamic = ["version"]
-description = "Library for attaching bindings to arbitrary Python call sites for monkey patching, testing, tracing and profiling."
+description = "Monkey patch, test, and trace Python by attaching bindings to call sites, without modifying the code being observed. Built on wrapt."
 readme = "README.md"
 license = "BSD-2-Clause"
 license-files = ["LICENSE"]
@@ -15,7 +15,7 @@ authors = [
     {name = "Graham Dumpleton", email = "Graham.Dumpleton@gmail.com"}
 ]
 requires-python = ">=3.12"
-keywords = ["wrapper", "monkey patching", "tracing", "testing", "profiling"]
+keywords = ["wrapper", "monkey patching", "tracing", "testing"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Programming Language :: Python :: 3",

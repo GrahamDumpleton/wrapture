@@ -14,9 +14,9 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on the
 safe monkey-patching machinery wrapt provides.
 
 > **Status: early development.** The monkey patching, unit testing and
-> ad-hoc tracing layers are implemented; the profiling layer is designed
-> but not built. Development previews are published to PyPI; the API may
-> still shift before 1.0.0.
+> ad-hoc tracing layers are implemented, including WSGI request tracing.
+> Development previews are published to PyPI; the API may still shift
+> before 1.0.0.
 
 ## Installation
 
@@ -67,7 +67,7 @@ failure, or transform one argument while the real code keeps running.
 
 ## What it does
 
-One mechanism, four uses, in increasing order of machinery:
+One mechanism, three uses, in increasing order of machinery:
 
 1. **Monkey patching.** A clean lifecycle and behaviour vocabulary over
    wrapt's `wrap_object()`. Point at a method by name and stub it, fail it,
@@ -90,16 +90,15 @@ One mechanism, four uses, in increasing order of machinery:
    process or chart elsewhere. Name a handful of methods and a call tree
    appears; no code changes required: with a `wrapture.toml` naming the
    methods and a sink, `python -m wrapture manage.py runserver` traces the
-   application untouched.
+   application untouched. With [autowrapt](https://github.com/GrahamDumpleton/autowrapt)
+   installed, not even the launcher is needed: `AUTOWRAPT_BOOTSTRAP=wrapture`
+   in the environment applies the same config at interpreter startup, so the
+   program starts with plain `python`.
 
-4. **Targeted profiling.** Use a binding as a *scope* within which CPython's
-   own profiling machinery is active, so you can profile one subsystem of a
-   live process instead of everything.
-
-The distinction that matters: most tracing and profiling tools either need
-the code to have been written with them in mind, or can only be switched on
-for the whole program at once. wrapture needs neither: you point at a method
-by name and a trace appears.
+The distinction that matters: most tracing tools either need the code to
+have been written with them in mind, or can only be switched on for the
+whole program at once. wrapture needs neither: you point at a method by
+name and a trace appears.
 
 ## Why
 
@@ -113,8 +112,7 @@ nested trace, assert on it or export it, in tests or in production":
   `InMemorySpanExporter`) require the code to already be instrumented.
 - `sys.settrace` tools (`hunter`, `snoop`) give a firehose with no assertion
   API.
-- `cProfile` cannot scope to a subsystem in a live process, and APM agents
-  are all-or-nothing products rather than a toolkit.
+- APM agents are all-or-nothing products rather than a toolkit.
 
 wrapture fills that gap: a targeted call tree with normalized arguments and
 return values, produced by naming the methods you care about, usable as a
@@ -124,8 +122,6 @@ testing assertion library, a tracing tool, or both at once.
 
 - **Not a replacement for `unittest.mock`.** It complements mocking where
   code has seams; it exists for the code that doesn't.
-- **Not a sampling profiler.** `py-spy` and `austin` do that better and
-  without distortion.
 - **Not a production APM.** It is a toolkit that APM-like things could be
   built on.
 - **Not an OpenTelemetry competitor.** It should emit to OTel, not replace
