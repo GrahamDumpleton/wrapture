@@ -1,13 +1,6 @@
 # Watch the whole order flow live: every observed event prints to
 # stderr as it happens, indented by nesting, with -> for results and
 # !! for exceptions.
-#
-# The pythonpath entry makes shop.py importable however the process
-# started. The runner does not need it (the script's directory joins
-# sys.path anyway), but the autowrapt path applies this config during
-# interpreter startup, before that happens.
-
-pythonpath = "."
 
 [[observe]]
 target = "shop:OrderService"

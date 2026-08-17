@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from wrapture import ConfigError, ConfigWarning, Event, Sink, remove_sink
+from wrapture import ConfigError, ConfigWarning, Event, Sink
 from wrapture.bootstrap import bootstrap
 
 
@@ -79,14 +79,11 @@ def test_bootstrap_applies_the_discovered_config(
 
     applied = bootstrap()
     assert applied is not None
-    assert applied.sink is not None
 
     try:
         Gateway().charge(500)
     finally:
-        for bound in reversed(applied.bindings):
-            bound.remove()
-        remove_sink(applied.sink)
+        applied.revert()
 
     assert _last_collector is not None
     assert [event.path for event in _last_collector.entered] == [
@@ -109,11 +106,8 @@ def test_bootstrap_honours_the_environment_variable(
 
     applied = bootstrap()
     assert applied is not None
-    assert applied.sink is not None
 
-    for bound in reversed(applied.bindings):
-        bound.remove()
-    remove_sink(applied.sink)
+    applied.revert()
 
 
 def test_finding_no_config_warns_instead_of_raising(

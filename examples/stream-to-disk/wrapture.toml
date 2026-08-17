@@ -1,12 +1,6 @@
 # Stream every observed call to disk as JSON Lines. A config sink is
 # a process sink, so it hears the worker threads too; each thread
 # becomes its own lane when the trace is rendered for Perfetto.
-#
-# The pythonpath entry makes pipeline.py importable however the
-# process started: the autowrapt path applies this config during
-# interpreter startup, before the script's directory joins sys.path.
-
-pythonpath = "."
 
 [[observe]]
 target = "pipeline"

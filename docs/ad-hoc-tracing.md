@@ -491,6 +491,19 @@ accepts a single string or a list:
 The blast radius of a pattern is thereby one level of one named
 container, stated on the line above it.
 
+Observe entries defer. Applying a config never imports a target
+module: it registers a post-import hook per target, which fires
+immediately when the module is already imported and otherwise when
+the application imports it, at which point the entry's members are
+resolved and its bindings applied. The application's import order is
+never changed by observing it. Deferral has one honest cost: a
+misspelled target module is indistinguishable from one not imported
+yet, so it is not an apply-time error; the applied record's
+`pending` view names the entries still waiting, and a target whose
+module is never imported over the life of the process is reported in
+a `ConfigWarning` at interpreter shutdown, so an empty trace has an
+explanation.
+
 The top-level `capture` key overrides the capture level on every
 binding the file creates, and `sample` keeps only that fraction of
 call trees by wrapping the sink in `Sample`.
@@ -564,18 +577,25 @@ above), never in loose generically named files.
 A config file can name arbitrary code to run, so loading one is
 equivalent to executing code; the trust boundary is write access to
 the file, as it already is for anything else the process imports.
-Failures are loud: unknown keys, `name` and `match` together, a named
-member that does not exist, a reference that does not resolve, a
-factory that returns something other than a `Sink`, all raise
-`ConfigError`, and a config that fails partway through applying
-unwinds whatever it had installed before the error propagates.
+Failures are loud: unknown keys, `name` and `match` together, a
+reference that does not resolve, a factory that returns something
+other than a `Sink`, all raise `ConfigError`, and a config that
+fails partway through applying unwinds whatever it had installed
+before the error propagates. Validation that needs the target module
+(a `name` that must exist, a `match` with nothing to select) runs
+when the entry's hook fires, so with a deferred entry the error
+surfaces from the import statement that triggered it.
 
 The same setup is available programmatically as the `Config` class
 with `ObserveEntry` and `SetupEntry` values, which is exactly what
 the loader builds: the file can say nothing that `Config` cannot,
 and code can additionally pass live objects, a constructed sink or a
 callable capture policy, where the file is limited to what TOML can
-spell.
+spell. `apply()` returns the live `AppliedConfig` record: `bindings`
+grows as hooks fire, `pending` names the entries still waiting,
+`report()` renders the whole picture as text, which is the way to
+ask an injected process what is actually installed, and `revert()`
+takes everything down again, neutralising hooks that have not fired.
 
 ### Zero-code runs: python -m wrapture
 
@@ -653,13 +673,13 @@ startup. Two operational cautions follow from the mechanism:
   config warns (`ConfigWarning`) and starts the process untraced
   rather than failing it; a config that exists but is broken raises,
   the loud development posture.
-- The bootstrap applies the config at interpreter startup, so
-  `[[observe]]` targets are imported then, before frameworks have
-  configured themselves. A module that cannot import that early (a
-  Django models module, say) belongs in a `[[setup]]` entry instead,
-  which fires only when the application itself imports the trigger
-  module; deferring `[[observe]]` entries the same way is the next
-  piece of this layer.
+- Observe entries defer, so the bootstrap imports no application
+  code: bindings land as the application imports its own modules, in
+  its own order, and a Django models module is observed the moment
+  Django itself brings it in. What does resolve at bootstrap is the
+  `[sink]` reference, because a sink must exist before events flow;
+  operator code it lives in must be reachable then, which is what
+  `pythonpath` is for.
 
 ## Exporting traces
 

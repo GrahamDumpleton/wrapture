@@ -78,6 +78,12 @@ patching (a trailing `?` on a string target, registering a post-import
 hook that returns no handle) is rejected with `DeferredTargetError`.
 Import the module first and bind against it.
 
+The config layer's `[[observe]]` entries are the deferred form:
+applying a config registers a post-import hook per target and
+constructs the bindings when the module arrives, so zero-code
+configuration does not carry this restriction. Deferral is a property
+of when the config layer runs, never a state a binding models.
+
 ## Calls on other threads may not be recorded
 
 This limitation is about scoped recording, timelines and their tapes,

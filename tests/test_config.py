@@ -10,10 +10,12 @@ primitive, with loud failures for anything it does not understand.
 import importlib
 import sys
 import textwrap
+import warnings
 from pathlib import Path
 from typing import Any
 
 import pytest
+import wrapt
 
 from wrapture import (
     AppliedConfig,
@@ -29,7 +31,6 @@ from wrapture import (
     binding,
     find_config,
     load_config,
-    remove_sink,
 )
 
 
@@ -74,11 +75,7 @@ def parse_widget(text: str) -> str:
 
 
 def _unwind(applied: AppliedConfig) -> None:
-    for bound in reversed(applied.bindings):
-        bound.remove()
-
-    if applied.sink is not None:
-        remove_sink(applied.sink)
+    applied.revert()
 
 
 # ---------------------------------------------------------------------------
@@ -135,13 +132,24 @@ def test_name_binds_a_property() -> None:
     assert event.kind == "get"
 
 
-def test_an_unimportable_target_fails_loudly() -> None:
+def test_an_unimported_target_stays_pending() -> None:
+    # Deferral cannot tell a misspelled module from one not imported
+    # yet, so applying succeeds and the entry waits; the pending view
+    # and the shutdown report are where this surfaces.
+
     config = Config(
         observe=[ObserveEntry(target="no_such_module_anywhere:Thing", name="run")]
     )
 
-    with pytest.raises(ConfigError, match="cannot import module"):
-        config.apply()
+    applied = config.apply()
+    try:
+        assert applied.bindings == ()
+
+        (entry,) = applied.pending
+        assert entry.target == "no_such_module_anywhere:Thing"
+        assert "no_such_module_anywhere:Thing" in applied.report()
+    finally:
+        _unwind(applied)
 
 
 def test_match_selects_the_targets_own_routines_only() -> None:
@@ -199,6 +207,7 @@ def test_match_on_a_module_skips_imported_functions_and_classes(
 
     applied = config.apply()
     try:
+        importlib.import_module("cfgtest_widgets")
         selected = {bound.name for bound in applied.bindings}
     finally:
         _unwind(applied)
@@ -302,6 +311,137 @@ def test_a_failed_apply_leaves_nothing_behind() -> None:
 
     OrderService().place()
     assert collector.entered == []
+
+
+# ---------------------------------------------------------------------------
+# deferral
+# ---------------------------------------------------------------------------
+
+
+def test_bindings_arrive_when_the_target_module_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "cfg15_lazy_mod.py").write_text("def run(task):\n    return task\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target="cfg15_lazy_mod", name="run")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        # Nothing imported, nothing bound: the entry waits.
+
+        assert applied.bindings == ()
+        (entry,) = applied.pending
+        assert entry.target == "cfg15_lazy_mod"
+
+        # The application's own import is the trigger.
+
+        module = importlib.import_module("cfg15_lazy_mod")
+
+        arrived: tuple[Any, ...] = applied.bindings
+        (bound,) = arrived
+        assert bound.name == "run"
+        assert applied.pending == ()
+
+        module.run("job")
+        assert [event.path for event in collector.entered] == ["cfg15_lazy_mod:run"]
+    finally:
+        _unwind(applied)
+
+
+def test_fire_time_validation_fails_inside_the_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Validation that needs the module (here a name that must exist)
+    # cannot run until the module arrives, so the failure surfaces
+    # from the triggering import statement.
+
+    (tmp_path / "cfg15_bad_mod.py").write_text("value = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    config = Config(observe=[ObserveEntry(target="cfg15_bad_mod", name="missing")])
+
+    applied = config.apply()
+    try:
+        with pytest.raises(ConfigError, match="no member named 'missing'"):
+            importlib.import_module("cfg15_bad_mod")
+
+        assert applied.bindings == ()
+    finally:
+        _unwind(applied)
+
+
+def test_revert_neutralises_hooks_that_have_not_fired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A wrapt hook cannot be unregistered, so reverting marks the
+    # record instead: the module's later import applies nothing.
+
+    (tmp_path / "cfg15_reverted_mod.py").write_text("def run(task):\n    return task\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target="cfg15_reverted_mod", name="run")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    applied.revert()
+    applied.revert()
+
+    module = importlib.import_module("cfg15_reverted_mod")
+
+    assert applied.bindings == ()
+    assert not isinstance(module.run, wrapt.BaseObjectProxy)
+
+    module.run("job")
+    assert collector.entered == []
+
+
+def test_report_lists_the_sink_applied_and_pending() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(target=f"{__name__}:OrderService", name="place"),
+            ObserveEntry(target="cfg15_ghost_mod", name="run"),
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        text = applied.report()
+
+        assert "Collector" in text
+        assert f"  {__name__}:OrderService.place" in text
+        assert "pending:" in text
+        assert "  cfg15_ghost_mod" in text
+    finally:
+        _unwind(applied)
+
+
+def test_the_shutdown_report_names_never_imported_targets() -> None:
+    from wrapture.config import _report_never_fired
+
+    config = Config(observe=[ObserveEntry(target="cfg15_ghost2_mod", name="run")])
+
+    applied = config.apply()
+    try:
+        with pytest.warns(ConfigWarning, match="cfg15_ghost2_mod"):
+            _report_never_fired()
+    finally:
+        _unwind(applied)
+
+    # A reverted record has nothing outstanding to report.
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _report_never_fired()
 
 
 # ---------------------------------------------------------------------------

@@ -50,12 +50,13 @@ $ AUTOWRAPT_BOOTSTRAP=wrapture python main.py
 ```
 
 The output is identical to the runner's, because the runner and
-autowrapt are two triggers for the same config machinery. One detail
-makes it work: the bootstrap applies the config during interpreter
-startup, before the script's directory joins `sys.path`, so the
-observed module must be importable some other way. That is what the
-`pythonpath = "."` entry in each example's `wrapture.toml` provides,
-anchored to the config file's directory.
+autowrapt are two triggers for the same config machinery. The config
+applies during interpreter startup, but observe entries defer:
+bindings land when the application itself imports the observed
+module, so nothing has to be importable that early. Only
+operator-code carries a `pythonpath` entry, because its sink factory
+resolves when the config loads and lives in an uninstalled package
+next to it.
 
 ## live-printer
 

@@ -24,10 +24,12 @@ any other file the process imports.
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import inspect
 import os
 import sys
+import threading
 import tomllib
 import warnings
 from collections.abc import Callable, Sequence
@@ -192,18 +194,30 @@ class SetupEntry:
 
 
 class AppliedConfig:
-    """The record of what one Config.apply() installed: every binding
-    it applied, and the process sink it registered, if any."""
+    """The live record of what one Config.apply() installed.
 
-    def __init__(self, bindings: tuple[Binding, ...], sink: Sink | None) -> None:
-        self._bindings = bindings
+    Observe entries defer: apply() registers a post-import hook per
+    target module, which fires immediately for a module already
+    imported and otherwise when the application imports it. The
+    bindings recorded here therefore grow over the life of the
+    process; `pending` names the entries still waiting for their
+    module, `report()` renders the whole picture, and `revert()`
+    takes everything down again.
+    """
+
+    def __init__(self, sink: Sink | None) -> None:
+        self._lock = threading.Lock()
+        self._bindings: list[Binding] = []
+        self._pending: list[ObserveEntry] = []
         self._sink = sink
+        self._reverted = False
 
     @property
     def bindings(self) -> tuple[Binding, ...]:
-        """The bindings the config applied, in application order."""
+        """The bindings applied so far, in application order."""
 
-        return self._bindings
+        with self._lock:
+            return tuple(self._bindings)
 
     @property
     def sink(self) -> Sink | None:
@@ -212,8 +226,76 @@ class AppliedConfig:
 
         return self._sink
 
+    @property
+    def pending(self) -> tuple[ObserveEntry, ...]:
+        """The observe entries whose target module has not been
+        imported yet, so no bindings exist for them."""
+
+        with self._lock:
+            return tuple(self._pending)
+
+    def report(self) -> str:
+        """A human-readable listing of what is installed: the sink,
+        every binding applied so far, and the targets still waiting
+        for their module.
+
+        Zero-code injection means nothing in the source says the
+        patching is there; this is the way to ask.
+        """
+
+        with self._lock:
+            bindings = list(self._bindings)
+            pending = list(self._pending)
+
+        lines = [f"sink: {self._sink!r}" if self._sink is not None else "sink: none"]
+
+        lines.append("applied:" if bindings else "applied: none")
+        for bound in bindings:
+            lines.append(f"  {bound.path}")
+
+        if pending:
+            lines.append("pending:")
+            for entry in pending:
+                lines.append(f"  {entry.target}")
+
+        return "\n".join(lines)
+
+    def revert(self) -> None:
+        """Remove everything this record installed: the bindings, most
+        recent first, and the sink registration.
+
+        A post-import hook cannot be unregistered from wrapt, so a
+        hook that has not fired yet is neutralised instead: when its
+        module is eventually imported, it sees the record is reverted
+        and applies nothing. Setup callbacks are outside this:
+        whatever a callback did is its own to undo. Idempotent.
+        """
+
+        with self._lock:
+            if self._reverted:
+                return
+
+            self._reverted = True
+            bindings = list(self._bindings)
+            self._bindings.clear()
+            self._pending.clear()
+
+        for bound in reversed(bindings):
+            bound.remove()
+
+        if self._sink is not None:
+            remove_sink(self._sink)
+
+    def _adopt(self, entry: ObserveEntry) -> None:
+        with self._lock:
+            self._pending.append(entry)
+
     def __repr__(self) -> str:
-        return f"<AppliedConfig: {len(self._bindings)} bindings, sink {self._sink!r}>"
+        with self._lock:
+            return (
+                f"<AppliedConfig: {len(self._bindings)} bindings,"
+                f" {len(self._pending)} pending, sink {self._sink!r}>"
+            )
 
 
 class Config:
@@ -318,43 +400,48 @@ class Config:
 
     def apply(self) -> AppliedConfig:
         """Install everything this config describes, returning the
-        record of what was installed.
+        live record of what was installed.
 
         The sink is registered as a process sink first, wrapped in
-        Sample when sampling is configured; then each observe entry is
-        resolved and its bindings applied, importing target modules as
-        needed; then each setup callback is registered as a wrapt
-        post-import hook, which fires immediately for a module already
-        imported. If any part fails, whatever had already been
-        installed is removed again before ConfigError propagates, so a
-        failed apply leaves nothing behind.
+        Sample when sampling is configured. Observe entries defer: a
+        post-import hook is registered per target module, which fires
+        immediately when the module is already imported and otherwise
+        when the application imports it, so applying never imports a
+        target itself, and validation that needs the module (a name
+        that must exist, a match with nothing to select) happens when
+        the hook fires. Setup callbacks are registered the same way.
+        A target whose module is never imported never binds, which
+        the returned record's `pending` shows and a warning at
+        interpreter shutdown reports.
+
+        If anything fails during apply itself, whatever had been
+        installed is removed again and hooks not yet fired are
+        neutralised before the error propagates, so a failed apply
+        leaves nothing behind.
         """
 
         installed: Sink | None = None
-        applied: list[Binding] = []
+        if self._sink is not None:
+            registered = self._sink
+            if self._sample is not None:
+                registered = Sample(self._sample, registered)
+            installed = add_sink(registered)
+
+        record = AppliedConfig(installed)
 
         try:
-            if self._sink is not None:
-                registered = self._sink
-                if self._sample is not None:
-                    registered = Sample(self._sample, registered)
-                installed = add_sink(registered)
-
             for entry in self._observe:
-                for bound in _bindings_for(entry, self._capture):
-                    bound.apply()
-                    applied.append(bound)
+                record._adopt(entry)
+                _register_observe(entry, self._capture, record)
 
             for setup_entry in self._setup:
                 _register_setup(setup_entry)
         except BaseException:
-            for bound in reversed(applied):
-                bound.remove()
-            if installed is not None:
-                remove_sink(installed)
+            record.revert()
             raise
 
-        return AppliedConfig(tuple(applied), installed)
+        _watch(record)
+        return record
 
 
 def _resolve_container(entry: ObserveEntry) -> tuple[str, str, Any]:
@@ -453,6 +540,102 @@ def _bindings_for(
     return [
         binding(module_name, prefix + member, capture=capture) for member in members
     ]
+
+
+def _fire_observe(
+    record: AppliedConfig,
+    entry: ObserveEntry,
+    capture: CapturePolicy | str | None,
+) -> None:
+    # The deferred half of an observe entry: resolve members and apply
+    # bindings now that the target module exists. Runs inside the
+    # import that brought the module in, so a validation failure
+    # surfaces from that import statement; the entry's own partial
+    # work is unwound first so the failure leaves nothing behind.
+
+    with record._lock:
+        if record._reverted:
+            return
+
+    applied: list[Binding] = []
+    try:
+        for bound in _bindings_for(entry, capture):
+            bound.apply()
+            applied.append(bound)
+    except BaseException:
+        for bound in reversed(applied):
+            bound.remove()
+        raise
+
+    # Adopt the bindings unless a concurrent revert won the race, in
+    # which case they come straight down again.
+
+    with record._lock:
+        reverted = record._reverted
+        if not reverted:
+            record._bindings.extend(applied)
+            if entry in record._pending:
+                record._pending.remove(entry)
+
+    if reverted:
+        for bound in reversed(applied):
+            bound.remove()
+
+
+def _register_observe(
+    entry: ObserveEntry,
+    capture: CapturePolicy | str | None,
+    record: AppliedConfig,
+) -> None:
+    # One hook per entry on the target's module half. wrapt fires it
+    # immediately for a module already imported, which is what makes
+    # deferral invisible to code that applies a config late.
+
+    module_name = entry.target.partition(":")[0]
+
+    def hook(module: Any) -> None:
+        _fire_observe(record, entry, capture)
+
+    wrapt.register_post_import_hook(hook, module_name)
+
+
+# Records with entries still waiting are watched so a target whose
+# module never gets imported is reported at interpreter shutdown
+# rather than silently never binding.
+
+_watched: list[AppliedConfig] = []
+_watch_lock = threading.Lock()
+_report_registered = False
+
+
+def _watch(record: AppliedConfig) -> None:
+    global _report_registered
+
+    if not record.pending:
+        return
+
+    with _watch_lock:
+        _watched.append(record)
+
+        if not _report_registered:
+            _report_registered = True
+            atexit.register(_report_never_fired)
+
+
+def _report_never_fired() -> None:
+    with _watch_lock:
+        records = list(_watched)
+
+    targets = sorted({entry.target for record in records for entry in record.pending})
+
+    if targets:
+        warnings.warn(
+            f"observe targets never bound: {', '.join(targets)}; their"
+            f" modules were never imported over the life of the process"
+            f" (a misspelled target, or a code path never reached)",
+            ConfigWarning,
+            stacklevel=2,
+        )
 
 
 def _register_setup(entry: SetupEntry) -> None:
