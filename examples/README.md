@@ -181,3 +181,49 @@ appearing in the server log as requests arrive:
 $ uv run --with flask python -m wrapture -m flask --app myapp run
 $ curl http://127.0.0.1:5000/quote/widget
 ```
+
+## fastapi-app
+
+The same out-of-box APM experience for the async world: the same
+small shop as flask-app, written with FastAPI, whose code never
+mentions wrapture and whose config never names the app.
+
+All the FastAPI knowledge lives in one setup hook
+(`wrapture_local/fastapi_support.py`), triggered by the import of
+`fastapi` itself, the stand-in for a wrapture-fastapi package. The
+choke points differ from Flask's because a FastAPI instance is
+itself the ASGI application, with no swappable attribute like
+`wsgi_app`:
+
+- `FastAPI.build_middleware_stack` wraps the middleware pipeline the
+  instance builds once, lazily, at its first request, in the
+  recording ASGI middleware, so every request records as one tree
+  whatever middleware the app added, labelled with the app's own
+  title.
+- `APIRouter.add_api_route` substitutes
+  `wrapture.observed(endpoint)` as routes register, which every
+  registration form funnels through: decorators on the app,
+  `APIRouter` instances, `include_router` from other modules.
+  FastAPI's dependency-injection introspection of the endpoint
+  signature sees straight through the observer proxy, and sync
+  endpoints record correctly from the worker threads FastAPI runs
+  them in.
+
+FastAPI is not a dependency of this repository, so uv supplies it
+(and httpx, for the test client) for the run:
+
+```console
+$ cd examples/fastapi-app
+$ uv run --with fastapi --with httpx python -m wrapture main.py
+```
+
+The script drives four requests through FastAPI's test client,
+including one that fails, so the last tree shows the `KeyError`
+escaping the handler while the client still receives the `500` the
+framework makes of it. The same config also traces a real server,
+with the trees appearing in the server log as requests arrive:
+
+```console
+$ uv run --with fastapi --with uvicorn python -m wrapture -m uvicorn myapp:app
+$ curl http://127.0.0.1:8000/quote/widget
+```
