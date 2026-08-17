@@ -13,10 +13,10 @@ It is a sibling project to [wrapt](https://github.com/GrahamDumpleton/wrapt)
 and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on the
 safe monkey-patching machinery wrapt provides.
 
-> **Status: early development.** The monkey patching and unit testing layers
-> are implemented; the tracing and profiling layers are designed but not
-> built. Development previews are published to PyPI; the API may still
-> shift before 1.0.0.
+> **Status: early development.** The monkey patching, unit testing and
+> ad-hoc tracing layers are implemented; the profiling layer is designed
+> but not built. Development previews are published to PyPI; the API may
+> still shift before 1.0.0.
 
 ## Installation
 

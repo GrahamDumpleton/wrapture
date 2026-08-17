@@ -6,8 +6,15 @@ it observes a call site and emits events, and what happens to those
 events is decided by whoever is listening. This page covers that
 listening side.
 
-The tracing layer is being built out incrementally; this page documents
-what exists so far and grows with it.
+The running example throughout is the inherited dev server: an
+application you did not write and would rather not modify, whose
+behaviour you need to see. The page builds the answer up in layers:
+the sink protocol and its two registration tiers; a small library of
+sinks that print, count and stream; narrowing at the binding with
+`when=`; streaming to disk as JSON Lines; the TOML config file and
+the `python -m wrapture` runner that make the whole intervention
+zero-code; and the exporters that render a recorded trace for
+Perfetto, snapshot comparisons and Mermaid diagrams.
 
 ## Sinks
 

@@ -11,9 +11,9 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on
 the safe monkey-patching machinery wrapt provides.
 
 ```{note}
-wrapture is in early development. The monkey patching and unit testing
-layers are implemented; the tracing and profiling layers are designed
-but not built. Development previews are published to
+wrapture is in early development. The monkey patching, unit testing
+and ad-hoc tracing layers are implemented; the profiling layer is
+designed but not built. Development previews are published to
 [PyPI](https://pypi.org/project/wrapture/); the API may still shift
 before 1.0.0.
 ```
@@ -38,7 +38,9 @@ One mechanism, four uses, in increasing order of machinery:
 3. **Ad-hoc tracing.** Attach bindings to a running application, including
    one you cannot modify or redeploy, and emit a structured, nested trace to
    process or chart elsewhere. Name a handful of methods and a call tree
-   appears; no code changes required.
+   appears; no code changes required: with a `wrapture.toml` naming the
+   methods and a sink, `python -m wrapture manage.py runserver` traces the
+   application untouched.
 
 4. **Targeted profiling.** Use a binding as a *scope* within which CPython's
    own profiling machinery is active, so you can profile one subsystem of a
