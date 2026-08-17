@@ -190,6 +190,114 @@ future import:
   config file form warns instead, because at startup there is no return
   value to inspect and the process should still come up.
 
+## Observing a bare callable
+
+A binding names an attribute: a location that can be resolved,
+patched and restored. Plenty of callables never sit at one: view
+functions captured into a framework's dispatch table, callbacks
+handed to a registry, closures, partials, work put on a queue.
+`observed()` wraps the value instead of the location:
+
+```python
+wrapped = wrapture.observed(fn)
+registry.register(wrapped)
+```
+
+The returned proxy records a `"call"` event per invocation inside a
+recording scope, nesting in the tree exactly as a bound call does,
+and calls straight through when nothing listens. Its path and label
+derive from the callable itself (`module:qualname`), with `label=` to
+override, and the keyword options are the uniform subset `binding()`
+takes: `capture=`, `capture_args=`, `capture_result=`, `stack=` and
+`when=` (which receives `(None, args, kwargs)`, there being no bound
+instance).
+
+The division of responsibility is the inverse of a binding's. A
+binding owns installation and removal; `observed()` owns neither:
+there is no `apply()` or `remove()`, you place the proxy wherever the
+original was going, and putting the original back is equally your
+job. Everything else about a binding's character is kept: `suspend()`
+and `resume()`, the honest counters (`suspended_calls`,
+`filtered_calls`, `missed_calls`), and `events` for assertions:
+
+```python
+def test_each_registered_hook_ran_once():
+    hooks = [wrapture.observed(fn) for fn in registry.callbacks]
+    registry.callbacks[:] = hooks
+
+    with wrapture.timeline():
+        registry.fire()
+
+        for hook in hooks:
+            hook.events.assert_once()
+```
+
+The proxy is deliberately transparent: `__name__`, `__doc__`,
+signature introspection, coroutine-function detection and equality
+all delegate to the wrapped callable, so registries that inspect what
+they are handed behave as if the wrapper were not there. That makes
+`observed()` safe to interpose at a framework's registration choke
+point; the flask-app example in the repository's examples directory
+wraps every view function as `Flask.add_url_rule` registers it, via
+one `transforms_args` stage.
+
+### Applying dynamically without double-wrapping
+
+Wrapping the same thing twice is the classic monkey-patching
+accident, so `observed()` builds reliable detection in: the label
+identifies the observation. Before wrapping, the callable's full
+wrapper chain is inspected with wrapt's `wrapper_chain()`, which sees
+through proxies and `functools.wraps()` decorators alike; if an
+`ObservedCallable` layer already carries the same label, that
+observation is already applied, however deeply a later wrapper buried
+it, and the callable comes back unchanged. Distinct labels stack,
+each layer recording its own event, one nested under the other, and
+stacking by accident cannot be told apart from two agents observing
+on purpose, so it is not an error: it shows up honestly as double
+counting in the results.
+
+With no label given, a name derived from the callable serves, which
+is enough for the simple wrap-in-place idiom to re-run safely:
+
+```python
+registry[key] = wrapture.observed(registry[key])
+```
+
+But the derived name is read from the object handed in, before the
+chain is walked, and that is a trap when other wrappers intervene: a
+third-party wrapper that exposes `__wrapped__` without preserving
+introspection (as `functools.wraps` would) changes what the name
+derives to, so it no longer matches the buried layer's label and the
+dedupe silently misses. Wherever double wrapping is a real risk,
+always use a pre-determined label you specify, a distinctive prefix
+works well; it is a constant compared against stored labels, so it
+survives introspection loss as long as the chain is walkable at all:
+
+```python
+registry[key] = wrapture.observed(registry[key], f"myagent:{key}")
+```
+
+A wrapper that hides `__wrapped__` entirely blinds the walk, and no
+label can see past it; the mitigation there is structural, observing
+at a choke point where you wrap before anything else does. To detect
+without wrapping, walk the same chain the dedupe walks:
+
+```python
+def has_observer(fn, label):
+    return any(
+        isinstance(layer, wrapture.ObservedCallable) and layer.label == label
+        for layer in wrapt.wrapper_chain(fn)
+    )
+```
+
+Two boundaries. `observed()` is observation only: there are no
+behaviour namespaces, so it cannot stub or fail-inject; an
+intervention wants a removable home, and a free-floating callable has
+none, so use `binding()` for those. And while a decorator spelling
+works, its home is operator glue and tests: writing it inside the
+application would cross the line the rest of the library holds, that
+the observed code never imports wrapture.
+
 ## Recording calls on a timeline
 
 A binding does more than intervene: inside a recording scope it also
@@ -420,8 +528,11 @@ Four situations produce no event, each deliberate:
   `when=fn` consults `fn(instance, args, kwargs)` per operation while
   recording is active, before any event is constructed; a falsey
   answer skips recording that operation and counts it on
-  `filtered_calls`. Deliberate silence, but counted. The
-  [ad-hoc tracing page](ad-hoc-tracing.md) covers it fully.
+  `filtered_calls`. Deliberate silence, but counted. As with wrapt's
+  `enabled`, a boolean is accepted in place of the predicate:
+  `when=False` makes a behaviour-only binding that never records and
+  counts nothing, for plumbing that must not put itself in the trace.
+  The [ad-hoc tracing page](ad-hoc-tracing.md) covers it fully.
 
 ### How much is captured
 

@@ -78,6 +78,10 @@ from .iterators import (
     IteratorProxy,
     iterator,
 )
+from .observed import (
+    ObservedCallable,
+    observed,
+)
 from .sinks import (
     Aggregate,
     Counter,
@@ -140,6 +144,7 @@ __all__ = [
     "NeverAppliedError",
     "NotImplementedYetError",
     "ObserveEntry",
+    "ObservedCallable",
     "PathStats",
     "Printer",
     "RecordingGapWarning",
@@ -168,6 +173,7 @@ __all__ = [
     "load_config",
     "load_events",
     "mermaid",
+    "observed",
     "propagate",
     "redact",
     "remove_sink",
