@@ -16,7 +16,7 @@ import warnings
 import weakref
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from fnmatch import fnmatchcase
-from typing import Any, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 import wrapt
 from wrapt import MISSING, is_wrapped_by, unwrap_object
@@ -70,6 +70,9 @@ from .timeline import (
     _stack,
     _timelines_active,
 )
+
+if TYPE_CHECKING:
+    from .wsgi import RequestBehaviour
 
 _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
 
@@ -470,8 +473,10 @@ class Binding:
 
         if mode is None:
             mode = _detect_mode(target, name, missing_ok=missing_ok)
-        elif mode not in ("callable", "attribute"):
-            raise ValueError(f"mode must be 'callable' or 'attribute', got {mode!r}")
+        elif mode not in ("callable", "attribute", "wsgi"):
+            raise ValueError(
+                f"mode must be 'callable', 'attribute' or 'wsgi', got {mode!r}"
+            )
 
         # What this binding is bound to.
 
@@ -497,11 +502,19 @@ class Binding:
 
         # The behaviour pipelines, keyed by operation ("call", "get",
         # "set" or "delete"): composing stages around one terminal, with
-        # the composed form cached until either changes.
+        # the composed form cached until either changes. Request
+        # behaviour is phase-keyed rather than composed, so it lives in
+        # its own structure, consumed by the WSGI middleware.
 
         self._pipelines: dict[str, list[StageFunction]] = {}
         self._terminals: dict[str, WrapperFunction] = {}
         self._composed: dict[str, WrapperFunction] = {}
+        self._request_hooks: dict[str, Any] = {
+            "environ": [],
+            "response": [],
+            "body": [],
+            "terminal": None,
+        }
 
         # Lifecycle state, populated by apply() and cleared by remove().
         # The apply count survives remove(): it distinguishes a binding
@@ -596,16 +609,24 @@ class Binding:
 
     # -- behaviour namespaces ----------------------------------------------
 
+    def _wrong_mode(self, name: str) -> WrongModeError:
+        suggestion = {
+            "callable": "on_call",
+            "attribute": "on_get, on_set or on_delete",
+            "wsgi": "on_request",
+        }[self._mode]
+        article = "an" if self._mode == "attribute" else "a"
+
+        return WrongModeError(
+            f"{name} is not available: {self._label} is {article}"
+            f" {self._mode!r} binding; use {suggestion}"
+        )
+
     def _namespace(
         self, name: str, wanted: str, factory: type[_BehaviourT]
     ) -> _BehaviourT:
         if self._mode != wanted:
-            other = "on_get, on_set or on_delete" if wanted == "callable" else "on_call"
-            article = "an" if self._mode == "attribute" else "a"
-            raise WrongModeError(
-                f"{name} is not available: {self._label} is {article}"
-                f" {self._mode!r} binding; use {other}"
-            )
+            raise self._wrong_mode(name)
 
         return factory(self)
 
@@ -632,6 +653,17 @@ class Binding:
         """The behaviour namespace for attribute deletes. Attribute mode only."""
 
         return self._namespace("on_delete", "attribute", DeleteBehaviour)
+
+    @property
+    def on_request(self) -> RequestBehaviour:
+        """The behaviour namespace for WSGI requests. WSGI mode only."""
+
+        from .wsgi import RequestBehaviour
+
+        if self._mode != "wsgi":
+            raise self._wrong_mode("on_request")
+
+        return RequestBehaviour(self)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -693,6 +725,22 @@ class Binding:
 
         if self._mode == "attribute":
             self._wrapper = install_attribute(self, self._target, self._name)
+            self._suspended = suspended
+            self._apply_count += 1
+            _applied_bindings.add(self)
+            return self
+
+        # WSGI mode installs the middleware through the same wrap_object
+        # path as a callable, so remove() and active work unchanged. The
+        # import is local because wsgi.py imports from this module.
+
+        if self._mode == "wsgi":
+            from .wsgi import WSGIMiddleware
+
+            def middleware(wrapped: WrappedFunction, *args: Any, **kwargs: Any) -> Any:
+                return WSGIMiddleware(wrapped, binding=self)
+
+            self._wrapper = wrapt.wrap_object(self._target, self._name, middleware)
             self._suspended = suspended
             self._apply_count += 1
             _applied_bindings.add(self)
@@ -785,9 +833,10 @@ class Binding:
         """This binding's events from the enclosing timeline, as a
         filterable EventLog.
 
-        One canonical name across both modes: a callable binding records
+        One canonical name across the modes: a callable binding records
         "call" events, an attribute binding records "get", "set" and
-        "delete"; narrow with .of_kind() where a mode has several.
+        "delete", and a wsgi binding records "request"; narrow with
+        .of_kind() where a mode has several.
 
         Raises rather than returning an empty log when no events could
         possibly exist, so "recorded nothing" can never be mistaken for
@@ -1234,6 +1283,10 @@ def binding(
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
     to override for the ambiguous case of a callable stored as data.
+    `mode="wsgi"` is never detected and must be passed explicitly: it
+    wraps a WSGI application object in the recording middleware, records
+    "request" events, and offers the on_request namespace; see the
+    wrapture.wsgi module.
 
     `missing_ok=True` permits binding a name that is not on the class,
     typically one assigned in __init__. Without it such a name raises
@@ -1258,7 +1311,8 @@ def binding(
     it on `filtered_calls`. The predicate runs in the call path, so it
     should be fast, and if it raises the caller sees the exception.
     For an attribute binding a set passes the written value as the
-    single positional argument; a get or delete passes empty args.
+    single positional argument; a get or delete passes empty args. For a
+    wsgi binding the environ mapping is the single positional argument.
 
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.

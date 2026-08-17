@@ -22,7 +22,7 @@ from wrapt import MISSING
 
 from .capture import REFERENCE
 
-EventKind = Literal["call", "get", "set", "delete"]
+EventKind = Literal["call", "get", "set", "delete", "request"]
 
 
 @dataclass(eq=False)
@@ -30,7 +30,8 @@ class Event:
     """One recorded occurrence at a binding.
 
     The `kind` field says what happened: "call" for an invocation of a
-    wrapped callable, and "get", "set" or "delete" for attribute access.
+    wrapped callable, "get", "set" or "delete" for attribute access, and
+    "request" for an HTTP request through a wrapped WSGI application.
     Fields that were not observed hold the MISSING sentinel (for values,
     so that a recorded None stays distinguishable) or None (for the
     optional descriptive fields). Events compare by identity: two events
@@ -77,11 +78,12 @@ class Event:
         default_factory=lambda: threading.current_thread().name, repr=False
     )
 
-    # Iteration, for a call that produced a generator: how many items it
-    # has yielded so far, and the accumulated time its body ran across
-    # resumptions. duration is then wall time from creation to close,
-    # which includes all the consumer's time between yields, so the two
-    # answer different questions.
+    # Iteration, for a call that produced a generator, or a request
+    # streaming its body: how many items (or body chunks) it has yielded
+    # so far, and the accumulated time its body ran across resumptions.
+    # duration is then wall time from creation to close, which includes
+    # all the consumer's time between yields, so the two answer
+    # different questions.
 
     items: int | None = None
     body_duration: float | None = None
@@ -128,6 +130,18 @@ class Event:
 
         if self.kind == "call":
             return f"{where}({self._format_arguments()})"
+
+        # A request reads access-log style: method and path first, the
+        # bound location in parentheses.
+
+        if self.kind == "request":
+            method = self.data.get("method", "?")
+            target = self.data.get("path", "")
+            query = self.data.get("query")
+
+            if query:
+                target = f"{target}?{query}"
+            return f"{method} {target} ({where})"
 
         if self.kind == "get":
             if self.result is not MISSING:

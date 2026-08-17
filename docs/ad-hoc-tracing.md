@@ -501,6 +501,12 @@ accepts a single string or a list:
   the skipped kinds explicitly. `exclude` subtracts patterns from the
   match, and a match that selects nothing warns with
   `ConfigWarning`.
+- `mode` is normally omitted, leaving each binding to detect its own.
+  The one accepted value is `"wsgi"`, which wraps the named members
+  as WSGI applications in the recording middleware; it requires
+  `name`, since a pattern must never bulk-install middleware, and for
+  a wsgi entry `redact` names query string parameters. The
+  [WSGI request tracing page](wsgi-tracing.md) covers it.
 
 The blast radius of a pattern is thereby one level of one named
 container, stated on the line above it.

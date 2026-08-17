@@ -106,6 +106,9 @@ from .timeline import (
     propagate,
     timeline,
 )
+from .wsgi import (
+    WSGIMiddleware,
+)
 
 __all__ = [
     "MISSING",
@@ -148,6 +151,7 @@ __all__ = [
     "StackFrame",
     "Tape",
     "Timeline",
+    "WSGIMiddleware",
     "WrongModeError",
     "add_sink",
     "annotate",

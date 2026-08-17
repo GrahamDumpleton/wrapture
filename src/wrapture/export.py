@@ -267,6 +267,17 @@ def mermaid(source: TraceSource) -> str:
 
         if record["kind"] == "call":
             return member
+
+        # A request reads as its request line when the details were
+        # captured, falling back to the member-plus-kind form.
+
+        if record["kind"] == "request":
+            data = record.get("data") or {}
+            method, path = data.get("method"), data.get("path")
+
+            if method and path:
+                return f"{method} {path}"
+
         return f"{member} ({record['kind']})"
 
     def emit(record: dict[str, Any], caller: str) -> None:

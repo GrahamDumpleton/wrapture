@@ -134,6 +134,12 @@ class ObserveEntry:
     that must not reach any sink. Every such field accepts one string
     or a list; `name` and `match` are mutually exclusive and one is
     required, and `exclude` only accompanies `match`.
+
+    `mode` is normally empty, leaving each binding to detect its own.
+    The one accepted value is "wsgi", which wraps the named members as
+    WSGI applications in the recording middleware; it requires `name`,
+    since a pattern must never bulk-install middleware. For a wsgi
+    entry, `redact` names query string parameters.
     """
 
     target: str
@@ -141,6 +147,7 @@ class ObserveEntry:
     match: str | Sequence[str] = ()
     exclude: str | Sequence[str] = ()
     redact: str | Sequence[str] = ()
+    mode: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -180,6 +187,17 @@ class ObserveEntry:
             raise ConfigError(
                 f"{where}: exclude only applies to match; with name, simply"
                 f" leave the member out"
+            )
+
+        if self.mode and self.mode != "wsgi":
+            raise ConfigError(
+                f"{where}: mode must be omitted or 'wsgi', got {self.mode!r}"
+            )
+
+        if self.mode and not self.name:
+            raise ConfigError(
+                f"{where}: mode requires name; a pattern must never"
+                f" bulk-install middleware"
             )
 
 
@@ -659,7 +677,13 @@ def _bindings_for(
 
     prefix = f"{path}." if path else ""
     return [
-        binding(module_name, prefix + member, capture=effective) for member in members
+        binding(
+            module_name,
+            prefix + member,
+            capture=effective,
+            mode=entry.mode or None,
+        )
+        for member in members
     ]
 
 
@@ -989,7 +1013,7 @@ def _config_from(document: Any, location: str) -> Config:
             raw,
             section="[[observe]]",
             required=("target",),
-            optional=("name", "match", "exclude", "redact"),
+            optional=("name", "match", "exclude", "redact", "mode"),
         )
         observe.append(ObserveEntry(**table))
 

@@ -87,6 +87,7 @@ design-philosophy
 monkey-patching
 unit-testing
 ad-hoc-tracing
+wsgi-tracing
 known-limitations
 release-notes
 ```
