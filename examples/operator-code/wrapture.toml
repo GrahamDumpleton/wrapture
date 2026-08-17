@@ -12,3 +12,4 @@ path = "trace.jsonl"
 [[setup]]
 module = "shop"
 call = "wrapture_local.hooks:instrument"
+threshold = 400

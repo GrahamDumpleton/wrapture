@@ -6,8 +6,9 @@ Run from this directory:
 
 The config's pythonpath entry makes the wrapture_local package next
 to it importable, its setup callback binds the gateway with a when=
-predicate so only charges over 100 record, and its sink factory fans
-events out to a live printer and trace.jsonl at once.
+predicate whose threshold comes from the config file itself, and its
+sink factory fans events out to a live printer and trace.jsonl at
+once.
 """
 
 from __future__ import annotations

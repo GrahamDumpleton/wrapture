@@ -32,9 +32,10 @@ import sys
 import threading
 import tomllib
 import warnings
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from importlib import metadata
 from typing import Any
 
 import wrapt
@@ -186,26 +187,62 @@ class ObserveEntry:
 
 @dataclass(frozen=True)
 class SetupEntry:
-    """One setup callback: call `call` (a module:attr reference) with
-    the module named by `module` once that module is imported, or
-    immediately if it already was.
+    """One setup rule, in one of two forms.
 
-    The callback reference is resolved only when the hook fires, so
-    naming operator code here cannot cause it to be imported before
-    the module it wants to instrument.
+    The single form names `module` (the trigger) and `call` (a
+    module:attr reference): the callback runs with the module once it
+    is imported, or immediately if it already was. The group form
+    names `group`, an entry point group some installed package
+    declares, each of whose entries maps a trigger module to a
+    handler, so one entry activates a whole family of handlers. The
+    two forms are mutually exclusive.
+
+    `options` are extra keyword arguments passed to the handler along
+    with the module, `handler(module, **options)`, so one handler can
+    be specialised from the config; with no options the call is
+    exactly `handler(module)`. In the group form every handler in the
+    family receives the same options. Handler references resolve only
+    when their hook fires, so naming operator code here cannot cause
+    it to be imported before the module it wants to instrument.
     """
 
-    module: str
-    call: str
+    module: str = ""
+    call: str = ""
+    group: str = ""
+    options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.module, str) or not self.module:
+        for key in ("module", "call", "group"):
+            if not isinstance(getattr(self, key), str):
+                raise ConfigError(
+                    f"setup entry: {key} must be a string, got {getattr(self, key)!r}"
+                )
+
+        if self.group:
+            if self.module or self.call:
+                raise ConfigError(
+                    f"setup group {self.group!r}: group is an alternative"
+                    f" to module and call, not a companion; use one form"
+                    f" or the other"
+                )
+        else:
+            if not self.module:
+                raise ConfigError(
+                    f"setup entry: module must be a non-empty module name,"
+                    f" got {self.module!r}"
+                )
+
+            _split_reference(self.call, key="call", where=f"setup for {self.module!r}")
+
+        if not isinstance(self.options, Mapping) or not all(
+            isinstance(key, str) for key in self.options
+        ):
             raise ConfigError(
-                f"setup entry: module must be a non-empty module name,"
-                f" got {self.module!r}"
+                f"setup entry: options must be a mapping with string keys,"
+                f" got {self.options!r}"
             )
 
-        _split_reference(self.call, key="call", where=f"setup for {self.module!r}")
+        object.__setattr__(self, "options", dict(self.options))
 
 
 class AppliedConfig:
@@ -792,27 +829,30 @@ def _report_never_fired() -> None:
         )
 
 
-def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
-    # The trampoline defers resolving the callback reference to the
-    # moment the hook fires: by then the trigger module is mid-import
-    # anyway, so importing operator code cannot defeat
-    # patch-before-import ordering. wrapt fires the hook immediately
-    # when the module is already imported, so an entry never silently
-    # waits forever on a module that is already there.
+def _register_setup_hook(
+    trigger: str,
+    resolve: Callable[[], Any],
+    describe: str,
+    options: Mapping[str, Any],
+    record: AppliedConfig,
+) -> None:
+    # The shared trampoline behind both setup forms. Resolution of the
+    # handler is deferred to the moment the hook fires: by then the
+    # trigger module is mid-import anyway, so importing operator code
+    # cannot defeat patch-before-import ordering. wrapt fires the hook
+    # immediately when the module is already imported, so an entry
+    # never silently waits forever on a module that is already there.
 
     def trampoline(module: Any) -> None:
         try:
-            callback = _resolve_reference(
-                entry.call, key="call", where=f"setup for {entry.module!r}"
-            )
+            handler = resolve()
 
-            if not callable(callback):
+            if not callable(handler):
                 raise ConfigError(
-                    f"setup for {entry.module!r}: call = {entry.call!r}"
-                    f" resolved to {callback!r}, which is not callable"
+                    f"{describe} resolved to {handler!r}, which is not callable"
                 )
 
-            callback(module)
+            handler(module, **options)
         except Exception as exc:
             # Same posture as observe entries: loud during apply,
             # warn-and-continue from inside an application import.
@@ -821,14 +861,56 @@ def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
                 raise
 
             warnings.warn(
-                f"setup callback {entry.call!r} for {entry.module!r}"
-                f" raised: {exc!r}. The import continues; whatever the"
-                f" callback did before raising stands.",
+                f"{describe} raised: {exc!r}. The import continues;"
+                f" whatever the handler did before raising stands.",
                 ConfigWarning,
                 stacklevel=2,
             )
 
-    wrapt.register_post_import_hook(trampoline, entry.module)
+    wrapt.register_post_import_hook(trampoline, trigger)
+
+
+def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
+    if entry.group:
+        # The group form: an installed package declares its handler
+        # family as entry points, entry name the trigger module and
+        # target the handler, the same shape wrapt's own hook
+        # discovery reads. Discovery happens now, from metadata alone,
+        # importing nothing; each handler still resolves only when
+        # its module arrives, and every handler in the family gets
+        # the entry's options.
+
+        points = list(metadata.entry_points(group=entry.group))
+
+        if not points:
+            raise ConfigError(
+                f"setup group {entry.group!r} has no entry points: a"
+                f" misspelled group, or the package declaring it is not"
+                f" installed"
+            )
+
+        for point in points:
+            _register_setup_hook(
+                trigger=point.name,
+                resolve=point.load,
+                describe=(
+                    f"setup group {entry.group!r} handler"
+                    f" {point.value!r} for {point.name!r}"
+                ),
+                options=entry.options,
+                record=record,
+            )
+        return
+
+    _register_setup_hook(
+        trigger=entry.module,
+        resolve=lambda: _resolve_reference(
+            entry.call, key="call", where=f"setup for {entry.module!r}"
+        ),
+        describe=f"setup callback {entry.call!r} for {entry.module!r}",
+        options=entry.options,
+        record=record,
+    )
 
 
 # The sinks a config file can name without a module:attr reference.
@@ -952,12 +1034,24 @@ def _config_from(document: Any, location: str) -> Config:
         )
         observe.append(ObserveEntry(**table))
 
+    # A setup table works like the sink table: module, call and group
+    # are the reserved keys, and everything else rides through to the
+    # handler as options.
+
     setup: list[SetupEntry] = []
     for raw in document.get("setup", ()):
-        table = _entry_table(
-            raw, section="[[setup]]", required=("module", "call"), optional=()
+        if not isinstance(raw, dict):
+            raise ConfigError(f"[[setup]] entries must be tables, got {raw!r}")
+
+        table = dict(raw)
+        setup.append(
+            SetupEntry(
+                module=table.pop("module", ""),
+                call=table.pop("call", ""),
+                group=table.pop("group", ""),
+                options=table,
+            )
         )
-        setup.append(SetupEntry(**table))
 
     sink = _build_sink(document["sink"]) if "sink" in document else None
 

@@ -568,19 +568,71 @@ triggers at the right moment: `call` names a `module:attr` callable
 invoked with the module named by `module` as soon as that module is
 imported, or immediately if it already was.
 
+Any other key on the entry rides through to the handler as a keyword
+argument, the same convention the `[sink]` table uses, so one
+generic handler can be specialised per deployment from the file:
+
+```toml
+[[setup]]
+module = "myapp.orders"
+call = "wrapture_local.hooks:instrument_orders"
+tenants = ["acme", "globex"]
+```
+
 ```python
 # wrapture_local/hooks.py
 import wrapture
 
-def instrument_orders(module):
+def instrument_orders(module, *, tenants=()):
+    def traced_tenant(instance, args, kwargs):
+        return kwargs.get("tenant") in tenants
+
     wrapture.binding(module.OrderService, "restock",
-                     when=only_traced_tenants).apply()
+                     when=traced_tenant).apply()
 ```
 
-Unlike sink references, the callback reference resolves only when the
-hook fires: by then the trigger module is mid-import anyway, so
-naming operator code here can never cause it to be imported ahead of
-the module it instruments.
+With no extra keys the handler is called with just the module, so a
+plain `handler(module)` signature keeps working; option values are
+limited to what TOML can express, and a handler rejecting an option
+(a typo, say) follows the usual failure posture below. Unlike sink
+references, the handler reference resolves only when the hook fires:
+by then the trigger module is mid-import anyway, so naming operator
+code here can never cause it to be imported ahead of the module it
+instruments.
+
+A package can also ship a whole family of handlers (instrumentation
+for every interesting module of a framework, say) and have the
+config activate it with one entry. The package declares the family
+as entry points in its own metadata, entry name the trigger module
+and target the handler, the same shape wrapt's own hook discovery
+reads:
+
+```toml
+# the wrapture-flask package's pyproject.toml
+[project.entry-points.wrapture_flask]
+"flask.app" = "wrapture_flask.hooks:instrument_app"
+"flask.blueprints" = "wrapture_flask.hooks:instrument_blueprints"
+```
+
+The config names the group instead of a module and call (the two
+forms are mutually exclusive), and any extra keys go to every
+handler in the family:
+
+```toml
+[[setup]]
+group = "wrapture_flask"
+capture_headers = false
+```
+
+Discovery reads metadata alone at apply time, importing nothing, and
+each handler still resolves only when its own module arrives. A
+group with no entry points is a loud `ConfigError`, since it means a
+misspelled name or an uninstalled package. Because the entry point
+shape is exactly wrapt's convention, a family whose handlers default
+every option is equally usable through raw
+`wrapt.discover_post_import_hooks()`; the config route adds the
+options, the failure posture, and the config file's control over
+when it all happens.
 
 ### Code next to the config file
 

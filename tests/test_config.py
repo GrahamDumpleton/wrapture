@@ -659,6 +659,107 @@ def _raising_setup(module: Any) -> None:
     raise RuntimeError("operator code broke")
 
 
+_setup_seen: list[tuple[Any, dict[str, Any]]] = []
+
+
+def _optioned_setup(module: Any, **options: Any) -> None:
+    _setup_seen.append((module, options))
+
+
+def test_extra_setup_keys_reach_the_handler_as_keyword_arguments() -> None:
+    del _setup_seen[:]
+
+    config = Config(
+        setup=[
+            SetupEntry(
+                module=__name__,
+                call=f"{__name__}:_optioned_setup",
+                options={"tenants": ["acme"], "limit": 3},
+            )
+        ]
+    )
+    config.apply()
+
+    ((module, options),) = _setup_seen
+    assert module is sys.modules[__name__]
+    assert options == {"tenants": ["acme"], "limit": 3}
+
+
+def test_the_loader_turns_extra_setup_keys_into_options(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            [[setup]]
+            module = "mod"
+            call = "mod:fn"
+            tenants = ["acme"]
+            limit = 3
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    (entry,) = config.setup
+    assert entry.options == {"tenants": ["acme"], "limit": 3}
+
+
+def test_a_setup_group_registers_every_declared_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The group's entry points are discovered from metadata (faked
+    # here with real EntryPoint objects, so resolution is the real
+    # machinery); each entry hooks its own module, and every handler
+    # in the family receives the entry's options.
+
+    from importlib.metadata import EntryPoint
+    from types import SimpleNamespace
+
+    (tmp_path / "cfg17_ga_mod.py").write_text("MARK = 'a'\n")
+    (tmp_path / "cfg17_gb_mod.py").write_text("MARK = 'b'\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    points = [
+        EntryPoint("cfg17_ga_mod", f"{__name__}:_optioned_setup", "cfg17_hooks"),
+        EntryPoint("cfg17_gb_mod", f"{__name__}:_optioned_setup", "cfg17_hooks"),
+    ]
+    monkeypatch.setattr(
+        "wrapture.config.metadata",
+        SimpleNamespace(entry_points=lambda group: points),
+    )
+
+    del _setup_seen[:]
+
+    config = Config(setup=[SetupEntry(group="cfg17_hooks", options={"headers": False})])
+    config.apply()
+
+    assert _setup_seen == []
+
+    importlib.import_module("cfg17_ga_mod")
+    importlib.import_module("cfg17_gb_mod")
+
+    marks = [(module.MARK, options) for module, options in _setup_seen]
+    assert marks == [("a", {"headers": False}), ("b", {"headers": False})]
+
+
+def test_an_empty_setup_group_fails_loudly() -> None:
+    config = Config(setup=[SetupEntry(group="definitely_not_a_group_xyz")])
+
+    with pytest.raises(ConfigError, match="has no entry points"):
+        config.apply()
+
+
+def test_group_and_the_single_form_are_mutually_exclusive() -> None:
+    with pytest.raises(ConfigError, match="alternative to module and call"):
+        SetupEntry(module="mod", call="mod:fn", group="hooks")
+
+
+def test_setup_options_must_be_a_mapping() -> None:
+    with pytest.raises(ConfigError, match="options must be a mapping"):
+        SetupEntry(module="mod", call="mod:fn", options="loud")  # type: ignore[arg-type]
+
+
 def test_a_setup_callback_raising_at_deferred_fire_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -899,12 +1000,6 @@ def test_unknown_keys_fail_loudly(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="unknown keys"):
         load_config(entry)
-
-    setup = tmp_path / "setup.toml"
-    setup.write_text('[[setup]]\nmodule = "mod"\ncall = "mod:fn"\nwhen = "now"\n')
-
-    with pytest.raises(ConfigError, match="unknown keys"):
-        load_config(setup)
 
 
 def test_invalid_toml_fails_loudly(tmp_path: Path) -> None:

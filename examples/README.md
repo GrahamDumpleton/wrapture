@@ -115,7 +115,9 @@ config file, reached only by the references in `wrapture.toml`.
   process was launched.
 - The `[[setup]]` entry names a callback that runs when the `shop`
   module is imported; it binds the gateway with a `when=` predicate,
-  so of the six charges made only the three over 100 are recorded.
+  and the entry's extra `threshold` key reaches the callback as a
+  keyword argument, so of the six charges made only the two over 400
+  are recorded, with the cutoff adjustable in the config file alone.
 - The `[sink]` type names a factory that composes a `Fanout` of a
   live printer and a JSONLines file, a combination the TOML sink
   table alone cannot spell.
@@ -126,6 +128,7 @@ $ rm -f trace.jsonl
 $ uv run python -m wrapture main.py
 ```
 
-Three charges print live and land in `trace.jsonl`; convert the file
-as in the previous example to see the same three from the other
-renderings.
+Two charges print live and land in `trace.jsonl`; convert the file
+as in the previous example to see the same two from the other
+renderings. Edit `threshold` in `wrapture.toml` and run again to
+watch the selection change without touching any Python.
