@@ -412,8 +412,8 @@ The dev-server example above still edits the application's entry
 point. A config file moves the same setup out of the code entirely:
 observe rules, the sink, capture and sampling, written as TOML and
 applied as one unit. This is the format the `python -m wrapture`
-runner and the autowrapt injection path (both arriving with later
-steps) consume; it can also be applied directly:
+runner below consumes, the autowrapt injection path (arriving with
+the injection layer) will consume, and code can apply directly:
 
 ```python
 import wrapture
@@ -568,3 +568,32 @@ the loader builds: the file can say nothing that `Config` cannot,
 and code can additionally pass live objects, a constructed sink or a
 callable capture policy, where the file is limited to what TOML can
 spell.
+
+### Zero-code runs: python -m wrapture
+
+The runner applies a config and then runs your program, with nothing
+in the program saying so:
+
+```console
+$ python -m wrapture -m myapp
+$ python -m wrapture manage.py runserver
+$ python -m wrapture --config trace.toml -m myapp
+```
+
+Without `--config` the precedence chain above locates the file, and
+finding none is an error rather than a silent untraced run. The
+target runs as `__main__` with `sys.argv` rebuilt to the target and
+its own arguments, exactly as `python -m myapp` or
+`python manage.py runserver` would have run it, the same `-m`
+convention as pdb, cProfile and coverage. Everything after the
+target belongs to the target, however option-like it looks, so
+wrapture's options go before it.
+
+The ordering is the point: the config is applied before the target
+runs, so patches are in place before the target module imports
+anything, and a `from applib import parse` in the application still
+picks up the observed function. This is the zero-code form of the
+dev-server scenario at the top of this page: the few lines in the
+entry point become a `wrapture.toml` next to the project, and
+`python -m wrapture manage.py runserver` traces the inherited
+application untouched.

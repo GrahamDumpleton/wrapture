@@ -88,7 +88,9 @@ One mechanism, four uses, in increasing order of machinery:
 3. **Ad-hoc tracing.** Attach bindings to a running application, including
    one you cannot modify or redeploy, and emit a structured, nested trace to
    process or chart elsewhere. Name a handful of methods and a call tree
-   appears; no code changes required.
+   appears; no code changes required: with a `wrapture.toml` naming the
+   methods and a sink, `python -m wrapture manage.py runserver` traces the
+   application untouched.
 
 4. **Targeted profiling.** Use a binding as a *scope* within which CPython's
    own profiling machinery is active, so you can profile one subsystem of a

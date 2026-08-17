@@ -478,9 +478,13 @@ def test_load_config_reads_the_full_schema(
 
 
 def test_load_config_builds_builtin_sinks(tmp_path: Path) -> None:
+    # The path is embedded with forward slashes: in a TOML basic
+    # string a backslash starts an escape sequence, so the native
+    # Windows form would not even parse.
+
     source = tmp_path / "trace.toml"
     source.write_text(
-        f'[sink]\ntype = "jsonlines"\npath = "{tmp_path / "out.jsonl"}"\n'
+        f'[sink]\ntype = "jsonlines"\npath = "{(tmp_path / "out.jsonl").as_posix()}"\n'
     )
 
     config = load_config(source)
