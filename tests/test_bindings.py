@@ -256,6 +256,13 @@ def test_mode_is_detected_from_the_target() -> None:
     assert binding(Ledger, "rate").mode == "attribute"
     assert binding("os.path", "join").mode == "callable"
 
+
+def test_a_string_target_labels_with_the_module_name() -> None:
+    # Not the string's repr: 'os.path'.join would leak quotes into
+    # every printed event.
+
+    assert binding("os.path", "join").label == "os.path.join"
+
     class WithProperty:
         @property
         def value(self) -> int:

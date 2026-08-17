@@ -466,6 +466,12 @@ class Binding:
 
     @staticmethod
     def _default_label(target: Any, name: str) -> str:
+        # A string target is already the module's name; anything else
+        # is asked for its own name, with repr as the last resort.
+
+        if isinstance(target, str):
+            return f"{target}.{name}"
+
         owner = getattr(target, "__name__", None) or repr(target)
         return f"{owner}.{name}"
 

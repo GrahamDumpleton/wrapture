@@ -1,0 +1,19 @@
+# Watch the whole order flow live: every observed event prints to
+# stderr as it happens, indented by nesting, with -> for results and
+# !! for exceptions.
+
+[[observe]]
+target = "shop:OrderService"
+name = "place"
+
+[[observe]]
+target = "shop:PaymentGateway"
+match = "*"
+exclude = "_*"
+
+[[observe]]
+target = "shop:Ledger"
+name = "record"
+
+[sink]
+type = "printer"

@@ -1,0 +1,14 @@
+# Everything here is operator code reached by reference. The
+# pythonpath entry is anchored to this file's directory, so the
+# wrapture_local package next to it is importable however the
+# process was launched.
+
+pythonpath = "."
+
+[sink]
+type = "wrapture_local.sinks:make_sink"
+path = "trace.jsonl"
+
+[[setup]]
+module = "shop"
+call = "wrapture_local.hooks:instrument"

@@ -599,6 +599,13 @@ entry point become a `wrapture.toml` next to the project, and
 `python -m wrapture manage.py runserver` traces the inherited
 application untouched.
 
+Runnable demonstrations of this whole workflow live in the
+[examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
+of the repository: a live printer over an order flow, a threaded
+pipeline streamed to disk and rendered in Perfetto, and an
+operator-code bundle showing `pythonpath`, a setup callback and a
+sink factory together. Each is a directory to `cd` into and run.
+
 ## Exporting traces
 
 Three exporters render a trace for existing tools rather than a

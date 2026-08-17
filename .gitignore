@@ -13,3 +13,5 @@ venv/
 .coverage
 htmlcov/
 .tox/
+examples/*/trace.jsonl
+examples/*/trace.json

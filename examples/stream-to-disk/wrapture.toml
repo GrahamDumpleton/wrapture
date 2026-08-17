@@ -1,0 +1,11 @@
+# Stream every observed call to disk as JSON Lines. A config sink is
+# a process sink, so it hears the worker threads too; each thread
+# becomes its own lane when the trace is rendered for Perfetto.
+
+[[observe]]
+target = "pipeline"
+match = "*"
+
+[sink]
+type = "jsonlines"
+path = "trace.jsonl"
