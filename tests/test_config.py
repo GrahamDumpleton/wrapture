@@ -8,6 +8,7 @@ primitive, with loud failures for anything it does not understand.
 """
 
 import importlib
+import os
 import subprocess
 import sys
 import textwrap
@@ -354,12 +355,13 @@ def test_bindings_arrive_when_the_target_module_is_imported(
         _unwind(applied)
 
 
-def test_fire_time_validation_fails_inside_the_import(
+def test_fire_time_validation_warns_and_the_import_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Validation that needs the module (here a name that must exist)
-    # cannot run until the module arrives, so the failure surfaces
-    # from the triggering import statement.
+    # cannot run until the module arrives; fired inside an application
+    # import, the failure must not fail that import, so the entry is
+    # dropped with a warning and the module comes through usable.
 
     (tmp_path / "cfg15_bad_mod.py").write_text("value = 1\n")
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -368,10 +370,12 @@ def test_fire_time_validation_fails_inside_the_import(
 
     applied = config.apply()
     try:
-        with pytest.raises(ConfigError, match="no member named 'missing'"):
-            importlib.import_module("cfg15_bad_mod")
+        with pytest.warns(ConfigWarning, match="no member named 'missing'"):
+            module = importlib.import_module("cfg15_bad_mod")
 
+        assert module.value == 1
         assert applied.bindings == ()
+        assert applied.pending == ()
     finally:
         _unwind(applied)
 
@@ -499,6 +503,184 @@ def test_the_shutdown_report_names_never_imported_targets() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _report_never_fired()
+
+
+# ---------------------------------------------------------------------------
+# operational hardening
+# ---------------------------------------------------------------------------
+
+
+def test_a_tape_is_rejected_as_a_config_sink() -> None:
+    # A Tape retains every event; a config sink lives for the life of
+    # the process, so the combination is refused however deeply a
+    # composition buries it.
+
+    from wrapture import Depth, Fanout, Printer, Tape
+
+    with pytest.raises(ConfigError, match="Tape retains every event"):
+        Config(sink=Tape())
+
+    with pytest.raises(ConfigError, match="Tape retains every event"):
+        Config(sink=Fanout(Printer(), Depth(2, Tape())))
+
+
+def test_redact_replaces_named_parameters_on_the_entrys_bindings() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target=__name__, name="parse_widget", redact="text")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("secret-token")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "<redacted>"}
+
+
+def test_the_loader_accepts_a_redact_key(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[observe]]
+            target = "{__name__}"
+            name = "parse_widget"
+            redact = ["text"]
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert config.observe[0].redact == ("text",)
+
+
+def test_inherit_false_strips_only_wrapture_from_the_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOWRAPT_BOOTSTRAP", "othertool,wrapture")
+
+    applied = Config(inherit=False).apply()
+    try:
+        assert os.environ["AUTOWRAPT_BOOTSTRAP"] == "othertool"
+    finally:
+        _unwind(applied)
+
+    # Alone on the list, the variable goes entirely.
+
+    monkeypatch.setenv("AUTOWRAPT_BOOTSTRAP", "wrapture")
+
+    applied = Config(inherit=False).apply()
+    try:
+        assert "AUTOWRAPT_BOOTSTRAP" not in os.environ
+    finally:
+        _unwind(applied)
+
+
+def test_inherit_defaults_to_leaving_the_environment_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOWRAPT_BOOTSTRAP", "wrapture")
+
+    applied = Config().apply()
+    try:
+        assert os.environ["AUTOWRAPT_BOOTSTRAP"] == "wrapture"
+    finally:
+        _unwind(applied)
+
+
+def test_inherit_must_be_a_bool(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="inherit must be true or false"):
+        Config(inherit="no")  # type: ignore[arg-type]
+
+    source = tmp_path / "trace.toml"
+    source.write_text('inherit = "no"\n')
+
+    with pytest.raises(ConfigError, match="inherit must be true or false"):
+        load_config(source)
+
+
+def test_suspend_and_resume_toggle_the_whole_config() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target=f"{__name__}:OrderService", name="place")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        applied.suspend()
+        OrderService().place()
+        assert collector.entered == []
+
+        (bound,) = applied.bindings
+        assert bound.suspended_calls == 1
+
+        applied.resume()
+        OrderService().place()
+        assert len(collector.entered) == 1
+    finally:
+        _unwind(applied)
+
+
+def test_a_pending_entry_firing_while_suspended_applies_suspended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "cfg16_late_mod.py").write_text("def run(task):\n    return task\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target="cfg16_late_mod", name="run")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        applied.suspend()
+
+        module = importlib.import_module("cfg16_late_mod")
+        module.run("job")
+
+        assert collector.entered == []
+
+        applied.resume()
+        module.run("job")
+        assert len(collector.entered) == 1
+    finally:
+        _unwind(applied)
+
+
+def _raising_setup(module: Any) -> None:
+    raise RuntimeError("operator code broke")
+
+
+def test_a_setup_callback_raising_at_deferred_fire_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # During apply a raising callback is the caller's to hear; fired
+    # from an application import later, it warns and the import
+    # continues, since observation must never break the application.
+
+    (tmp_path / "cfg16_setup_mod.py").write_text("value = 2\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    config = Config(
+        setup=[SetupEntry(module="cfg16_setup_mod", call=f"{__name__}:_raising_setup")]
+    )
+
+    applied = config.apply()
+    try:
+        with pytest.warns(ConfigWarning, match="operator code broke"):
+            module = importlib.import_module("cfg16_setup_mod")
+
+        assert module.value == 2
+    finally:
+        _unwind(applied)
 
 
 # ---------------------------------------------------------------------------

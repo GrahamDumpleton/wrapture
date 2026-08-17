@@ -783,6 +783,7 @@ def _event_record(event: Event) -> dict[str, Any]:
 
 
 _STOP = object()
+_REOPEN = object()
 
 
 class JSONLines(Sink):
@@ -897,6 +898,21 @@ class JSONLines(Sink):
                 if item is _STOP:
                     break
 
+                if item is _REOPEN:
+                    # External rotation moved the file aside; release
+                    # the old one and start appending to the path
+                    # afresh. A failed reopen is counted, and later
+                    # writes fail onto the closed stream, each counted
+                    # too, so the sink degrades rather than crashing.
+
+                    try:
+                        stream.flush()
+                        stream.close()
+                        stream = open(self._path, "a", encoding="utf-8")
+                    except Exception:
+                        _note_sink_error(self)
+                    continue
+
                 if isinstance(item, threading.Event):
                     try:
                         stream.flush()
@@ -937,6 +953,29 @@ class JSONLines(Sink):
             return
 
         barrier.wait(timeout=5)
+
+    def reopen(self) -> None:
+        """Close and reopen the file at the sink's path, for external
+        log rotation.
+
+        A rotator that moves the file aside (logrotate without
+        copytruncate, say) leaves the writer appending to the moved
+        file; call this from the rotation hook (a signal handler, a
+        postrotate script's notification) and lines from here on go
+        to a fresh file at the original path. Queued lines drain to
+        the old file first, so nothing is lost across the switch.
+        Safe from any thread; a no-op before the first line or after
+        close().
+        """
+
+        with self._lock:
+            if not self._started or self._closed:
+                return
+
+        try:
+            self._queue.put(_REOPEN, timeout=5)
+        except queue.Full:
+            pass
 
     def close(self) -> None:
         """Write out the queue, stop the writer, and close the file.

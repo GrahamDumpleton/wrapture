@@ -40,9 +40,21 @@ from typing import Any
 import wrapt
 
 from .bindings import Binding, binding
-from .capture import CapturePolicy, _resolve_policy
+from .capture import REFERENCE, CapturePolicy, _resolve_policy
+from .capture import redact as _redact
 from .exceptions import ConfigError, ConfigWarning
-from .sinks import JSONLines, Printer, Sample, Sink, add_sink, remove_sink
+from .sinks import (
+    Depth,
+    Fanout,
+    Filter,
+    JSONLines,
+    Printer,
+    Sample,
+    Sink,
+    add_sink,
+    remove_sink,
+)
+from .timeline import Tape
 
 
 def _strings(value: Any, *, key: str, where: str) -> tuple[str, ...]:
@@ -118,7 +130,9 @@ class ObserveEntry:
     `name` (exact, each must exist, binds anything including
     properties) or `match` (fnmatchcase patterns over the target's own
     immediate members, routines only), with `exclude` patterns
-    subtracting from a match. Each selection field accepts one string
+    subtracting from a match. `redact` names parameters whose values
+    are replaced with a marker on this entry's bindings, for secrets
+    that must not reach any sink. Every such field accepts one string
     or a list; `name` and `match` are mutually exclusive and one is
     required, and `exclude` only accompanies `match`.
     """
@@ -127,6 +141,7 @@ class ObserveEntry:
     name: str | Sequence[str] = ()
     match: str | Sequence[str] = ()
     exclude: str | Sequence[str] = ()
+    redact: str | Sequence[str] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -147,7 +162,7 @@ class ObserveEntry:
         # Normalise the selection fields to tuples, then check the
         # combination rules: name XOR match, exclude only with match.
 
-        for key in ("name", "match", "exclude"):
+        for key in ("name", "match", "exclude", "redact"):
             value = getattr(self, key)
             object.__setattr__(
                 self, key, _strings(value, key=key, where=where) if value else ()
@@ -211,6 +226,8 @@ class AppliedConfig:
         self._pending: list[ObserveEntry] = []
         self._sink = sink
         self._reverted = False
+        self._suspended = False
+        self._applying = False
 
     @property
     def bindings(self) -> tuple[Binding, ...]:
@@ -259,6 +276,34 @@ class AppliedConfig:
                 lines.append(f"  {entry.target}")
 
         return "\n".join(lines)
+
+    def suspend(self) -> None:
+        """Suspend every binding this config applied: the wrappers
+        stay installed, but operations pass straight through, counted
+        on each binding's `suspended_calls`.
+
+        The runtime off switch for an injected process. The state
+        covers the whole config, not a snapshot: a pending entry that
+        fires while suspended applies its bindings suspended too.
+        """
+
+        with self._lock:
+            self._suspended = True
+            bindings = list(self._bindings)
+
+        for bound in bindings:
+            bound.suspend()
+
+    def resume(self) -> None:
+        """Resume every binding this config applied, undoing
+        suspend()."""
+
+        with self._lock:
+            self._suspended = False
+            bindings = list(self._bindings)
+
+        for bound in bindings:
+            bound.resume()
 
     def revert(self) -> None:
         """Remove everything this record installed: the bindings, most
@@ -316,6 +361,7 @@ class Config:
         setup: Sequence[SetupEntry] = (),
         capture: CapturePolicy | str | None = None,
         sample: float | None = None,
+        inherit: bool = True,
     ) -> None:
         """Validate and hold a tracing setup, applying nothing yet.
 
@@ -325,7 +371,11 @@ class Config:
         on every binding the config creates, in the forms binding()
         accepts. `sample` keeps only that fraction of call trees, by
         wrapping the sink in Sample at apply time, so it requires a
-        sink.
+        sink. `inherit=False` strips wrapture's autowrapt trigger
+        from the environment after a successful apply, so Python
+        processes this one launches by exec or spawn start untraced;
+        the default leaves the environment alone, since launched
+        workers are usually the application itself.
         """
 
         for entry in observe:
@@ -342,6 +392,12 @@ class Config:
 
         if sink is not None and not isinstance(sink, Sink):
             raise ConfigError(f"sink must be a Sink, got {sink!r}")
+
+        if sink is not None:
+            _reject_tapes(sink)
+
+        if not isinstance(inherit, bool):
+            raise ConfigError(f"inherit must be true or false, got {inherit!r}")
 
         if capture is not None:
             try:
@@ -367,6 +423,7 @@ class Config:
         self._setup = tuple(setup)
         self._capture = capture
         self._sample = sample
+        self._inherit = inherit
 
     @property
     def observe(self) -> tuple[ObserveEntry, ...]:
@@ -397,6 +454,13 @@ class Config:
         """The fraction of call trees kept, or None for all of them."""
 
         return self._sample
+
+    @property
+    def inherit(self) -> bool:
+        """Whether launched Python processes inherit the autowrapt
+        trigger; False strips it after a successful apply."""
+
+        return self._inherit
 
     def apply(self) -> AppliedConfig:
         """Install everything this config describes, returning the
@@ -429,19 +493,71 @@ class Config:
 
         record = AppliedConfig(installed)
 
+        # While the applying flag is set, a hook firing synchronously
+        # (its module already imported) propagates errors out of this
+        # call; once apply returns, hooks fire inside application
+        # imports, where failures warn instead, since observation must
+        # never take the application down.
+
+        record._applying = True
         try:
             for entry in self._observe:
                 record._adopt(entry)
                 _register_observe(entry, self._capture, record)
 
             for setup_entry in self._setup:
-                _register_setup(setup_entry)
+                _register_setup(setup_entry, record)
         except BaseException:
             record.revert()
             raise
+        finally:
+            record._applying = False
+
+        if not self._inherit:
+            _strip_bootstrap_trigger()
 
         _watch(record)
         return record
+
+
+def _reject_tapes(sink: Sink) -> None:
+    # A Tape retains every event, so a config sink, which lives for
+    # the life of the process, must never be one, however deeply a
+    # composition buries it. Unbounded retention has to be a
+    # deliberate code-level choice, never a config file's.
+
+    if isinstance(sink, Tape):
+        raise ConfigError(
+            "a Tape retains every event and cannot be a config sink;"
+            " use a streaming or counting sink, and keep tapes for"
+            " code that bounds their lifetime"
+        )
+
+    if isinstance(sink, Fanout):
+        for inner in sink._sinks:
+            _reject_tapes(inner)
+
+    if isinstance(sink, (Filter, Depth, Sample)):
+        _reject_tapes(sink._sink)
+
+
+def _strip_bootstrap_trigger() -> None:
+    # inherit = false: take only wrapture's own name out of the
+    # autowrapt trigger list, so exec and spawn children start
+    # untraced while other tools' bootstraps are untouched. Forked
+    # children inherit the parent's patches through memory regardless;
+    # this only governs fresh interpreters.
+
+    value = os.environ.get("AUTOWRAPT_BOOTSTRAP")
+    if value is None:
+        return
+
+    names = [name for name in value.split(",") if name and name != "wrapture"]
+
+    if names:
+        os.environ["AUTOWRAPT_BOOTSTRAP"] = ",".join(names)
+    else:
+        del os.environ["AUTOWRAPT_BOOTSTRAP"]
 
 
 def _resolve_container(entry: ObserveEntry) -> tuple[str, str, Any]:
@@ -536,9 +652,18 @@ def _bindings_for(
                 stacklevel=3,
             )
 
+    # A redact list turns into a capture policy over the entry's
+    # capture level: named parameters become the marker, everything
+    # else captures at the level the config asked for.
+
+    effective: CapturePolicy | str | None = capture
+    if entry.redact:
+        base = capture if capture is not None else REFERENCE
+        effective = _redact(*entry.redact, level=base)
+
     prefix = f"{path}." if path else ""
     return [
-        binding(module_name, prefix + member, capture=capture) for member in members
+        binding(module_name, prefix + member, capture=effective) for member in members
     ]
 
 
@@ -556,22 +681,45 @@ def _fire_observe(
     with record._lock:
         if record._reverted:
             return
+        suspended = record._suspended
 
     applied: list[Binding] = []
     try:
         for bound in _bindings_for(entry, capture):
-            bound.apply()
+            bound.apply(suspended=suspended)
             applied.append(bound)
-    except BaseException:
+    except Exception as exc:
         for bound in reversed(applied):
             bound.remove()
-        raise
+
+        # During apply the failure is the caller's to hear; fired
+        # from an application import later, observation failing must
+        # not fail the import, so the entry is dropped with a loud
+        # warning instead.
+
+        if record._applying:
+            raise
+
+        with record._lock:
+            if entry in record._pending:
+                record._pending.remove(entry)
+
+        warnings.warn(
+            f"observe target {entry.target!r} failed to bind when its"
+            f" module was imported: {exc}. The import continues, with"
+            f" nothing bound for this entry.",
+            ConfigWarning,
+            stacklevel=2,
+        )
+        return
 
     # Adopt the bindings unless a concurrent revert won the race, in
-    # which case they come straight down again.
+    # which case they come straight down again; a suspend that landed
+    # mid-flight is reconciled the same way.
 
     with record._lock:
         reverted = record._reverted
+        wanted_suspended = record._suspended
         if not reverted:
             record._bindings.extend(applied)
             if entry in record._pending:
@@ -580,6 +728,12 @@ def _fire_observe(
     if reverted:
         for bound in reversed(applied):
             bound.remove()
+    elif wanted_suspended != suspended:
+        for bound in applied:
+            if wanted_suspended:
+                bound.suspend()
+            else:
+                bound.resume()
 
 
 def _register_observe(
@@ -638,7 +792,7 @@ def _report_never_fired() -> None:
         )
 
 
-def _register_setup(entry: SetupEntry) -> None:
+def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
     # The trampoline defers resolving the callback reference to the
     # moment the hook fires: by then the trigger module is mid-import
     # anyway, so importing operator code cannot defeat
@@ -647,17 +801,32 @@ def _register_setup(entry: SetupEntry) -> None:
     # waits forever on a module that is already there.
 
     def trampoline(module: Any) -> None:
-        callback = _resolve_reference(
-            entry.call, key="call", where=f"setup for {entry.module!r}"
-        )
-
-        if not callable(callback):
-            raise ConfigError(
-                f"setup for {entry.module!r}: call = {entry.call!r}"
-                f" resolved to {callback!r}, which is not callable"
+        try:
+            callback = _resolve_reference(
+                entry.call, key="call", where=f"setup for {entry.module!r}"
             )
 
-        callback(module)
+            if not callable(callback):
+                raise ConfigError(
+                    f"setup for {entry.module!r}: call = {entry.call!r}"
+                    f" resolved to {callback!r}, which is not callable"
+                )
+
+            callback(module)
+        except Exception as exc:
+            # Same posture as observe entries: loud during apply,
+            # warn-and-continue from inside an application import.
+
+            if record._applying:
+                raise
+
+            warnings.warn(
+                f"setup callback {entry.call!r} for {entry.module!r}"
+                f" raised: {exc!r}. The import continues; whatever the"
+                f" callback did before raising stands.",
+                ConfigWarning,
+                stacklevel=2,
+            )
 
     wrapt.register_post_import_hook(trampoline, entry.module)
 
@@ -752,7 +921,8 @@ def _config_from(document: Any, location: str) -> Config:
         raise ConfigError(f"{location}: config must be a TOML table")
 
     unknown = sorted(
-        set(document) - {"pythonpath", "capture", "sample", "observe", "sink", "setup"}
+        set(document)
+        - {"pythonpath", "capture", "sample", "observe", "sink", "setup", "inherit"}
     )
     if unknown:
         raise ConfigError(f"{location}: unknown config keys {unknown}")
@@ -778,7 +948,7 @@ def _config_from(document: Any, location: str) -> Config:
             raw,
             section="[[observe]]",
             required=("target",),
-            optional=("name", "match", "exclude"),
+            optional=("name", "match", "exclude", "redact"),
         )
         observe.append(ObserveEntry(**table))
 
@@ -797,6 +967,7 @@ def _config_from(document: Any, location: str) -> Config:
         setup=setup,
         capture=document.get("capture"),
         sample=document.get("sample"),
+        inherit=document.get("inherit", True),
     )
 
 

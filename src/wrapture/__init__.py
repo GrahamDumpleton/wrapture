@@ -94,6 +94,7 @@ from .sinks import (
 )
 from .stacks import (
     StackFrame,
+    clear_stacks,
     stack_frames,
 )
 from .timeline import (
@@ -153,6 +154,7 @@ __all__ = [
     "bindings",
     "canonical",
     "chrome_trace",
+    "clear_stacks",
     "current_event",
     "find_config",
     "flush_sinks",

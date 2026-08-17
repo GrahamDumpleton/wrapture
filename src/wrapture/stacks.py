@@ -69,23 +69,65 @@ _lock = threading.Lock()
 _ids: dict[tuple[StackFrame, ...], int] = {}
 _stacks: list[tuple[StackFrame, ...]] = []
 
+# The bound on unique interned stacks. Stacks repeat almost perfectly,
+# so thousands of uniques means pathological churn (generated code,
+# say) rather than normal operation; past the bound, captures intern
+# one shared overflow marker instead of growing without limit, so the
+# table's memory is bounded for the life of the process.
+
+_STACK_LIMIT = 10000
+
+_OVERFLOW = (StackFrame("<overflow>", 0, "<stack table full>"),)
+
 
 def stack_frames(stack_id: int) -> tuple[StackFrame, ...]:
     """The frames behind an event's interned stack id, innermost first."""
 
     with _lock:
-        return _stacks[stack_id]
+        try:
+            return _stacks[stack_id]
+        except IndexError:
+            raise KeyError(
+                f"stack id {stack_id!r} is not interned; the stack table"
+                f" may have been cleared since the event was recorded"
+            ) from None
+
+
+def clear_stacks() -> None:
+    """Empty the interned stack table, releasing its memory.
+
+    For long-running processes that capture stacks: interning is
+    bounded, but the bound is generous, and a natural flush point (a
+    trace file rotated away, a tape discarded) can hand the memory
+    back early. Stack ids on events recorded before the clear stop
+    resolving; stack_frames() raises KeyError for them. Clear only
+    when previously recorded events will no longer be consulted.
+    """
+
+    with _lock:
+        _ids.clear()
+        _stacks.clear()
 
 
 def _intern(frames: tuple[StackFrame, ...]) -> int:
     with _lock:
         found = _ids.get(frames)
+        if found is not None:
+            return found
 
-        if found is None:
-            found = len(_stacks)
-            _ids[frames] = found
-            _stacks.append(frames)
+        # At the bound, the overflow marker stands in for any new
+        # unique stack; it interns itself through the normal path the
+        # first time, one slot past the limit.
 
+        if len(_stacks) >= _STACK_LIMIT and frames != _OVERFLOW:
+            frames = _OVERFLOW
+            found = _ids.get(frames)
+            if found is not None:
+                return found
+
+        found = len(_stacks)
+        _ids[frames] = found
+        _stacks.append(frames)
         return found
 
 

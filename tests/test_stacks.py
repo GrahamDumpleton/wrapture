@@ -191,3 +191,59 @@ def test_capture_works_through_behaviour() -> None:
         stack = charge.events.first.stack
         assert stack is not None
         assert stack_frames(stack)[0].function == "place_order"
+
+
+# ---------------------------------------------------------------------------
+# the bounded table
+# ---------------------------------------------------------------------------
+
+
+def test_the_table_interns_an_overflow_marker_past_its_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh table with a tiny bound: uniques intern normally up to
+    # the limit, and every new unique past it collapses onto the one
+    # shared overflow marker, so memory stays bounded.
+
+    from wrapture import stacks
+
+    monkeypatch.setattr(stacks, "_ids", {})
+    monkeypatch.setattr(stacks, "_stacks", [])
+    monkeypatch.setattr(stacks, "_STACK_LIMIT", 2)
+
+    def frames(line: int) -> tuple[stacks.StackFrame, ...]:
+        return (stacks.StackFrame("app.py", line, "handler"),)
+
+    first = stacks._intern(frames(1))
+    second = stacks._intern(frames(2))
+    third = stacks._intern(frames(3))
+    fourth = stacks._intern(frames(4))
+
+    assert first != second
+    assert third == fourth
+    assert stack_frames(third) == stacks._OVERFLOW
+
+    # An already interned stack still resolves to itself at the bound.
+
+    assert stacks._intern(frames(1)) == first
+
+
+def test_clear_stacks_releases_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from wrapture import clear_stacks, stacks
+
+    monkeypatch.setattr(stacks, "_ids", {})
+    monkeypatch.setattr(stacks, "_stacks", [])
+
+    frames = (stacks.StackFrame("app.py", 1, "handler"),)
+    stale = stacks._intern(frames)
+
+    clear_stacks()
+
+    # Old ids stop resolving, loudly; new captures start afresh.
+
+    with pytest.raises(KeyError, match="may have been cleared"):
+        stack_frames(stale)
+
+    assert stacks._intern(frames) == 0

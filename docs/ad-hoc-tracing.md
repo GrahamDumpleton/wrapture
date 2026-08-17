@@ -354,6 +354,15 @@ Two properties make it safe to leave running:
   time, with a depth limit that cuts even self-referential
   structures.
 
+There are no built-in size caps: file growth is delegated to the
+rotation tooling that owns it, and `reopen()` is the hook that makes
+that work. A rotator that moves the file aside (logrotate's default
+mode) leaves the writer appending to the moved file, so call
+`reopen()` from the rotation notification and lines from there on go
+to a fresh file at the original path, with queued lines draining to
+the old file first. Copytruncate-style rotation needs no call at
+all, since the writer appends.
+
 This completes the inherited-dev-server story from the top of this
 page. The whole intervention is a few lines in the application's entry
 point, with no timeline and no changes to the code being observed:
@@ -512,6 +521,14 @@ The top-level `capture` key overrides the capture level on every
 binding the file creates, and `sample` keeps only that fraction of
 call trees by wrapping the sink in `Sample`.
 
+`redact` on an entry names parameters whose values are replaced with
+`<redacted>` on that entry's bindings, everything else capturing at
+the configured level. This is the expected posture for anything
+leaving the process: streaming sinks already reduce values to
+bounded summaries, but a summary of a secret is still a secret, so
+tokens, card numbers and credentials should be redacted by name at
+the entry, where they never reach any sink at all.
+
 ### The sink and its factory escape hatch
 
 `[sink]` names the sink with `type` and passes every other key to its
@@ -585,10 +602,20 @@ Failures are loud: unknown keys, `name` and `match` together, a
 reference that does not resolve, a factory that returns something
 other than a `Sink`, all raise `ConfigError`, and a config that
 fails partway through applying unwinds whatever it had installed
-before the error propagates. Validation that needs the target module
-(a `name` that must exist, a `match` with nothing to select) runs
-when the entry's hook fires, so with a deferred entry the error
-surfaces from the import statement that triggered it.
+before the error propagates. A `Tape` is refused as the sink,
+however deeply a factory's composition buries one: a tape retains
+every event and a config sink lives for the life of the process, so
+unbounded retention stays a deliberate code-level choice.
+
+Validation that needs the target module (a `name` that must exist, a
+`match` with nothing to select) runs when the entry's hook fires,
+and the posture depends on when that is. Fired during apply itself
+(the module was already imported), the failure is the caller's to
+hear and raises. Fired later, from inside the application's own
+import of the module, it warns with `ConfigWarning` and drops the
+entry instead, because observation must never fail the import it
+rode in on; a setup callback that raises after apply is handled the
+same way.
 
 The same setup is available programmatically as the `Config` class
 with `ObserveEntry` and `SetupEntry` values, which is exactly what
@@ -672,11 +699,14 @@ feature. Production tracing is the code-level path from earlier on
 this page, an application registering its own process sink at
 startup. Two operational cautions follow from the mechanism:
 
-- The environment variable reaches every Python process launched
-  under it, not just the one you meant. For that reason a missing
-  config warns (`ConfigWarning`) and starts the process untraced
-  rather than failing it; a config that exists but is broken raises,
-  the loud development posture.
+- Injection never takes the process down. A missing config warns
+  (`ConfigWarning`) and the process starts untraced; a config that
+  exists but cannot be applied warns the same way, because an error
+  raised at bootstrap is fatal to an interpreter that has not even
+  started, and the environment variable reaches every Python process
+  launched under it, not just the one you meant. The loud failures
+  belong to the runner and the programmatic path, where the caller
+  chose to apply.
 - Observe entries defer, so the bootstrap imports no application
   code: bindings land as the application imports its own modules, in
   its own order, and a Django models module is observed the moment
@@ -684,6 +714,26 @@ startup. Two operational cautions follow from the mechanism:
   `[sink]` reference, because a sink must exist before events flow;
   operator code it lives in must be reachable then, which is what
   `pythonpath` is for.
+- The variable's reach is configurable. `inherit = false` in the
+  config strips wrapture's own name from `AUTOWRAPT_BOOTSTRAP` once
+  the config applies, so Python processes the application launches
+  by exec or spawn start untraced; other tools named on the variable
+  are untouched, and `WRAPTURE_CONFIG` is left alone. The default
+  inherits, because launched workers (a dev server's autoreloader
+  child, spawned pool workers) are usually the application itself.
+  Forked workers are outside either setting: a fork inherits the
+  parent's memory, patches and sinks included, without re-running
+  interpreter startup.
+
+Once injected, the process is still operable. The bootstrap keeps
+its `AppliedConfig` record on `wrapture.bootstrap.applied`, since
+nothing else in an injected process holds it: from a console, a
+debugger or a signal handler, `report()` lists what is installed and
+what is still pending, `suspend()` and `resume()` are the runtime
+toggle (wrappers stay in place, operations pass through and are
+counted, and a pending entry firing while suspended arrives
+suspended too), and `revert()` takes the whole intervention down
+without restarting the application.
 
 ## Exporting traces
 

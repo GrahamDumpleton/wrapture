@@ -274,3 +274,28 @@ def test_an_unopenable_path_breaks_the_sink_not_the_application(
 
     sink.close()
     assert sink.errors >= 1
+
+
+def test_reopen_switches_to_a_fresh_file_for_rotation(tmp_path: Path) -> None:
+    # External rotation moves the file aside; reopen() makes the
+    # writer release the old file and append to the path afresh, with
+    # queued lines draining to the old file first.
+
+    trace = tmp_path / "trace.jsonl"
+    sink = JSONLines(trace)
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(sink):
+        Gateway().charge(1)
+        sink.flush()
+
+        rotated = tmp_path / "trace.jsonl.1"
+        trace.rename(rotated)
+        sink.reopen()
+
+        Gateway().charge(2)
+
+    sink.close()
+
+    assert [line["arguments"]["amount"] for line in read_lines(rotated)] == [1]
+    assert [line["arguments"]["amount"] for line in read_lines(trace)] == [2]

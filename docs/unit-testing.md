@@ -514,6 +514,16 @@ the call. Stack capture pairs especially well with attribute events:
 source line that triggered the load, which is normally the hard part
 of diagnosing an accidental query.
 
+The side table is bounded. Past ten thousand unique stacks, a level
+of churn normal code never reaches, new uniques intern to one shared
+overflow marker rather than growing the table, so its memory is
+bounded for the life of the process. For long-running processes,
+`clear_stacks()` empties the table at a natural flush point (a trace
+file rotated away, a tape discarded); ids on events recorded before
+the clear stop resolving, with `stack_frames()` raising `KeyError`
+for them, so clear only when older events will no longer be
+consulted.
+
 ## Filtering and asserting on events
 
 A binding's `events` property is the usual way to read the tape: a

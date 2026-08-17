@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from wrapture import ConfigError, ConfigWarning, Event, Sink
+from wrapture import ConfigWarning, Event, Sink
 from wrapture.bootstrap import bootstrap
 
 
@@ -80,6 +80,13 @@ def test_bootstrap_applies_the_discovered_config(
     applied = bootstrap()
     assert applied is not None
 
+    # The record also lands on the module attribute, the handle for
+    # operator code reaching into an injected process.
+
+    import wrapture.bootstrap
+
+    assert wrapture.bootstrap.applied is applied
+
     try:
         Gateway().charge(500)
     finally:
@@ -124,16 +131,17 @@ def test_finding_no_config_warns_instead_of_raising(
         assert bootstrap() is None
 
 
-def test_a_broken_config_propagates_loudly(
+def test_a_broken_config_warns_and_the_process_starts_untraced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The development posture: a config that exists but cannot be
-    # applied is a real error. The production posture is the
-    # hardening step's decision, not silently made here.
+    # Injection never takes the process down: an error raised here is
+    # fatal to an interpreter that has not even started, and the
+    # variable reaches every python in the environment. The loud
+    # failure belongs to the runner and the programmatic path.
 
     (tmp_path / "wrapture.toml").write_text("not toml at all [")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("WRAPTURE_CONFIG", raising=False)
 
-    with pytest.raises(ConfigError, match="not valid TOML"):
-        bootstrap()
+    with pytest.warns(ConfigWarning, match="could not be applied"):
+        assert bootstrap() is None
