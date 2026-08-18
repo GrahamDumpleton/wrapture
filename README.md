@@ -1,6 +1,6 @@
 # wrapture
 
-**Trace assertions without instrumenting your code.**
+**Wrap anything, capture everything, change nothing.**
 
 [![Tests](https://github.com/GrahamDumpleton/wrapture/actions/workflows/build-test-release.yml/badge.svg?branch=develop)](https://github.com/GrahamDumpleton/wrapture/actions/workflows/build-test-release.yml)
 [![Documentation](https://readthedocs.org/projects/wrapture/badge/?version=latest)](https://wrapture.readthedocs.io)

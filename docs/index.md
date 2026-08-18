@@ -1,6 +1,6 @@
 # wrapture
 
-**Trace assertions without instrumenting your code.**
+**Wrap anything, capture everything, change nothing.**
 
 wrapture (`wrapt` + `capture`) is a Python library for attaching bindings to
 arbitrary call sites, without modifying the code being observed, and doing
