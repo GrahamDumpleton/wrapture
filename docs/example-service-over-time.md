@@ -255,16 +255,17 @@ path the window watches. Either can be the only trigger, or sit
 beside `every=`, where kicks add runs to the schedule.
 
 ```python
->>> peek = wrapture.Window(
-...     name="peek",
-...     on_signal="SIGUSR1",
-...     duration="60s",
-...     collect=[wrapture.Aggregate()],
-...     report=os.path.join(outputs.name, "{window}-{datetime}.txt"),
-... )
->>> peek.describe()
-'on SIGUSR1, for 60s'
+peek = wrapture.Window(
+    name="peek",
+    on_signal="SIGUSR1",
+    duration="60s",
+    collect=[wrapture.Aggregate()],
+    report="reports/{window}-{datetime}.txt",
+)
+peek.describe()   # 'on SIGUSR1, for 60s'
+```
 
+```python
 >>> profile = wrapture.Window(
 ...     name="profile",
 ...     on_file=os.path.join(outputs.name, "profile-now"),
@@ -281,8 +282,9 @@ that minute is refused rather than overlapping, since runs never do.
 collecting, touch again to report and start over, the file being
 removed as it is consumed. The signal handler is installed by
 `start()`, on the main thread, and neither window is started here.
-`SIGUSR1` and `SIGUSR2` do not exist on Windows; `on_file` works
-everywhere, including under servers that own the signal handlers.
+`SIGUSR1` and `SIGUSR2` do not exist on Windows, where naming one is
+refused at construction; `on_file` works everywhere, including under
+servers that own the signal handlers.
 
 ## The always-on stream: `JSONLines` with `rotate=`
 
