@@ -113,6 +113,13 @@ from .timeline import (
     propagate,
     timeline,
 )
+from .windows import (
+    Collector,
+    Report,
+    Run,
+    Window,
+    window,
+)
 from .wsgi import (
     WSGIMiddleware,
 )
@@ -124,6 +131,10 @@ __all__ = [
     "AlreadyAppliedError",
     "AppliedConfig",
     "Binding",
+    "Collector",
+    "Report",
+    "Run",
+    "Window",
     "BindingGroup",
     "CallBehaviour",
     "Config",
@@ -183,4 +194,5 @@ __all__ = [
     "remove_sink",
     "stack_frames",
     "timeline",
+    "window",
 ]

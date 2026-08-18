@@ -26,9 +26,10 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
+from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
-__all__ = ["Schedule", "every", "parse_duration"]
+__all__ = ["Schedule", "every", "once", "parse_duration"]
 
 
 _UNITS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
@@ -90,21 +91,85 @@ def _next_aligned(interval: float, now: float | None = None) -> float:
     return midnight + slots * interval
 
 
+def _next_at(
+    hhmm: str,
+    now: float | None = None,
+    *,
+    skip_day: tuple[int, int, int] | None = None,
+    tz: tzinfo | None = None,
+) -> float:
+    # The next occurrence of a wall-clock time "HH:MM" after now, in
+    # epoch seconds, in local time (or `tz`, an injection point for
+    # tests): today if still ahead, otherwise a following day. A
+    # candidate is only accepted when the clock actually reads that
+    # time, so on the night the clocks go forward a time that does not
+    # exist is skipped to the next day rather than shifted; and
+    # `skip_day` names a date already fired on, so on the night they go
+    # back the repeated hour does not fire twice.
+
+    hours, minutes = _parse_hhmm(hhmm)
+    moment = time.time() if now is None else now
+    today = datetime.fromtimestamp(moment, tz).date()
+
+    for days in range(0, 4):
+        day = today + timedelta(days=days)
+        candidate = datetime(day.year, day.month, day.day, hours, minutes, tzinfo=tz)
+        stamp = candidate.timestamp()
+
+        if stamp <= moment:
+            continue
+
+        reads = datetime.fromtimestamp(stamp, tz)
+        if (reads.hour, reads.minute) != (hours, minutes):
+            continue
+        if skip_day is not None and (reads.year, reads.month, reads.day) == skip_day:
+            continue
+
+        return stamp
+
+    raise ValueError(f"no occurrence of {hhmm!r} found in the coming days")
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    match = (
+        re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+        if isinstance(value, str)
+        else None
+    )
+    if match is None:
+        raise ValueError(f"time of day {value!r} is not HH:MM, such as '22:00'")
+
+    hours, minutes = int(match.group(1)), int(match.group(2))
+    if hours > 23 or minutes > 59:
+        raise ValueError(f"time of day {value!r} is out of range")
+
+    return hours, minutes
+
+
 class Schedule:
-    """A handle on a repeating callback registered with every(); cancel()
+    """A handle on a callback registered with every() or once(); cancel()
     stops it, and `fired` counts how many times it has run."""
 
     def __init__(
-        self, callback: Callable[[], Any], interval: float, align: bool, name: str
+        self,
+        callback: Callable[[], Any],
+        interval: float,
+        align: bool,
+        name: str,
+        *,
+        repeat: bool = True,
     ) -> None:
         self._callback = callback
         self._interval = interval
         self._align = align
         self._name = name
+        self._repeat = repeat
         self._cancelled = False
         self.fired = 0
 
     def __repr__(self) -> str:
+        if not self._repeat:
+            return f"Schedule({self._name!r}, once after {self._interval})"
         return f"Schedule({self._name!r}, every={self._interval}, align={self._align})"
 
     @property
@@ -197,7 +262,7 @@ class _Scheduler:
             schedule._fire()
 
             with self._condition:
-                if not schedule.cancelled:
+                if schedule._repeat and not schedule.cancelled:
                     due = time.monotonic() + schedule._delay()
                     heapq.heappush(self._heap, (due, next(self._counter), schedule))
 
@@ -217,5 +282,16 @@ def every(
     `align` is true, and return the Schedule handle to cancel it."""
 
     schedule = Schedule(callback, parse_duration(interval), align, name)
+    _scheduler.add(schedule)
+    return schedule
+
+
+def once(
+    callback: Callable[[], Any], delay: float, *, name: str = "callback"
+) -> Schedule:
+    """Run `callback` once, `delay` seconds from now on the monotonic
+    clock, and return the Schedule handle to cancel it."""
+
+    schedule = Schedule(callback, max(0.0, float(delay)), False, name, repeat=False)
     _scheduler.add(schedule)
     return schedule

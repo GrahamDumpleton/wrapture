@@ -342,8 +342,21 @@ def test_an_unknown_path_variable_fails_at_construction(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown variable {seq}"):
         JSONLines(tmp_path / "trace-{seq}.jsonl")
 
-    with pytest.raises(ValueError, match="only has a value inside a window"):
-        JSONLines(tmp_path / "trace-{run}.jsonl")
+    # Window variables are accepted; they fail at first open when no
+    # window has supplied a context, counted as a sink error.
+
+    sink = JSONLines(tmp_path / "trace-{run}.jsonl")
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(sink):
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            Gateway().charge(1)
+            sink.flush()
+
+    sink.close()
+
+    assert sink.errors >= 1
 
 
 def test_rotate_on_an_untimed_path_warns_and_align_needs_rotate(

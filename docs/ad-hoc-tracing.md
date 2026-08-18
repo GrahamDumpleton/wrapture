@@ -674,6 +674,12 @@ filter = { path = "myapp.orders:*" }
 There is no top-level sampling key: sampling belongs to the sink it
 gates, and a whole-config rate is one `sample` on each entry.
 
+Sinks in `[[sink]]` listen for the life of the process. For sinks
+that should listen only for a while, on a schedule or on demand, and
+for collectors that produce periodic reports, see
+[Windows](windows.md), whose `[[window.collect]]` entries use this
+same grammar.
+
 One nesting case exists, for a factory sink that is a container in
 its own right, routing or fanning out internally: it takes the
 sinks it routes to under `to`, written as `[[sink.to]]` entries and

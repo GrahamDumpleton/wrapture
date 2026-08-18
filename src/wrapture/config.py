@@ -44,6 +44,7 @@ from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
 from .events import Event
 from .exceptions import ConfigError, ConfigWarning
+from .outputs import OutputPath
 from .sinks import (
     Depth,
     Fanout,
@@ -56,6 +57,7 @@ from .sinks import (
     remove_sink,
 )
 from .timeline import Tape
+from .windows import Window
 
 
 def _strings(value: Any, *, key: str, where: str) -> tuple[str, ...]:
@@ -276,11 +278,12 @@ class AppliedConfig:
     takes everything down again.
     """
 
-    def __init__(self, sink: Sink | None) -> None:
+    def __init__(self, sink: Sink | None, windows: Sequence[Window] = ()) -> None:
         self._lock = threading.Lock()
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
         self._sink = sink
+        self._windows = tuple(windows)
         self._reverted = False
         self._suspended = False
         self._applying = False
@@ -294,10 +297,15 @@ class AppliedConfig:
 
     @property
     def sink(self) -> Sink | None:
-        """The process sink the config registered, as registered: with
-        sampling configured this is the wrapping Sample."""
+        """The process sink the config registered."""
 
         return self._sink
+
+    @property
+    def windows(self) -> tuple[Window, ...]:
+        """The windows the config started."""
+
+        return self._windows
 
     @property
     def pending(self) -> tuple[ObserveEntry, ...]:
@@ -321,6 +329,11 @@ class AppliedConfig:
             pending = list(self._pending)
 
         lines = [f"sink: {self._sink!r}" if self._sink is not None else "sink: none"]
+
+        if self._windows:
+            lines.append("windows:")
+            for window in self._windows:
+                lines.append(f"  {window!r}: {window.describe()}")
 
         lines.append("applied:" if bindings else "applied: none")
         for bound in bindings:
@@ -384,6 +397,9 @@ class AppliedConfig:
         for bound in reversed(bindings):
             bound.remove()
 
+        for window in self._windows:
+            window.stop()
+
         if self._sink is not None:
             remove_sink(self._sink)
 
@@ -414,6 +430,7 @@ class Config:
         *,
         observe: Sequence[ObserveEntry] = (),
         sink: Sink | None = None,
+        windows: Sequence[Window] = (),
         setup: Sequence[SetupEntry] = (),
         capture: CapturePolicy | str | None = None,
         inherit: bool = True,
@@ -423,7 +440,9 @@ class Config:
         `observe` is the ObserveEntry rules to bind. `sink` is the
         process sink events flow to; several destinations are one
         Fanout, and sampling, depth limiting and filtering are the
-        combinators wrapped around the sink they gate. `setup` is the
+        combinators wrapped around the sink they gate. `windows` are
+        the Window objects to start, whose contents listen or collect
+        only while a run is open. `setup` is the
         SetupEntry callbacks to register. `capture` overrides the
         capture level on every binding the config creates, in the
         forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
@@ -451,6 +470,12 @@ class Config:
         if sink is not None:
             _reject_tapes(sink)
 
+        for window in windows:
+            if not isinstance(window, Window):
+                raise ConfigError(f"windows must be Window instances, got {window!r}")
+            for inner in window.sinks:
+                _reject_tapes(inner)
+
         if not isinstance(inherit, bool):
             raise ConfigError(f"inherit must be true or false, got {inherit!r}")
 
@@ -462,6 +487,7 @@ class Config:
 
         self._observe = tuple(observe)
         self._sink = sink
+        self._windows = tuple(windows)
         self._setup = tuple(setup)
         self._capture = capture
         self._inherit = inherit
@@ -477,6 +503,12 @@ class Config:
         """The sink this config registers."""
 
         return self._sink
+
+    @property
+    def windows(self) -> tuple[Window, ...]:
+        """The windows this config starts."""
+
+        return self._windows
 
     @property
     def setup(self) -> tuple[SetupEntry, ...]:
@@ -501,8 +533,8 @@ class Config:
         """Install everything this config describes, returning the
         live record of what was installed.
 
-        The sink is registered as a process sink first. Observe
-        entries defer: a
+        The sink is registered as a process sink first and the windows
+        are started. Observe entries defer: a
         post-import hook is registered per target module, which fires
         immediately when the module is already imported and otherwise
         when the application imports it, so applying never imports a
@@ -523,7 +555,7 @@ class Config:
         if self._sink is not None:
             installed = add_sink(self._sink)
 
-        record = AppliedConfig(installed)
+        record = AppliedConfig(installed, self._windows)
 
         # While the applying flag is set, a hook firing synchronously
         # (its module already imported) propagates errors out of this
@@ -533,6 +565,9 @@ class Config:
 
         record._applying = True
         try:
+            for window in self._windows:
+                window.start()
+
             for entry in self._observe:
                 record._adopt(entry)
                 _register_observe(entry, self._capture, record)
@@ -550,6 +585,14 @@ class Config:
 
         _watch(record)
         return record
+
+
+def _innermost(sink: Sink) -> Sink:
+    # The sink beneath any gating combinators the file wrapped on.
+
+    while isinstance(sink, (Filter, Depth, Sample)):
+        sink = sink._sink
+    return sink
 
 
 def _reject_tapes(sink: Sink) -> None:
@@ -1045,6 +1088,79 @@ def _build_sink(
     return sink
 
 
+_WINDOW_KEYS = {
+    "name",
+    "after",
+    "for",
+    "every",
+    "times",
+    "align",
+    "at",
+    "jitter",
+    "report",
+    "collect",
+}
+
+
+def _build_window(table: Any, *, index: int, anchor: str | None) -> Window:
+    # One [[window]] table: the trigger keys, a report template, and
+    # a collect list in the sink grammar. The Window constructor does
+    # the semantic validation; this maps TOML shapes and errors.
+
+    where = f"[[window]] entry {index}"
+
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where} must be a table, got {table!r}")
+
+    unknown = sorted(set(table) - _WINDOW_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown keys {unknown}")
+
+    name = table.get("name", f"window{index}")
+    if not isinstance(name, str) or not name:
+        raise ConfigError(f"{where}: name must be a non-empty string")
+    where = f"[[window]] {name!r}"
+
+    contents = table.get("collect", [])
+    if not isinstance(contents, list):
+        raise ConfigError(
+            f"{where}: collect must be a list of tables, written as"
+            f" [[window.collect]] entries"
+        )
+
+    collect = [
+        _build_sink(item, anchor=anchor, where=f"{where} collect entry {position}")
+        for position, item in enumerate(contents, 1)
+    ]
+
+    report = table.get("report")
+    if report is not None:
+        if not isinstance(report, str) or not report:
+            raise ConfigError(f"{where}: report must be a path template string")
+        if anchor is not None and not os.path.isabs(report):
+            report = os.path.normpath(os.path.join(anchor, report))
+
+    align = table.get("align", False)
+    if not isinstance(align, bool):
+        raise ConfigError(f"{where}: align must be true or false")
+
+    try:
+        return Window(
+            name=name,
+            after=table.get("after"),
+            duration=table.get("for"),
+            every=table.get("every"),
+            times=table.get("times"),
+            align=align,
+            at=table.get("at"),
+            jitter=table.get("jitter"),
+            collect=collect,
+            report=report,
+        )
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"{where}: {exc}") from exc
+
+
 def _build_sinks(value: Any, *, anchor: str | None = None) -> Sink:
     # The [[sink]] list: several entries fan out implicitly, so the
     # list is the fanout and a single entry is a list of one. A [sink]
@@ -1063,6 +1179,18 @@ def _build_sinks(value: Any, *, anchor: str | None = None) -> Sink:
         _build_sink(table, anchor=anchor, where=f"[[sink]] entry {index}")
         for index, table in enumerate(value, 1)
     ]
+
+    # The window variables have nothing to name outside a window, so a
+    # top-level path using them fails here rather than at first open.
+
+    for index, sink in enumerate(built, 1):
+        path = getattr(_innermost(sink), "_path", None)
+        if isinstance(path, OutputPath) and path.windowed:
+            raise ConfigError(
+                f"[[sink]] entry {index}: path {path.template!r} uses window"
+                f" variables ({{window}}, {{first}}, {{run}}), which only have"
+                f" a value inside a [[window]]"
+            )
 
     if len(built) == 1:
         return built[0]
@@ -1099,7 +1227,8 @@ def _config_from(document: Any, location: str) -> Config:
         raise ConfigError(f"{location}: config must be a TOML table")
 
     unknown = sorted(
-        set(document) - {"pythonpath", "capture", "observe", "sink", "setup", "inherit"}
+        set(document)
+        - {"pythonpath", "capture", "observe", "sink", "window", "setup", "inherit"}
     )
     if unknown:
         raise ConfigError(f"{location}: unknown config keys {unknown}")
@@ -1148,14 +1277,30 @@ def _config_from(document: Any, location: str) -> Config:
             )
         )
 
+    anchor = os.path.dirname(os.path.abspath(location))
+
     sink = None
     if "sink" in document:
-        anchor = os.path.dirname(os.path.abspath(location))
         sink = _build_sinks(document["sink"], anchor=anchor)
+
+    windows: list[Window] = []
+    if "window" in document:
+        tables = document["window"]
+        if isinstance(tables, dict):
+            raise ConfigError(
+                "window is a list of tables: write each as a [[window]] entry"
+            )
+        if not isinstance(tables, list):
+            raise ConfigError(
+                f"window must be a list of [[window]] tables, got {tables!r}"
+            )
+        for index, table in enumerate(tables, 1):
+            windows.append(_build_window(table, index=index, anchor=anchor))
 
     return Config(
         observe=observe,
         sink=sink,
+        windows=windows,
         setup=setup,
         capture=document.get("capture"),
         inherit=document.get("inherit", True),

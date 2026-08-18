@@ -218,7 +218,7 @@ def _next_seq() -> int:
         return _seq
 
 
-def _note_sink_error(sink: Sink) -> None:
+def _note_sink_error(sink: Any) -> None:
     # A broken sink must not take down the application: the error is
     # suppressed, counted on the sink, and warned about once, so a sink
     # failing on every event in a hot loop cannot flood the warnings.
@@ -518,6 +518,23 @@ class Printer(Sink):
                 self._open()
             except Exception:
                 _note_sink_error(self)
+
+    def release(self) -> None:
+        """Close the current file and hold none until the next line,
+        which opens the path afresh: the between-runs state of a
+        per-run stream inside a window. A no-op for a stream, before
+        the first line, or after close()."""
+
+        with self._lock:
+            if self._path is None or self._closed or self._file is None:
+                return
+
+            try:
+                self._file.close()
+            except Exception:
+                _note_sink_error(self)
+            self._file = None
+            self._current = None
 
     def close(self) -> None:
         """Close the file opened for `path`; lines printed after this
@@ -993,6 +1010,7 @@ def _event_record(event: Event) -> dict[str, Any]:
 
 _STOP = object()
 _REOPEN = object()
+_RELEASE = object()
 
 
 class JSONLines(Sink):
@@ -1136,22 +1154,24 @@ class JSONLines(Sink):
         self._submit(event)
 
     def _run(self) -> None:
-        # The writer owns the file for its whole life. If it cannot be
-        # opened the sink is broken: the error is counted, and the
-        # queue is drained and discarded so flush() barriers never
-        # hang and the application never blocks.
+        # The writer owns the file. It is opened on the first line and
+        # again after a release, so a per-run stream inside a window
+        # holds no file between runs. A failed open is counted and the
+        # line dropped, and the writer keeps draining so flush()
+        # barriers never hang and the application never blocks.
 
-        try:
-            stream = self._open()
-        except Exception:
-            _note_sink_error(self)
+        stream: TextIO | None = None
 
-            while True:
-                item = self._queue.get()
-                if item is _STOP:
-                    return
-                if isinstance(item, threading.Event):
-                    item.set()
+        def close_stream() -> None:
+            nonlocal stream
+            if stream is None:
+                return
+            try:
+                stream.flush()
+                stream.close()
+            except Exception:
+                _note_sink_error(self)
+            stream = None
 
         try:
             while True:
@@ -1160,28 +1180,39 @@ class JSONLines(Sink):
                 if item is _STOP:
                     break
 
+                if item is _RELEASE:
+                    close_stream()
+                    with self._lock:
+                        self._current = None
+                    continue
+
                 if item is _REOPEN:
                     # Release the current file and open whatever the
-                    # template names now. A failed reopen is counted,
-                    # and later writes fail onto the closed stream, each
-                    # counted too, so the sink degrades rather than
-                    # crashing.
+                    # template names now, so a time variable in the path
+                    # moves on to a new file.
 
+                    close_stream()
                     try:
-                        stream.flush()
-                        stream.close()
                         stream = self._open()
                     except Exception:
                         _note_sink_error(self)
                     continue
 
                 if isinstance(item, threading.Event):
-                    try:
-                        stream.flush()
-                    except Exception:
-                        _note_sink_error(self)
+                    if stream is not None:
+                        try:
+                            stream.flush()
+                        except Exception:
+                            _note_sink_error(self)
                     item.set()
                     continue
+
+                if stream is None:
+                    try:
+                        stream = self._open()
+                    except Exception:
+                        _note_sink_error(self)
+                        continue
 
                 try:
                     stream.write(item)
@@ -1194,11 +1225,7 @@ class JSONLines(Sink):
                 except Exception:
                     _note_sink_error(self)
         finally:
-            try:
-                stream.flush()
-                stream.close()
-            except Exception:
-                _note_sink_error(self)
+            close_stream()
 
     def flush(self) -> None:
         """Block briefly until every queued line is on disk."""
@@ -1234,6 +1261,25 @@ class JSONLines(Sink):
 
         try:
             self._queue.put(_REOPEN, timeout=5)
+        except queue.Full:
+            pass
+
+    def release(self) -> None:
+        """Close the current file and hold none until the next line,
+        which opens the path afresh.
+
+        The between-runs state of a per-run stream inside a window:
+        the writer thread stays, only the file is let go, so nothing
+        is held open while the window is closed. Queued lines drain
+        first. A no-op before the first line or after close().
+        """
+
+        with self._lock:
+            if not self._started or self._closed:
+                return
+
+        try:
+            self._queue.put(_RELEASE, timeout=5)
         except queue.Full:
             pass
 

@@ -66,18 +66,17 @@ class OutputPath:
     `template` is a path with optional {variable} fields; `name` is the
     value {name} expands to. Building one validates the template, so a
     misspelt variable fails where the path is given rather than when
-    the file is first opened. `windowed` allows the window variables
-    ({window}, {first}, {run}), which otherwise are an error because
-    outside a window there is nothing for them to name.
+    the file is first opened. The window variables ({window}, {first},
+    {run}) take their values from `context`, which the window holding
+    the sink sets for each run; expanding them with no context is an
+    error, since outside a window there is nothing for them to name.
     """
 
-    def __init__(
-        self, template: str | os.PathLike[str], *, name: str, windowed: bool = False
-    ) -> None:
+    def __init__(self, template: str | os.PathLike[str], *, name: str) -> None:
         self._template = os.fspath(template)
         self._name = name
-        self._windowed = windowed
         self._variables: set[str] = set()
+        self.context: Mapping[str, Any] | None = None
 
         self._validate()
 
@@ -117,12 +116,6 @@ class OutputPath:
                     f" {{{field}}}; the variables are {known}"
                 )
 
-            if field in _WINDOWED and not self._windowed:
-                raise ValueError(
-                    f"output path {self._template!r}: {{{field}}} only has a"
-                    f" value inside a window"
-                )
-
             self._variables.add(field)
 
     def __repr__(self) -> str:
@@ -142,6 +135,13 @@ class OutputPath:
         return frozenset(self._variables)
 
     @property
+    def windowed(self) -> bool:
+        """Whether the template uses a window variable, so that it names
+        a different file per run of the window holding it."""
+
+        return bool(self._variables & _WINDOWED)
+
+    @property
     def timed(self) -> bool:
         """Whether the template uses a time variable, so that expanding
         it again later can name a different file."""
@@ -157,6 +157,16 @@ class OutputPath:
         moment = _now() if when is None else when
         local = time.localtime(moment)
         utc = time.gmtime(moment)
+
+        if window is None:
+            window = self.context
+
+        if window is None and self.windowed:
+            missing = sorted(self._variables & _WINDOWED)
+            raise ValueError(
+                f"output path {self._template!r}: {missing} only have a value"
+                f" inside a window"
+            )
 
         values: dict[str, Any] = {}
 

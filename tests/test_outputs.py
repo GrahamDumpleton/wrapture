@@ -63,15 +63,24 @@ def test_values_cannot_escape_the_directory() -> None:
 
 
 def test_window_variables_need_a_window() -> None:
-    with pytest.raises(ValueError, match="only has a value inside a window"):
-        OutputPath("{window}.txt", name="x")
+    path = OutputPath("{window}-{first}-{run:03}.txt", name="x")
 
-    path = OutputPath("{window}-{first}-{run:03}.txt", name="x", windowed=True)
+    assert path.windowed
+
+    with pytest.raises(ValueError, match="only have a value inside a window"):
+        path.expand()
 
     assert (
         path.expand(window={"window": "hourly", "first": "2026-08-18", "run": 7})
         == "hourly-2026-08-18-007.txt"
     )
+
+    # The window sets a context on the path so the sink's own opens
+    # pick it up without knowing about windows.
+
+    path.context = {"window": "hourly", "first": "2026-08-18", "run": 8}
+
+    assert path.expand() == "hourly-2026-08-18-008.txt"
 
 
 @pytest.mark.parametrize(
@@ -86,7 +95,7 @@ def test_window_variables_need_a_window() -> None:
 )
 def test_bad_templates_fail_at_construction(template: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        OutputPath(template, name="x", windowed=True)
+        OutputPath(template, name="x")
 
 
 def test_open_output_creates_the_parent_directories(tmp_path: os.PathLike[str]) -> None:
