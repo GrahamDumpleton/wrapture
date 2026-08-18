@@ -31,7 +31,7 @@ directly; it is the primitive the binding mode builds on:
 application = wrapture.WSGIMiddleware(application)
 ```
 
-## The request event
+## What a request event contains
 
 Each request records one event of kind `"request"`. It is structurally
 a generator event: the synchronous application call is one phase, then
@@ -71,7 +71,7 @@ GET /orders/42?expand=items (myapp.wsgi.application)
 myapp.wsgi.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
 ```
 
-## Redaction
+## Redacting secrets from recorded requests
 
 Query strings carry secrets, so redaction is on by default and cannot
 be switched off: the values of `password`, `passwd`, `secret`,
@@ -171,7 +171,7 @@ app = wrapture.binding(
 )
 ```
 
-## Asserting on requests
+## Asserting on requests in tests
 
 The status is the result, so the existing assertion vocabulary needs
 nothing new:

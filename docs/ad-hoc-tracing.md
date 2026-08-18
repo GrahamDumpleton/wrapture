@@ -16,7 +16,7 @@ the `python -m wrapture` runner that make the whole intervention
 zero-code; and the exporters that render a recorded trace for
 Perfetto, snapshot comparisons and Mermaid diagrams.
 
-## Sinks
+## Sinks: where events go
 
 Binding points emit events; sinks consume them. The recording gate is
 "is anything listening", not "is there a timeline": a `Tape` scoped to
@@ -95,7 +95,7 @@ is a property of scoped recording, not of recording itself.
 At interpreter exit wrapture delivers everything it still owes:
 `flush()` is called on every process sink still registered, so the
 tail of a trace, usually the interesting part, is not lost in a
-sink's buffers, and any [window](windows.md) with a run open closes
+sink's buffers, and any [window](scheduled-tracing.md) with a run open closes
 it and writes its reports. `wrapture.shutdown()` performs exactly
 that operation on demand, and it is the one call to know for
 environments that tear the interpreter down without ever running
@@ -199,7 +199,7 @@ safe to leave running for a whole test suite or a long-lived process:
   Memory is bounded by the number of bound locations, however many
   events flow.
 
-Both are collectors in the sense of the [windows page](windows.md):
+Both are collectors in the sense of the [scheduled tracing page](scheduled-tracing.md):
 placed in a window they accumulate while a run is open and hand back
 a report when it closes, which is how "a summary every hour" or "one
 report for the whole process" is spelled, in code or in a config file.
@@ -279,7 +279,7 @@ generator's to spend. The same numbers are available on a tape:
 for the whole picture, covered on the
 [unit testing page](unit-testing.md).
 
-## Composing sinks
+## Composing sinks: fan-out, sampling and filtering
 
 Combinators make sinks compose like building blocks. Each is itself a
 sink wrapping others, so they nest freely:
@@ -488,7 +488,7 @@ $ jq -c 'select(.path | endswith("PaymentGateway.charge"))' trace.jsonl
 $ jq -c 'select(.exception)' trace.jsonl
 ```
 
-## Writing a sink
+## Writing your own sink
 
 The protocol is small enough that special-purpose sinks are cheap to
 write. A sink that remembers which operations ran longer than a
@@ -692,7 +692,7 @@ gates, and a whole-config rate is one `sample` on each entry.
 Sinks in `[[sink]]` listen for the life of the process. For sinks
 that should listen only for a while, on a schedule or on demand, and
 for collectors that produce periodic reports, see
-[Windows](windows.md), whose `[[window.collect]]` entries use this
+[Windows](scheduled-tracing.md), whose `[[window.collect]]` entries use this
 same grammar.
 
 One nesting case exists, for a factory sink that is a container in
@@ -732,7 +732,7 @@ anchored to the config file's own directory, as `pythonpath` entries
 are, so the file says where its output goes whatever the process's
 working directory; a factory receives its keys as written.
 
-### Setup callbacks
+### Setup callbacks: running code at apply time
 
 Declarative `[[observe]]` entries cover plain observation. Everything
 richer (behaviour pipelines, redaction policies, `when=` predicates,
@@ -818,7 +818,7 @@ the process launches from. Prepending can shadow installed modules,
 so keep such code in a distinctively named package (`wrapture_local/`
 above), never in loose generically named files.
 
-### Trust and failure
+### Trust and failure: what a bad config does
 
 A config file can name arbitrary code to run, so loading one is
 equivalent to executing code; the trust boundary is write access to
@@ -960,7 +960,7 @@ counted, and a pending entry firing while suspended arrives
 suspended too), and `revert()` takes the whole intervention down
 without restarting the application.
 
-## Exporting traces
+## Exporting traces to other tools
 
 Three exporters render a trace for existing tools rather than a
 viewer of wrapture's own. Each accepts either a `Tape` or event

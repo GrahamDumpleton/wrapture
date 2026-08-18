@@ -36,7 +36,7 @@ module scope is safe; the patch is only installed when you ask for it.
 
 A misspelled attribute name raises `AttributeError` at creation, on the
 line that made the mistake. This check is a side effect of mode detection
-(see [Binding modes](#binding-modes)), so it has two exceptions. Passing
+(see [Binding modes](#binding-modes-call-versus-attribute)), so it has two exceptions. Passing
 an explicit
 `mode=` skips detection, and a typo in such a binding only surfaces when
 `apply()` resolves the target. Passing `missing_ok=True` deliberately
@@ -88,7 +88,7 @@ access, so if a third party replaces the attribute wholesale, or removes
 the patch behind your back, the binding reports it. `repr(charge)` shows one
 of three states: `unapplied`, `active` or `displaced`.
 
-## Call behaviour
+## Call behaviour: changing what a call does
 
 Behaviour for calls is configured through the `on_call` namespace. Every
 method returns the binding, so configuration chains with `apply()`.
@@ -254,7 +254,7 @@ If applying any member fails, the members already applied are removed
 again, so a group never half-applies. `suspend()`, `resume()` and
 `apply(suspended=True)` work across the whole group.
 
-## Binding modes
+## Binding modes: call versus attribute
 
 A binding is either `callable` or `attribute` mode, detected from what is
 found at the target: functions, lambdas, staticmethods and classmethods are
@@ -502,7 +502,7 @@ list, raises `TypeError` rather than silently replacing the container
 with an iterator of a different type; call `iter()` on it first if that
 is what you want.
 
-## Escape hatch to wrapt
+## Escape hatch: dropping down to wrapt
 
 The underlying wrapt handle and the patch coordinates are exposed, so
 anything core wrapt can do remains reachable:

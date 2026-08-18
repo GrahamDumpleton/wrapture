@@ -1,4 +1,4 @@
-# Windows: listening on a schedule
+# Scheduled tracing: windows and collectors
 
 The sinks on the [ad-hoc tracing page](ad-hoc-tracing.md) listen for
 as long as they are registered, which for a config sink is the life
@@ -54,7 +54,7 @@ most recent reports (the last `retain`, default ten). A window's
 runs never overlap: `open()` while a run is in progress is refused
 and counted on `refused`.
 
-## Triggers
+## Triggers: when a window opens
 
 All optional, combinable within the rules given, durations in the
 forms `rotate=` accepts (`"30s"`, `"15m"`, `"1h"`, `"1h30m"`, or a
@@ -96,7 +96,7 @@ next opens, a report at every boundary. `for` shorter than `every`
 is the sampled shape; `for` equal to or longer than `every` is
 refused, since runs never overlap.
 
-## Reports and where they go
+## Reports: what a run produces and where it goes
 
 At each run close every collector produces a `Report`. All reports
 share a header, `kind` (the collector type), `name`, `window`, `run`
@@ -138,7 +138,7 @@ repeating window that names the same file for every run (no run or
 time variable) rewrites it each time, and is warned about where the
 window is built.
 
-## The built-in collectors
+## Built-in collectors: Counter and Aggregate
 
 `Counter` and `Aggregate` are introduced on the
 [ad-hoc tracing page](ad-hoc-tracing.md#counting-without-retaining);
@@ -302,7 +302,7 @@ Pre-fork servers give each worker its own windows, so "one report an
 hour" is one per worker per hour; put `{pid}` in the report path and
 use `jitter` to spread aligned openings.
 
-## Writing a collector
+## Writing your own collector
 
 A collector satisfies the `Collector` protocol: `arm()` and
 `disarm()` are called at run open and close, `report(run)` renders

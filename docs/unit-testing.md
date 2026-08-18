@@ -615,7 +615,7 @@ downstream; the event is marked instead. `tree()` renders the mark as
 `(injected)`, and `events.injected()` / `events.injected(False)` filter
 on it.
 
-### Annotation
+### Annotating events with your own data
 
 Where the capture policy is a blanket setting, annotation is targeted:
 from inside a `decorates()` handler, or anywhere in observed code,
@@ -635,7 +635,7 @@ recording it is a silent no-op, so observed code can call it
 unconditionally. `current_event()` returns the in-flight event itself,
 or `None` when nothing is recording.
 
-### Stack capture
+### Capturing the call stack
 
 The tape's parent and child links give the logical path between
 observed points; they say nothing about the unobserved frames in
@@ -712,7 +712,7 @@ Where an empty log would lie, access is a loud error instead: reading
 and `RuntimeError` outside a timeline. "Recorded nothing" and "was not
 recording" can therefore never be confused.
 
-### One naming rule
+### One naming rule for filters
 
 > A method whose name starts with `assert_` raises, immediately. One
 > starting with `expect_` declares, and is checked when the timeline
@@ -752,7 +752,7 @@ AssertionError: expected exactly 1 event(s), got 0
         Gateway.charge(amount=500, currency='USD')
 ```
 
-### Asserting
+### Asserting on the recording
 
 The assertions are `assert_never()`, `assert_any()`, `assert_once()`,
 `assert_times(n)`, `assert_at_least(n)` and `assert_at_most(n)`. Each

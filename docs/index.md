@@ -88,7 +88,7 @@ unit-testing
 ad-hoc-tracing
 wsgi-tracing
 asgi-tracing
-windows
+scheduled-tracing
 known-limitations
 release-notes
 ```

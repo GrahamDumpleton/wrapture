@@ -38,7 +38,7 @@ request-and-response shape of the `"request"` event, and would want
 event kinds of their own. WSGI applications are the sibling design,
 covered by [WSGI request tracing](wsgi-tracing.md).
 
-## The request event
+## What a request event contains
 
 Each request records one event of kind `"request"`, the same shape
 the WSGI middleware records, so sinks, filters, assertions and
@@ -92,7 +92,7 @@ GET /orders/42?expand=items (myapp.main.application)
 myapp.main.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
 ```
 
-## Redaction
+## Redacting secrets from recorded requests
 
 Query string redaction is identical to the WSGI middleware's,
 because it is the same machinery: the built-in sensitive set
@@ -101,7 +101,7 @@ always redacted, `redact()` names add to it with the same vocabulary
 used for call arguments, redacted names pertain to query string
 parameters only and never to the data fields, and a query string
 that cannot be processed is recorded as the marker wholesale. See
-[the WSGI page](wsgi-tracing.md#redaction) for the full list and the
+[the WSGI page](wsgi-tracing.md#redacting-secrets-from-recorded-requests) for the full list and the
 scope of what redaction can and cannot see.
 
 ```python
@@ -183,7 +183,7 @@ app = wrapture.binding(
 )
 ```
 
-## Asserting on requests
+## Asserting on requests in tests
 
 The status is the result, so the existing assertion vocabulary needs
 nothing new:
