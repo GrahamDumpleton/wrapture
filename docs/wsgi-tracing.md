@@ -202,7 +202,7 @@ name = "application"
 mode = "wsgi"
 redact = ["signature"]
 
-[sink]
+[[sink]]
 type = "jsonlines"
 path = "trace.jsonl"
 ```

@@ -18,5 +18,5 @@ name = "quote"
 module = "flask"
 call = "wrapture_local.flask_support:instrument"
 
-[sink]
+[[sink]]
 type = "printer"

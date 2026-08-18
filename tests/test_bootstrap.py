@@ -51,7 +51,7 @@ def _config_text() -> str:
         target = "{__name__}:Gateway"
         name = "charge"
 
-        [sink]
+        [[sink]]
         type = "{__name__}:make_collector"
         """
     )

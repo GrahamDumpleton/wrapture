@@ -25,6 +25,7 @@ any other file the process imports.
 from __future__ import annotations
 
 import atexit
+import fnmatch
 import importlib
 import os
 import sys
@@ -34,13 +35,14 @@ import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
-from typing import Any
+from typing import Any, cast
 
 import wrapt
 
 from .bindings import Binding, _select_members, binding
 from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
+from .events import Event
 from .exceptions import ConfigError, ConfigWarning
 from .sinks import (
     Depth,
@@ -414,18 +416,17 @@ class Config:
         sink: Sink | None = None,
         setup: Sequence[SetupEntry] = (),
         capture: CapturePolicy | str | None = None,
-        sample: float | None = None,
         inherit: bool = True,
     ) -> None:
         """Validate and hold a tracing setup, applying nothing yet.
 
         `observe` is the ObserveEntry rules to bind. `sink` is the
-        process sink events flow to. `setup` is the SetupEntry
-        callbacks to register. `capture` overrides the capture level
-        on every binding the config creates, in the forms binding()
-        accepts. `sample` keeps only that fraction of call trees, by
-        wrapping the sink in Sample at apply time, so it requires a
-        sink. `inherit=False` strips wrapture's autowrapt trigger
+        process sink events flow to; several destinations are one
+        Fanout, and sampling, depth limiting and filtering are the
+        combinators wrapped around the sink they gate. `setup` is the
+        SetupEntry callbacks to register. `capture` overrides the
+        capture level on every binding the config creates, in the
+        forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
         from the environment after a successful apply, so Python
         processes this one launches by exec or spawn start untraced;
         the default leaves the environment alone, since launched
@@ -459,24 +460,10 @@ class Config:
             except ValueError as exc:
                 raise ConfigError(f"capture: {exc}") from None
 
-        if sample is not None:
-            if not isinstance(sample, (int, float)) or isinstance(sample, bool):
-                raise ConfigError(
-                    f"sample must be a number between 0.0 and 1.0, got {sample!r}"
-                )
-            if not 0.0 <= sample <= 1.0:
-                raise ConfigError(f"sample must be between 0.0 and 1.0, got {sample!r}")
-            if sink is None:
-                raise ConfigError(
-                    "sample requires a sink; there is nothing else for"
-                    " sampling to apply to"
-                )
-
         self._observe = tuple(observe)
         self._sink = sink
         self._setup = tuple(setup)
         self._capture = capture
-        self._sample = sample
         self._inherit = inherit
 
     @property
@@ -487,7 +474,7 @@ class Config:
 
     @property
     def sink(self) -> Sink | None:
-        """The sink this config registers, before any Sample wrapping."""
+        """The sink this config registers."""
 
         return self._sink
 
@@ -504,12 +491,6 @@ class Config:
         return self._capture
 
     @property
-    def sample(self) -> float | None:
-        """The fraction of call trees kept, or None for all of them."""
-
-        return self._sample
-
-    @property
     def inherit(self) -> bool:
         """Whether launched Python processes inherit the autowrapt
         trigger; False strips it after a successful apply."""
@@ -520,8 +501,8 @@ class Config:
         """Install everything this config describes, returning the
         live record of what was installed.
 
-        The sink is registered as a process sink first, wrapped in
-        Sample when sampling is configured. Observe entries defer: a
+        The sink is registered as a process sink first. Observe
+        entries defer: a
         post-import hook is registered per target module, which fires
         immediately when the module is already imported and otherwise
         when the application imports it, so applying never imports a
@@ -540,10 +521,7 @@ class Config:
 
         installed: Sink | None = None
         if self._sink is not None:
-            registered = self._sink
-            if self._sample is not None:
-                registered = Sample(self._sample, registered)
-            installed = add_sink(registered)
+            installed = add_sink(self._sink)
 
         record = AppliedConfig(installed)
 
@@ -897,28 +875,107 @@ def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
     )
 
 
-# The sinks a config file can name without a module:attr reference.
-# Deliberately only the sinks that are useful with no Python in play:
-# the in-memory sinks and the combinators need code to consume or
-# compose them, and a factory reference covers those.
+# The sinks a config file can name by short name. Deliberately only the
+# event streams: the combinators are reached through the [[sink]] list
+# (several entries fan out) and the gating keys on each entry (sample,
+# depth, filter), and anything else through a module:attr factory.
 
 _BUILTIN_SINKS: dict[str, Callable[..., Sink]] = {
     "printer": Printer,
     "jsonlines": JSONLines,
 }
 
+_FILTER_FIELDS = ("kind", "path", "label")
 
-def _build_sink(table: Any, *, anchor: str | None = None) -> Sink:
-    # Construct the sink a [sink] table describes: a builtin short
+
+def _filter_predicate(spec: Any, *, where: str) -> Callable[[Event], bool]:
+    # A sink's filter key: either a module:attr reference to a
+    # predicate, or a table of event field to pattern, matching an
+    # event when every field matches (fnmatchcase on the string form,
+    # a list meaning any of them).
+
+    if isinstance(spec, str):
+        predicate = _resolve_reference(spec, key="filter", where=where)
+        if not callable(predicate):
+            raise ConfigError(
+                f"{where}: filter = {spec!r} resolved to {predicate!r},"
+                f" which is not callable"
+            )
+        return cast(Callable[[Event], bool], predicate)
+
+    if not isinstance(spec, dict) or not spec:
+        raise ConfigError(
+            f"{where}: filter must be a table of event fields to match, such"
+            f' as {{ kind = "request" }}, or a module:attr predicate, got'
+            f" {spec!r}"
+        )
+
+    matchers: list[tuple[str, tuple[str, ...]]] = []
+    for name, value in spec.items():
+        if name not in _FILTER_FIELDS:
+            raise ConfigError(
+                f"{where}: filter field {name!r} is not one of {_FILTER_FIELDS}"
+            )
+        matchers.append((name, _strings(value, key=f"filter.{name}", where=where)))
+
+    def matches(event: Event) -> bool:
+        for name, patterns in matchers:
+            actual = getattr(event, name, None)
+            text = "" if actual is None else str(actual)
+            if not any(fnmatch.fnmatchcase(text, pattern) for pattern in patterns):
+                return False
+        return True
+
+    return matches
+
+
+def _build_sink(
+    table: Any, *, anchor: str | None = None, where: str = "[[sink]]"
+) -> Sink:
+    # Construct the sink one [[sink]] table describes: a builtin short
     # name or a module:attr factory, called with the remaining keys as
     # keyword arguments, resolved and validated now because a sink
-    # must exist before events can flow.
+    # must exist before events can flow. The gating keys (sample,
+    # depth, filter) wrap the built sink in a fixed order, sample
+    # outermost then depth then filter, whatever their order in the
+    # file; a `to` list builds inner sinks for a factory that routes
+    # to others.
 
     if not isinstance(table, dict):
-        raise ConfigError(f"[sink] must be a table, got {table!r}")
+        raise ConfigError(f"{where} must be a table, got {table!r}")
 
     spec = dict(table)
     reference = spec.pop("type", None)
+    sample = spec.pop("sample", None)
+    depth = spec.pop("depth", None)
+    filter_spec = spec.pop("filter", None)
+    inner = spec.pop("to", None)
+
+    if not isinstance(reference, str) or not reference:
+        raise ConfigError(
+            f"{where} requires a type key naming a builtin sink or a module:attr"
+            f" factory"
+        )
+
+    if sample is not None:
+        if (
+            not isinstance(sample, (int, float))
+            or isinstance(sample, bool)
+            or not 0.0 <= sample <= 1.0
+        ):
+            raise ConfigError(
+                f"{where}: sample must be a number between 0.0 and 1.0, got {sample!r}"
+            )
+
+    if depth is not None:
+        if not isinstance(depth, int) or isinstance(depth, bool) or depth < 1:
+            raise ConfigError(
+                f"{where}: depth must be a positive integer, got {depth!r}"
+            )
+
+    predicate = (
+        _filter_predicate(filter_spec, where=where) if filter_spec is not None else None
+    )
 
     # A builtin sink's relative output path anchors to the config
     # file's directory, as pythonpath entries do, so the file says
@@ -931,41 +988,85 @@ def _build_sink(table: Any, *, anchor: str | None = None) -> Sink:
         if isinstance(path, str) and path and not os.path.isabs(path):
             spec["path"] = os.path.normpath(os.path.join(anchor, path))
 
-    if not isinstance(reference, str) or not reference:
-        raise ConfigError(
-            "[sink] requires a type key naming a builtin sink or a module:attr factory"
-        )
-
     if ":" in reference:
-        factory = _resolve_reference(reference, key="type", where="[sink]")
+        factory = _resolve_reference(reference, key="type", where=where)
         if not callable(factory):
             raise ConfigError(
-                f"[sink]: type = {reference!r} resolved to {factory!r},"
+                f"{where}: type = {reference!r} resolved to {factory!r},"
                 f" which is not callable"
             )
     else:
+        if inner is not None:
+            raise ConfigError(
+                f"{where}: to only applies to a module:attr factory that"
+                f" routes to other sinks; {reference!r} is a builtin sink"
+            )
         try:
             factory = _BUILTIN_SINKS[reference]
         except KeyError:
             raise ConfigError(
-                f"[sink]: type {reference!r} is not a builtin sink"
+                f"{where}: type {reference!r} is not a builtin sink"
                 f" (one of {sorted(_BUILTIN_SINKS)}) or a module:attr"
                 f" factory"
             ) from None
 
+    if inner is not None:
+        if not isinstance(inner, list) or not inner:
+            raise ConfigError(
+                f"{where}: to must be a list of sink tables, written as"
+                f" [[{where.strip('[]')}.to]] entries"
+            )
+        spec["to"] = [
+            _build_sink(item, anchor=anchor, where=f"{where} to entry {index}")
+            for index, item in enumerate(inner, 1)
+        ]
+
     try:
-        sink = factory(**spec)
+        built = factory(**spec)
     except Exception as exc:
         raise ConfigError(
-            f"[sink]: constructing type {reference!r} failed: {exc}"
+            f"{where}: constructing type {reference!r} failed: {exc}"
         ) from exc
 
-    if not isinstance(sink, Sink):
+    if not isinstance(built, Sink):
         raise ConfigError(
-            f"[sink]: type {reference!r} returned {type(sink).__name__!r}, not a Sink"
+            f"{where}: type {reference!r} returned {type(built).__name__!r}, not a Sink"
         )
 
+    sink: Sink = built
+
+    if predicate is not None:
+        sink = Filter(predicate, sink)
+    if depth is not None:
+        sink = Depth(depth, sink)
+    if sample is not None:
+        sink = Sample(sample, sink)
+
     return sink
+
+
+def _build_sinks(value: Any, *, anchor: str | None = None) -> Sink:
+    # The [[sink]] list: several entries fan out implicitly, so the
+    # list is the fanout and a single entry is a list of one. A [sink]
+    # table is the one likely misspelling, named in the error.
+
+    if isinstance(value, dict):
+        raise ConfigError(
+            "sink is a list of tables: write each destination as a [[sink]]"
+            " entry, not a [sink] table"
+        )
+
+    if not isinstance(value, list) or not value:
+        raise ConfigError(f"sink must be a list of [[sink]] tables, got {value!r}")
+
+    built = [
+        _build_sink(table, anchor=anchor, where=f"[[sink]] entry {index}")
+        for index, table in enumerate(value, 1)
+    ]
+
+    if len(built) == 1:
+        return built[0]
+    return Fanout(*built)
 
 
 def _entry_table(
@@ -998,8 +1099,7 @@ def _config_from(document: Any, location: str) -> Config:
         raise ConfigError(f"{location}: config must be a TOML table")
 
     unknown = sorted(
-        set(document)
-        - {"pythonpath", "capture", "sample", "observe", "sink", "setup", "inherit"}
+        set(document) - {"pythonpath", "capture", "observe", "sink", "setup", "inherit"}
     )
     if unknown:
         raise ConfigError(f"{location}: unknown config keys {unknown}")
@@ -1051,14 +1151,13 @@ def _config_from(document: Any, location: str) -> Config:
     sink = None
     if "sink" in document:
         anchor = os.path.dirname(os.path.abspath(location))
-        sink = _build_sink(document["sink"], anchor=anchor)
+        sink = _build_sinks(document["sink"], anchor=anchor)
 
     return Config(
         observe=observe,
         sink=sink,
         setup=setup,
         capture=document.get("capture"),
-        sample=document.get("sample"),
         inherit=document.get("inherit", True),
     )
 

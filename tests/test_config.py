@@ -265,32 +265,6 @@ def test_the_capture_override_applies_to_every_binding() -> None:
     assert event.arguments is None
 
 
-def test_sample_wraps_the_registered_sink() -> None:
-    # Sampling wraps the sink at registration: rate 0.0 keeps no call
-    # trees, so the inner sink hears nothing at all.
-
-    collector = Collector()
-    config = Config(
-        observe=[ObserveEntry(target=__name__, name="parse_widget")],
-        sink=collector,
-        sample=0.0,
-    )
-
-    applied = config.apply()
-    try:
-        assert isinstance(applied.sink, Sample)
-        parse_widget("gear")
-    finally:
-        _unwind(applied)
-
-    assert collector.entered == []
-
-
-def test_sample_requires_a_sink() -> None:
-    with pytest.raises(ConfigError, match="sample requires a sink"):
-        Config(sample=0.5)
-
-
 def test_a_failed_apply_leaves_nothing_behind() -> None:
     # The second entry fails, so the first entry's binding and the
     # sink must both be gone again when the error propagates.
@@ -912,7 +886,6 @@ def test_load_config_reads_the_full_schema(
             f"""
             pythonpath = "ops"
             capture = "summary"
-            sample = 0.5
 
             [[observe]]
             target = "{__name__}:OrderService"
@@ -923,7 +896,7 @@ def test_load_config_reads_the_full_schema(
             target = "{__name__}"
             name = ["parse_widget"]
 
-            [sink]
+            [[sink]]
             type = "cfgtest_sinks:make_sink"
             tag = "from-config"
 
@@ -954,7 +927,6 @@ def test_load_config_reads_the_full_schema(
     assert setup.call == f"{__name__}:_note_setup"
 
     assert config.capture == "summary"
-    assert config.sample == 0.5
 
 
 def test_load_config_builds_builtin_sinks(tmp_path: Path) -> None:
@@ -963,9 +935,8 @@ def test_load_config_builds_builtin_sinks(tmp_path: Path) -> None:
     # Windows form would not even parse.
 
     source = tmp_path / "trace.toml"
-    source.write_text(
-        f'[sink]\ntype = "jsonlines"\npath = "{(tmp_path / "out.jsonl").as_posix()}"\n'
-    )
+    out = (tmp_path / "out.jsonl").as_posix()
+    source.write_text(f'[[sink]]\ntype = "jsonlines"\npath = "{out}"\n')
 
     config = load_config(source)
 
@@ -977,7 +948,7 @@ def test_load_config_passes_printer_options_through(tmp_path: Path) -> None:
 
     source = tmp_path / "trace.toml"
     source.write_text(
-        '[sink]\ntype = "printer"\n'
+        '[[sink]]\ntype = "printer"\n'
         f'path = "{(tmp_path / "trace.log").as_posix()}"\n'
         "timestamps = true\ntiming = false\n"
     )
@@ -1002,7 +973,9 @@ def test_a_relative_sink_path_anchors_to_the_config_file(tmp_path: Path) -> None
     home = tmp_path / "deploy"
     home.mkdir()
     source = home / "trace.toml"
-    source.write_text('[sink]\ntype = "jsonlines"\npath = "logs/trace-{date}.jsonl"\n')
+    source.write_text(
+        '[[sink]]\ntype = "jsonlines"\npath = "logs/trace-{date}.jsonl"\n'
+    )
 
     config = load_config(source)
 
@@ -1012,15 +985,221 @@ def test_a_relative_sink_path_anchors_to_the_config_file(tmp_path: Path) -> None
 
 def test_a_bad_sink_path_template_is_a_config_error(tmp_path: Path) -> None:
     source = tmp_path / "trace.toml"
-    source.write_text('[sink]\ntype = "jsonlines"\npath = "trace-{seq}.jsonl"\n')
+    source.write_text('[[sink]]\ntype = "jsonlines"\npath = "trace-{seq}.jsonl"\n')
 
     with pytest.raises(ConfigError, match="unknown variable {seq}"):
         load_config(source)
 
 
+# Module-level helpers the sink grammar tests reference from TOML by
+# module:attr, so nothing has to be written to disk.
+
+_made: list[Any] = []
+
+
+class OptionCollector(Collector):
+    def __init__(self, **options: Any) -> None:
+        super().__init__()
+        self.options = options
+
+
+def make_collector(**options: Any) -> Sink:
+    collector = OptionCollector(**options)
+    _made.append(collector)
+    return collector
+
+
+class Router(Sink):
+    def __init__(self, to: list[Sink], **options: Any) -> None:
+        self.to = to
+        self.options = options
+
+
+def make_router(**options: Any) -> Sink:
+    router = Router(**options)
+    _made.append(router)
+    return router
+
+
+def only_requests(event: Event) -> bool:
+    return event.kind == "request"
+
+
+def test_several_sink_entries_fan_out(tmp_path: Path) -> None:
+    from wrapture import Fanout, Printer
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[sink]]
+            type = "printer"
+
+            [[sink]]
+            type = "{__name__}:make_collector"
+            tag = "second"
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Fanout)
+    printer, collector = config.sink._sinks
+    assert isinstance(printer, Printer)
+    assert isinstance(collector, OptionCollector)
+    assert collector.options == {"tag": "second"}
+
+
+def test_a_single_sink_table_is_named_in_the_error(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text('[sink]\ntype = "printer"\n')
+
+    with pytest.raises(ConfigError, match=r"write each destination as a \[\[sink\]\]"):
+        load_config(source)
+
+
+def test_gating_keys_wrap_the_sink_in_a_fixed_order(tmp_path: Path) -> None:
+    # sample outermost, then depth, then filter, whatever the order of
+    # the keys in the file.
+
+    from wrapture import Depth, Filter
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[sink]]
+            filter = {{ kind = "request" }}
+            depth = 2
+            type = "{__name__}:make_collector"
+            sample = 0.5
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Sample)
+    depth = config.sink._sink
+    assert isinstance(depth, Depth)
+    filtered = depth._sink
+    assert isinstance(filtered, Filter)
+    assert isinstance(filtered._sink, Collector)
+
+
+def test_a_filter_table_matches_event_fields(tmp_path: Path) -> None:
+    from wrapture import Filter
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[sink]]
+            type = "{__name__}:make_collector"
+            filter = {{ kind = ["call", "get"], path = "shop.*" }}
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Filter)
+    predicate = config.sink._predicate
+
+    assert predicate(Event(kind="call", path="shop.Gateway.charge"))
+    assert predicate(Event(kind="get", path="shop.Gateway.limit"))
+    assert not predicate(Event(kind="request", path="shop.app"))
+    assert not predicate(Event(kind="call", path="billing.charge"))
+    assert not predicate(Event(kind="call", path="billing.charge", label="shop.x"))
+
+
+def test_a_filter_reference_names_a_predicate(tmp_path: Path) -> None:
+    from wrapture import Filter
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[sink]]
+            type = "{__name__}:make_collector"
+            filter = "{__name__}:only_requests"
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Filter)
+    assert config.sink._predicate is only_requests
+
+
+@pytest.mark.parametrize(
+    ("keys", "message"),
+    [
+        ("sample = 2", "sample must be a number between 0.0 and 1.0"),
+        ("sample = true", "sample must be a number between 0.0 and 1.0"),
+        ("depth = 0", "depth must be a positive integer"),
+        ('filter = { thread = "x" }', "filter field 'thread' is not one of"),
+        ('filter = "nonsense"', "filter must name a module and an attribute"),
+        ("filter = 3", "filter must be a table of event fields"),
+        ("to = []", "to only applies to a module:attr factory"),
+    ],
+)
+def test_bad_gating_keys_fail_at_load(tmp_path: Path, keys: str, message: str) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(f'[[sink]]\ntype = "printer"\n{keys}\n')
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(source)
+
+
+def test_a_factory_takes_inner_sinks_under_to(tmp_path: Path) -> None:
+    # The one nesting case: a routing factory receives its inner sinks,
+    # each built with the same grammar and gating keys, as to=[...].
+
+    from wrapture import Depth, Printer
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[sink]]
+            type = "{__name__}:make_router"
+            tag = "outer"
+
+            [[sink.to]]
+            type = "printer"
+            depth = 1
+
+            [[sink.to]]
+            type = "{__name__}:make_collector"
+            filter = {{ kind = "request" }}
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Router)
+    assert config.sink.options == {"tag": "outer"}
+    printer, collector = config.sink.to
+    assert isinstance(printer, Depth)
+    assert isinstance(printer._sink, Printer)
+    assert type(collector).__name__ == "Filter"
+
+
+def test_top_level_sample_is_no_longer_a_key(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text('sample = 0.5\n[[sink]]\ntype = "printer"\n')
+
+    with pytest.raises(ConfigError, match=r"unknown config keys \['sample'\]"):
+        load_config(source)
+
+
 def test_an_unknown_builtin_sink_fails_loudly(tmp_path: Path) -> None:
     source = tmp_path / "trace.toml"
-    source.write_text('[sink]\ntype = "carrier-pigeon"\n')
+    source.write_text('[[sink]]\ntype = "carrier-pigeon"\n')
 
     with pytest.raises(ConfigError, match="not a builtin sink"):
         load_config(source)
@@ -1028,7 +1207,7 @@ def test_an_unknown_builtin_sink_fails_loudly(tmp_path: Path) -> None:
 
 def test_a_factory_must_return_a_sink(tmp_path: Path) -> None:
     source = tmp_path / "trace.toml"
-    source.write_text(f'[sink]\ntype = "{__name__}:parse_widget"\ntext = "x"\n')
+    source.write_text(f'[[sink]]\ntype = "{__name__}:parse_widget"\ntext = "x"\n')
 
     with pytest.raises(ConfigError, match="not a Sink"):
         load_config(source)

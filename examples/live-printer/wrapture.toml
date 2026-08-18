@@ -15,5 +15,5 @@ exclude = "_*"
 target = "shop:Ledger"
 name = "record"
 
-[sink]
+[[sink]]
 type = "printer"

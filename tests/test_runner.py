@@ -159,7 +159,7 @@ def _write_traced_app(tmp: Path) -> None:
             target = "applib"
             name = "parse"
 
-            [sink]
+            [[sink]]
             type = "jsonlines"
             path = "out.jsonl"
             """

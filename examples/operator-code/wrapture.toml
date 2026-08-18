@@ -5,8 +5,14 @@
 
 pythonpath = "."
 
-[sink]
-type = "wrapture_local.sinks:make_sink"
+# Two [[sink]] entries fan out: a live printer and a JSONLines file
+# whose relative path is anchored to this file's directory too.
+
+[[sink]]
+type = "printer"
+
+[[sink]]
+type = "jsonlines"
 path = "trace.jsonl"
 
 [[setup]]

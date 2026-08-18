@@ -532,7 +532,6 @@ A complete file:
 ```toml
 pythonpath = "tracing"
 capture = "summary"
-sample = 0.1
 
 [[observe]]
 target = "myapp.orders:OrderService"
@@ -547,7 +546,7 @@ name = ["charge", "refund"]
 target = "myapp.parsers"
 match = "parse_*"
 
-[sink]
+[[sink]]
 type = "jsonlines"
 path = "trace.jsonl"
 
@@ -614,8 +613,7 @@ a `ConfigWarning` at interpreter shutdown, so an empty trace has an
 explanation.
 
 The top-level `capture` key overrides the capture level on every
-binding the file creates, and `sample` keeps only that fraction of
-call trees by wrapping the sink in `Sample`.
+binding the file creates.
 
 `redact` on an entry names parameters whose values are replaced with
 `<redacted>` on that entry's bindings, everything else capturing at
@@ -625,47 +623,86 @@ bounded summaries, but a summary of a secret is still a secret, so
 tokens, card numbers and credentials should be redacted by name at
 the entry, where they never reach any sink at all.
 
-### The sink and its factory escape hatch
+### Sinks: the [[sink]] list
 
-`[sink]` names the sink with `type` and passes every other key to its
-constructor. Two builtin names cover the no-code cases: `printer` and
-`jsonlines`. Anything else is reached by `module:attr` reference: a
-callable, invoked with the remaining keys as keyword arguments, that
-must return a `Sink`. So a daily rotating trace, a printer writing
-timestamped lines to a file, and a factory composing whatever it
-likes (the file has no syntax for combinators because a factory can
-return any arrangement):
+`[[sink]]` is a list of destinations; several entries fan out
+implicitly, so the list is the fanout and a single entry is a list
+of one. Each entry names its sink with `type` and passes every other
+key to the constructor. Two builtin names cover the event streams,
+`printer` and `jsonlines`; anything else is reached by `module:attr`
+reference: a callable, invoked with the remaining keys as keyword
+arguments, that must return a `Sink`. So everything to a daily
+rotating trace plus a shallow live view is two entries:
 
 ```toml
-[sink]
+[[sink]]
 type = "jsonlines"
 path = "traces/trace-{date}-{pid}.jsonl"
 rotate = "1d"
 align = true
-```
 
-```toml
-[sink]
+[[sink]]
 type = "printer"
-path = "trace.log"
-timestamps = true
+depth = 2
 ```
 
+The `depth` key above is one of three gating keys an entry can
+carry, each the file's spelling of a combinator wrapped around that
+sink alone: `sample = 0.1` keeps that fraction of whole call trees
+(`Sample`), `depth = 2` forwards only the top levels of each tree
+(`Depth`), and `filter` forwards only matching events (`Filter`).
+`filter` is either a table of event fields to patterns, `kind`,
+`path` and `label`, each a string or list of strings matched with
+`fnmatch` rules and all of which must match, or a `module:attr`
+reference to a predicate taking the event. Several gating keys on
+one entry wrap in a fixed order however they are written, sample
+outermost, then depth, then filter innermost:
+
 ```toml
-[sink]
-type = "wrapture_local.sinks:make_sink"
-endpoint = "https://collector.internal"
+[[sink]]
+type = "printer"
+sample = 0.5
+depth = 1
+filter = { kind = "request" }
+
+[[sink]]
+type = "jsonlines"
+path = "traces/orders-{date}.jsonl"
+filter = { path = "myapp.orders:*" }
+```
+
+There is no top-level sampling key: sampling belongs to the sink it
+gates, and a whole-config rate is one `sample` on each entry.
+
+One nesting case exists, for a factory sink that is a container in
+its own right, routing or fanning out internally: it takes the
+sinks it routes to under `to`, written as `[[sink.to]]` entries and
+passed to the factory as a `to=` list of built sinks. Inner entries
+use exactly the same grammar, gating keys included, so nothing
+deepens further; anything more elaborate belongs in Python:
+
+```toml
+[[sink]]
+type = "wrapture_local.sinks:Router"
+
+[[sink.to]]
+type = "jsonlines"
+path = "traces/requests-{date}.jsonl"
+filter = { kind = "request" }
+
+[[sink.to]]
+type = "printer"
+depth = 1
 ```
 
 ```python
 # wrapture_local/sinks.py
 import wrapture
 
-def make_sink(endpoint):
-    return wrapture.Fanout(
-        wrapture.Depth(2, wrapture.Printer()),
-        MySender(endpoint),
-    )
+class Router(wrapture.Sink):
+    def __init__(self, to):
+        self.to = to
+    ...
 ```
 
 Sink references resolve when the file loads, because the sink must
@@ -684,7 +721,7 @@ invoked with the module named by `module` as soon as that module is
 imported, or immediately if it already was.
 
 Any other key on the entry rides through to the handler as a keyword
-argument, the same convention the `[sink]` table uses, so one
+argument, the same convention a `[[sink]]` entry uses, so one
 generic handler can be specialised per deployment from the file:
 
 ```toml
@@ -878,7 +915,7 @@ startup. Two operational cautions follow from the mechanism:
   code: bindings land as the application imports its own modules, in
   its own order, and a Django models module is observed the moment
   Django itself brings it in. What does resolve at bootstrap is the
-  `[sink]` reference, because a sink must exist before events flow;
+  `[[sink]]` references, because a sink must exist before events flow;
   operator code it lives in must be reachable then, which is what
   `pythonpath` is for.
 - The variable's reach is configurable. `inherit = false` in the

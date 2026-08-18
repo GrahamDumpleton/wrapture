@@ -214,7 +214,7 @@ name = "application"
 mode = "asgi"
 redact = ["signature"]
 
-[sink]
+[[sink]]
 type = "jsonlines"
 path = "trace.jsonl"
 ```

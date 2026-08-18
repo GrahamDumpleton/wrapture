@@ -118,9 +118,9 @@ config file, reached only by the references in `wrapture.toml`.
   and the entry's extra `threshold` key reaches the callback as a
   keyword argument, so of the six charges made only the two over 400
   are recorded, with the cutoff adjustable in the config file alone.
-- The `[sink]` type names a factory that composes a `Fanout` of a
-  live printer and a JSONLines file, a combination the TOML sink
-  table alone cannot spell.
+- Two `[[sink]]` entries fan out to a live printer and a JSONLines
+  file; a relative sink path is anchored to the config file's
+  directory just as `pythonpath` is.
 
 ```console
 $ cd examples/operator-code

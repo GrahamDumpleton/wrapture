@@ -6,6 +6,6 @@
 target = "pipeline"
 match = "*"
 
-[sink]
+[[sink]]
 type = "jsonlines"
 path = "trace.jsonl"

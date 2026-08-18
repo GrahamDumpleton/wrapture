@@ -19,5 +19,5 @@ name = "quote"
 module = "fastapi"
 call = "wrapture_local.fastapi_support:instrument"
 
-[sink]
+[[sink]]
 type = "printer"
