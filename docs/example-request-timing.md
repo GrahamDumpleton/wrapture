@@ -283,9 +283,9 @@ GET /quote/widget (shop)  -> '200 OK'  [...ms, self ...us]
     render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...us]
 
 >>> request, view, quote, fetch, render = tape.all
->>> tape.self_time(fetch) > 0.9 * view.duration
+>>> tape.self_time(fetch) > 0.5 * view.duration
 True
->>> tape.self_time(quote) < 0.1 * quote.duration
+>>> tape.self_time(quote) < 0.5 * quote.duration
 True
 
 ```

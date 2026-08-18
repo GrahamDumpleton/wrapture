@@ -168,7 +168,8 @@ retained on the window (the last ten by default), and `on_report=`
 hands each one to a callable the moment its run closes. Durations
 are the forms `rotate=` accepts (`"30s"`, `"15m"`, `"1h"`, or a
 number of seconds); an hour is too long to wait for here, so a tenth
-of a second stands in:
+of a second stands in, and the page waits for the first report to
+arrive before sending the second burst of traffic:
 
 ```python
 >>> import time
@@ -178,7 +179,9 @@ of a second stands in:
 ... )
 >>> ticking.start()
 >>> traffic(shop)
->>> time.sleep(0.15)
+>>> deadline = time.monotonic() + 5
+>>> while not seen and time.monotonic() < deadline:
+...     time.sleep(0.01)
 >>> traffic(shop)
 >>> ticking.stop()
 
@@ -229,9 +232,9 @@ True
 >>> traffic(shop, 5)
 >>> daily.stop()
 
->>> for root, _, files in sorted(os.walk(outputs.name)):
-...     for name in sorted(files):
-...         print(os.path.relpath(os.path.join(root, name), outputs.name))
+>>> from pathlib import Path
+>>> for path in sorted(Path(outputs.name).rglob("run-*.txt")):
+...     print(path.relative_to(outputs.name).as_posix())
 daily-...T...-...-.../run-01.txt
 daily-...T...-...-.../run-02.txt
 
