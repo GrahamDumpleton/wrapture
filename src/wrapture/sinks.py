@@ -50,7 +50,9 @@ from .capture import (
     type_name,
 )
 from .events import Event, _format_time, _own_time
-from .exceptions import SinkErrorWarning
+from .exceptions import ConfigWarning, SinkErrorWarning
+from .outputs import OutputPath, open_output
+from .scheduler import Schedule, every, parse_duration
 
 
 class Sink:
@@ -292,6 +294,37 @@ def _required_policy(active: tuple[Sink, ...], axis: str) -> CapturePolicy:
     return required
 
 
+def _rotation(
+    sink: Sink,
+    path: OutputPath,
+    rotate: str | int | float | None,
+    align: bool,
+) -> tuple[float | None, bool]:
+    # Validate a sink's rotate=/align= against its path template at
+    # construction: align without rotate is meaningless, and rotating
+    # a path with no time variable reopens the same file, which is
+    # legal but pointless and almost certainly a mistake in the path.
+
+    if rotate is None:
+        if align:
+            raise ValueError("align=True needs a rotate= interval")
+        return None, False
+
+    interval = parse_duration(rotate)
+
+    if not path.timed:
+        warnings.warn(
+            f"{type(sink).__name__} path {path.template!r} has no time"
+            f" variable, so rotate= reopens the same file each time; add"
+            f" {{date}}, {{time}} or {{now:...}} to the path to rotate to"
+            f" a new file",
+            ConfigWarning,
+            stacklevel=3,
+        )
+
+    return interval, align
+
+
 class Printer(Sink):
     """A sink that prints events live, as they happen.
 
@@ -308,6 +341,11 @@ class Printer(Sink):
     respected. Every line is flushed as written, so a trace is intact
     up to the moment of a crash or hang.
 
+    `path` is an output path template ({date}, {time}, {pid}, {name}
+    and the rest; see wrapture.outputs), and `rotate`/`align` reopen
+    it on an interval exactly as for JSONLines; `name` is what {name}
+    expands to.
+
     `timing` (on by default) appends the elapsed time to each closing
     line, in the units tape.tree() uses, and for a streamed body (a
     generator, a request) the time spent in the body and how many items
@@ -323,20 +361,45 @@ class Printer(Sink):
         stream: TextIO | None = None,
         *,
         path: str | os.PathLike[str] | None = None,
+        name: str = "printer",
+        rotate: str | int | float | None = None,
+        align: bool = False,
         timing: bool = True,
         timestamps: bool = False,
     ) -> None:
         if stream is not None and path is not None:
             raise ValueError("Printer takes either stream or path, not both")
+        if path is None and (rotate is not None or align):
+            raise ValueError("Printer rotate= and align= need a path")
 
         self._stream = stream
-        self._path = os.fspath(path) if path is not None else None
+        self._path = OutputPath(path, name=name) if path is not None else None
         self._timing = timing
         self._timestamps = timestamps
 
         self._lock = threading.Lock()
         self._file: TextIO | None = None
+        self._current: str | None = None
         self._closed = False
+
+        self._schedule: Schedule | None = None
+        if self._path is not None:
+            self._interval, self._align = _rotation(self, self._path, rotate, align)
+
+    def __repr__(self) -> str:
+        if self._path is None:
+            return "Printer()"
+        if self._current is None:
+            return f"Printer(path={self._path.template!r})"
+        return f"Printer(path={self._path.template!r}, writing={self._current!r})"
+
+    @property
+    def path(self) -> str | None:
+        """The file currently being written, or None when the printer
+        writes to a stream or has not opened its file yet."""
+
+        with self._lock:
+            return self._current
 
     def _write(self, line: str) -> None:
         with self._lock:
@@ -344,7 +407,7 @@ class Printer(Sink):
                 if self._closed:
                     return
                 if self._file is None:
-                    self._file = open(self._path, "a", encoding="utf-8")
+                    self._open()
                 stream = self._file
             elif self._stream is not None:
                 stream = self._stream
@@ -352,6 +415,21 @@ class Printer(Sink):
                 stream = sys.stderr
 
             print(line, file=stream, flush=True)
+
+    def _open(self) -> None:
+        # Under the lock. Expand the template afresh and open what it
+        # names; the rotation schedule starts with the first open so an
+        # unused printer owns no timer.
+
+        assert self._path is not None
+
+        self._current = self._path.expand()
+        self._file = open_output(self._current, "a")
+
+        if self._interval is not None and self._schedule is None:
+            self._schedule = every(
+                self.reopen, self._interval, align=self._align, name=repr(self)
+            )
 
     def _prefix(self, event: Event) -> str:
         indent = "  " * event.depth
@@ -423,6 +501,24 @@ class Printer(Sink):
             if stream is not None:
                 stream.flush()
 
+    def reopen(self) -> None:
+        """Close the current file and open whatever the path template
+        names now, so a template with a time variable moves on to a new
+        file. Called by rotate= on its interval; call it directly from
+        a signal handler for rotation on demand. A no-op for a stream,
+        before the first line, or after close()."""
+
+        with self._lock:
+            if self._path is None or self._closed or self._file is None:
+                return
+
+            try:
+                self._file.close()
+                self._file = None
+                self._open()
+            except Exception:
+                _note_sink_error(self)
+
     def close(self) -> None:
         """Close the file opened for `path`; lines printed after this
         are dropped. Idempotent, and a no-op for a stream, which the
@@ -433,6 +529,8 @@ class Printer(Sink):
                 return
 
             self._closed = True
+            if self._schedule is not None:
+                self._schedule.cancel()
             if self._file is not None:
                 self._file.close()
                 self._file = None
@@ -919,6 +1017,14 @@ class JSONLines(Sink):
     closes the file, and anything recorded after that is dropped and
     counted.
 
+    `path` is an output path template ({date}, {time}, {pid}, {name}
+    and the rest; see wrapture.outputs), expanded when the file is
+    opened and its parent directories created. reopen() expands it
+    again, which with a time variable in the path moves on to a new
+    file; `rotate` calls reopen() on that interval ("1h", "15m", or
+    seconds) and `align` puts the interval on the local wall-clock
+    boundary. `name` is what {name} expands to.
+
     Declares "summary" capture on both axes: a streaming sink must
     neither retain live objects nor fail on unserialisable ones.
     Values that reach it captured by reference regardless (a binding
@@ -929,14 +1035,51 @@ class JSONLines(Sink):
     capture_args: CapturePolicy | str = "summary"
     capture_result: CapturePolicy | str = "summary"
 
-    def __init__(self, path: str | os.PathLike[str], *, limit: int = 1000) -> None:
-        self._path = os.fspath(path)
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        name: str = "jsonlines",
+        limit: int = 1000,
+        rotate: str | int | float | None = None,
+        align: bool = False,
+    ) -> None:
+        self._path = OutputPath(path, name=name)
+        self._interval, self._align = _rotation(self, self._path, rotate, align)
+        self._schedule: Schedule | None = None
+
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=limit)
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._started = False
         self._closed = False
         self._dropped = 0
+        self._current: str | None = None
+
+    def __repr__(self) -> str:
+        if self._current is None:
+            return f"JSONLines({self._path.template!r})"
+        return f"JSONLines({self._path.template!r}, writing={self._current!r})"
+
+    @property
+    def path(self) -> str | None:
+        """The file currently being written, or None before the first
+        line opens one."""
+
+        with self._lock:
+            return self._current
+
+    def _open(self) -> TextIO:
+        # Expand the template afresh and open what it names, remembering
+        # the result so the sink can say where it is writing.
+
+        current = self._path.expand()
+        stream = open_output(current, "a")
+
+        with self._lock:
+            self._current = current
+
+        return stream
 
     @property
     def dropped(self) -> int:
@@ -963,6 +1106,14 @@ class JSONLines(Sink):
                     target=self._run, name="wrapture-jsonlines", daemon=True
                 )
                 self._thread.start()
+
+                # The rotation schedule starts with the writer, so a
+                # constructed but unused sink owns no timer either.
+
+                if self._interval is not None:
+                    self._schedule = every(
+                        self.reopen, self._interval, align=self._align, name=repr(self)
+                    )
 
         line = json.dumps(
             _event_record(event), ensure_ascii=False, separators=(",", ":")
@@ -991,7 +1142,7 @@ class JSONLines(Sink):
         # hang and the application never blocks.
 
         try:
-            stream = open(self._path, "a", encoding="utf-8")
+            stream = self._open()
         except Exception:
             _note_sink_error(self)
 
@@ -1010,16 +1161,16 @@ class JSONLines(Sink):
                     break
 
                 if item is _REOPEN:
-                    # External rotation moved the file aside; release
-                    # the old one and start appending to the path
-                    # afresh. A failed reopen is counted, and later
-                    # writes fail onto the closed stream, each counted
-                    # too, so the sink degrades rather than crashing.
+                    # Release the current file and open whatever the
+                    # template names now. A failed reopen is counted,
+                    # and later writes fail onto the closed stream, each
+                    # counted too, so the sink degrades rather than
+                    # crashing.
 
                     try:
                         stream.flush()
                         stream.close()
-                        stream = open(self._path, "a", encoding="utf-8")
+                        stream = self._open()
                     except Exception:
                         _note_sink_error(self)
                     continue
@@ -1066,17 +1217,15 @@ class JSONLines(Sink):
         barrier.wait(timeout=5)
 
     def reopen(self) -> None:
-        """Close and reopen the file at the sink's path, for external
-        log rotation.
+        """Close the current file and open whatever the path template
+        names now.
 
-        A rotator that moves the file aside (logrotate without
-        copytruncate, say) leaves the writer appending to the moved
-        file; call this from the rotation hook (a signal handler, a
-        postrotate script's notification) and lines from here on go
-        to a fresh file at the original path. Queued lines drain to
-        the old file first, so nothing is lost across the switch.
-        Safe from any thread; a no-op before the first line or after
-        close().
+        With a time variable in the path this moves on to a new file,
+        which is how rotation works: rotate= calls it on its interval,
+        and a signal handler can call it for rotation on demand.
+        Queued lines drain to the old file first, so nothing is lost
+        across the switch. Safe from any thread; a no-op before the
+        first line or after close().
         """
 
         with self._lock:
@@ -1102,6 +1251,9 @@ class JSONLines(Sink):
             self._closed = True
             started = self._started
             thread = self._thread
+
+            if self._schedule is not None:
+                self._schedule.cancel()
 
         if not started or thread is None:
             return

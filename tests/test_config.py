@@ -984,10 +984,38 @@ def test_load_config_passes_printer_options_through(tmp_path: Path) -> None:
 
     config = load_config(source)
 
+    # Compared as paths: the TOML spells the path with forward slashes,
+    # which Windows accepts but does not print back.
+
     assert isinstance(config.sink, Printer)
-    assert config.sink._path == str(tmp_path / "trace.log")
+    assert config.sink._path is not None
+    assert Path(config.sink._path.template) == tmp_path / "trace.log"
     assert config.sink._timestamps is True
     assert config.sink._timing is False
+
+
+def test_a_relative_sink_path_anchors_to_the_config_file(tmp_path: Path) -> None:
+    # As pythonpath entries do: the file says where its output goes
+    # regardless of the process's working directory, and only the
+    # directory part is anchored, the template staying intact.
+
+    home = tmp_path / "deploy"
+    home.mkdir()
+    source = home / "trace.toml"
+    source.write_text('[sink]\ntype = "jsonlines"\npath = "logs/trace-{date}.jsonl"\n')
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, JSONLines)
+    assert config.sink._path.template == str(home / "logs" / "trace-{date}.jsonl")
+
+
+def test_a_bad_sink_path_template_is_a_config_error(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text('[sink]\ntype = "jsonlines"\npath = "trace-{seq}.jsonl"\n')
+
+    with pytest.raises(ConfigError, match="unknown variable {seq}"):
+        load_config(source)
 
 
 def test_an_unknown_builtin_sink_fails_loudly(tmp_path: Path) -> None:

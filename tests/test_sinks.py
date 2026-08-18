@@ -553,6 +553,41 @@ def test_printer_opens_the_file_lazily(tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_printer_path_is_a_template_and_reopen_moves_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import wrapture.outputs
+
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(wrapture.outputs, "_now", lambda: clock[0])
+
+    printer = Printer(path=tmp_path / "logs" / "{name}-{epoch}.log", timing=False)
+    charge = binding(Gateway, "charge")
+
+    assert repr(printer).startswith("Printer(path=")
+    assert printer.path is None
+
+    with charge, listening(printer):
+        Gateway().charge(1)
+        clock[0] += 60
+        printer.reopen()
+        Gateway().charge(2)
+
+    printer.close()
+
+    first = tmp_path / "logs" / "printer-1700000000.log"
+    second = tmp_path / "logs" / "printer-1700000060.log"
+
+    assert first.read_text().count("Gateway.charge(") == 1
+    assert second.read_text().count("Gateway.charge(") == 1
+    assert printer.path == str(second)
+
+
+def test_printer_rotate_needs_a_path() -> None:
+    with pytest.raises(ValueError, match="need a path"):
+        Printer(rotate="1h")
+
+
 def test_printer_refuses_both_stream_and_path(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="either stream or path"):
         Printer(io.StringIO(), path=tmp_path / "trace.log")

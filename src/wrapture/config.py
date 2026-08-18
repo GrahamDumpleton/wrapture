@@ -908,7 +908,7 @@ _BUILTIN_SINKS: dict[str, Callable[..., Sink]] = {
 }
 
 
-def _build_sink(table: Any) -> Sink:
+def _build_sink(table: Any, *, anchor: str | None = None) -> Sink:
     # Construct the sink a [sink] table describes: a builtin short
     # name or a module:attr factory, called with the remaining keys as
     # keyword arguments, resolved and validated now because a sink
@@ -919,6 +919,17 @@ def _build_sink(table: Any) -> Sink:
 
     spec = dict(table)
     reference = spec.pop("type", None)
+
+    # A builtin sink's relative output path anchors to the config
+    # file's directory, as pythonpath entries do, so the file says
+    # where its output goes independently of the process's working
+    # directory. Only the directory part is anchored: the template
+    # variables in the file name expand when the file is opened.
+
+    if anchor is not None and reference in _BUILTIN_SINKS:
+        path = spec.get("path")
+        if isinstance(path, str) and path and not os.path.isabs(path):
+            spec["path"] = os.path.normpath(os.path.join(anchor, path))
 
     if not isinstance(reference, str) or not reference:
         raise ConfigError(
@@ -1037,7 +1048,10 @@ def _config_from(document: Any, location: str) -> Config:
             )
         )
 
-    sink = _build_sink(document["sink"]) if "sink" in document else None
+    sink = None
+    if "sink" in document:
+        anchor = os.path.dirname(os.path.abspath(location))
+        sink = _build_sink(document["sink"], anchor=anchor)
 
     return Config(
         observe=observe,

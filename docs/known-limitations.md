@@ -171,14 +171,3 @@ extension types generally) cannot be replaced, so bindings on them fail
 at `apply()` with the `TypeError` CPython raises for the assignment.
 This is a CPython restriction, not a wrapture one. Wrap the Python-level
 call sites that use such types instead.
-
-## Move-aside trace rotation does not work on Windows
-
-`JSONLines.reopen()` supports the logrotate pattern: an external
-rotator renames the live trace file aside, then signals the process,
-and `reopen()` starts a fresh file at the original path. Windows
-refuses to rename a file another process holds open, so the rename
-step itself fails there; this is an operating system restriction on
-the pattern, not on `reopen()`. On Windows rotate by copy and
-truncate instead, which works on every platform and needs no
-`reopen()` call, since the writer appends.

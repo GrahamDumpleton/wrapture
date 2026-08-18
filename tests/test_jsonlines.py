@@ -10,8 +10,9 @@ disk.
 """
 
 import json
-import sys
+import os
 import threading
+import time
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -20,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from wrapture import JSONLines, Sink, binding
+from wrapture import ConfigWarning, JSONLines, Sink, binding
 from wrapture.sinks import _scoped_sinks
 
 
@@ -263,7 +264,11 @@ def test_flush_puts_queued_lines_on_disk_without_closing(tmp_path: Path) -> None
 def test_an_unopenable_path_breaks_the_sink_not_the_application(
     tmp_path: Path,
 ) -> None:
-    sink = JSONLines(tmp_path / "no-such-directory" / "trace.jsonl")
+    # A missing directory is created on open, so the unopenable case
+    # is a path whose parent is an existing plain file.
+
+    (tmp_path / "not-a-directory").write_text("")
+    sink = JSONLines(tmp_path / "not-a-directory" / "trace.jsonl")
     charge = binding(Gateway, "charge")
 
     with charge, listening(sink):
@@ -277,31 +282,112 @@ def test_an_unopenable_path_breaks_the_sink_not_the_application(
     assert sink.errors >= 1
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows cannot rename a file the writer holds open;"
-    " move-aside rotation is a POSIX pattern",
-)
-def test_reopen_switches_to_a_fresh_file_for_rotation(tmp_path: Path) -> None:
-    # External rotation moves the file aside; reopen() makes the
-    # writer release the old file and append to the path afresh, with
-    # queued lines draining to the old file first.
+def test_reopen_moves_on_to_the_file_the_template_names_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rotation is wrapture's own: reopen() expands the template again,
+    # so a time variable in the path names a fresh file, with queued
+    # lines draining to the old one first. The clock is injected so
+    # the two expansions differ deterministically.
 
-    trace = tmp_path / "trace.jsonl"
-    sink = JSONLines(trace)
+    import wrapture.outputs
+
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(wrapture.outputs, "_now", lambda: clock[0])
+
+    sink = JSONLines(tmp_path / "trace-{epoch}.jsonl")
     charge = binding(Gateway, "charge")
 
     with charge, listening(sink):
         Gateway().charge(1)
         sink.flush()
 
-        rotated = tmp_path / "trace.jsonl.1"
-        trace.rename(rotated)
+        clock[0] += 3600
         sink.reopen()
 
         Gateway().charge(2)
 
     sink.close()
 
-    assert [line["arguments"]["amount"] for line in read_lines(rotated)] == [1]
-    assert [line["arguments"]["amount"] for line in read_lines(trace)] == [2]
+    first = tmp_path / "trace-1700000000.jsonl"
+    second = tmp_path / "trace-1700003600.jsonl"
+
+    assert [line["arguments"]["amount"] for line in read_lines(first)] == [1]
+    assert [line["arguments"]["amount"] for line in read_lines(second)] == [2]
+
+
+def test_the_path_creates_its_directories_and_reports_where_it_writes(
+    tmp_path: Path,
+) -> None:
+    sink = JSONLines(tmp_path / "traces" / "{name}" / "trace-{pid}.jsonl", name="ops")
+    charge = binding(Gateway, "charge")
+
+    assert sink.path is None
+    assert repr(sink).endswith("trace-{pid}.jsonl')")
+
+    with charge, listening(sink):
+        Gateway().charge(1)
+        sink.flush()
+
+    sink.close()
+
+    expected = tmp_path / "traces" / "ops" / f"trace-{os.getpid()}.jsonl"
+
+    assert sink.path == str(expected)
+    assert f"writing={str(expected)!r}" in repr(sink)
+    assert [line["arguments"]["amount"] for line in read_lines(expected)] == [1]
+
+
+def test_an_unknown_path_variable_fails_at_construction(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown variable {seq}"):
+        JSONLines(tmp_path / "trace-{seq}.jsonl")
+
+    with pytest.raises(ValueError, match="only has a value inside a window"):
+        JSONLines(tmp_path / "trace-{run}.jsonl")
+
+
+def test_rotate_on_an_untimed_path_warns_and_align_needs_rotate(
+    tmp_path: Path,
+) -> None:
+    with pytest.warns(ConfigWarning, match="no time variable"):
+        JSONLines(tmp_path / "trace.jsonl", rotate="1h")
+
+    with pytest.raises(ValueError, match="align=True needs a rotate"):
+        JSONLines(tmp_path / "trace.jsonl", align=True)
+
+    with pytest.raises(ValueError, match="not a number with a unit"):
+        JSONLines(tmp_path / "trace-{time}.jsonl", rotate="soon")
+
+
+def test_rotate_reopens_on_its_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A short interval on the real scheduler: the second file appears
+    # once the timer has fired and another line has been written.
+
+    import wrapture.outputs
+
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(wrapture.outputs, "_now", lambda: clock[0])
+
+    sink = JSONLines(tmp_path / "trace-{epoch}.jsonl", rotate=0.05)
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(sink):
+        Gateway().charge(1)
+        sink.flush()
+
+        clock[0] += 1
+        deadline = time.monotonic() + 5
+        while sink._schedule is not None and sink._schedule.fired == 0:
+            assert time.monotonic() < deadline, "rotation never fired"
+            time.sleep(0.01)
+
+        Gateway().charge(2)
+
+    sink.close()
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "trace-1700000000.jsonl",
+        "trace-1700000001.jsonl",
+    ]

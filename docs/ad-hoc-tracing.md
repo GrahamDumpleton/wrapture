@@ -168,7 +168,10 @@ wrapture.add_sink(wrapture.Printer(path="trace.log", timestamps=True))
 ```
 
 `stream` and `path` are mutually exclusive; with neither, output goes
-to `sys.stderr`.
+to `sys.stderr`. The path is an output path template like the
+JSONLines one, so `path="logs/trace-{date}.log"` with `rotate="1d"`
+gives one printer file per day; see
+[Output paths and rotation](#output-paths-and-rotation) below.
 
 No timeline appears anywhere above: the binding is applied, a sink is
 listening, and events flow. This is the minimal form of tracing a
@@ -386,19 +389,60 @@ Two properties make it safe to leave running:
   time, with a depth limit that cuts even self-referential
   structures.
 
-There are no built-in size caps: file growth is delegated to the
-rotation tooling that owns it, and `reopen()` is the hook that makes
-that work. A rotator that moves the file aside (logrotate's default
-mode) leaves the writer appending to the moved file, so call
-`reopen()` from the rotation notification and lines from there on go
-to a fresh file at the original path, with queued lines draining to
-the old file first. Copytruncate-style rotation needs no call at
-all, since the writer appends.
+There are no built-in size caps; growth is managed by putting a time
+variable in the path and rotating on an interval, described next.
 
-Move-aside rotation is a POSIX pattern. Windows refuses to rename a
-file another process holds open, so a rotator cannot move the live
-trace aside there; rotate by copy and truncate instead, which works
-on every platform and needs no `reopen()`.
+## Output paths and rotation
+
+Every path wrapture writes to, a JSONLines trace or a Printer file, is
+a template, expanded when the file is opened and never per line. A
+path with no variables is a template that expands to itself. The
+variables:
+
+| variable | value |
+|---|---|
+| `{pid}` | process id, for pre-fork workers writing side by side |
+| `{host}` | hostname, for fleets writing to shared storage |
+| `{name}` | the sink's `name=`, defaulting to its type (`jsonlines`, `printer`) |
+| `{date}` | `2026-08-18`, local time |
+| `{time}` | `14-05-30`, local time, filesystem-safe |
+| `{datetime}` | `2026-08-18T14-05-30` |
+| `{epoch}` | `1755525930`, integer seconds |
+| `{now:%Y%m%d-%H}` | any `strftime` format, local time |
+| `{utc:%Y%m%d-%H}` | any `strftime` format, UTC |
+
+A misspelt variable is an error where the path is given, not an hour
+into a run when the file first rotates. Values are sanitised so an
+expansion can never introduce a path separator or climb out of the
+directory the template's static part names, and the parent
+directories of the expanded path are always created, so
+`traces/{date}/trace-{time}.jsonl` simply works. `sink.path` says
+which file the sink is writing right now, and the sink's `repr()`
+(which `config.report()` includes) shows both the template and the
+current file.
+
+Rotation is wrapture's own. `reopen()` closes the current file,
+expands the template again and opens whatever that names, so with a
+time variable in the path it moves on to a new file, on every
+platform, with no external mover; queued JSONLines lines drain to the
+old file first. `rotate=` calls it on an interval (`"15m"`, `"1h"`,
+`"1d"`, `"1h30m"`, or a number of seconds), and `align=True` puts
+that on the wall-clock boundary in local time, so hourly means on the
+hour and daily at midnight, computed afresh each time so daylight
+saving is followed rather than drifted through. A path with no time
+variable and a `rotate=` reopens the same file each time, which is
+pointless, and is warned about when the sink is built. For rotation
+on demand, call `reopen()` from a signal handler.
+
+```python
+wrapture.add_sink(
+    wrapture.JSONLines("traces/{date}/trace-{time}-{pid}.jsonl", rotate="1h", align=True)
+)
+```
+
+The interval timer is a single daemon thread per process, started by
+the first sink that needs it, so a sink with no `rotate=` costs no
+thread.
 
 This completes the inherited-dev-server story from the top of this
 page. The whole intervention is a few lines in the application's entry
@@ -587,10 +631,18 @@ the entry, where they never reach any sink at all.
 constructor. Two builtin names cover the no-code cases: `printer` and
 `jsonlines`. Anything else is reached by `module:attr` reference: a
 callable, invoked with the remaining keys as keyword arguments, that
-must return a `Sink`. So a printer writing timestamped lines to a
-file, and a factory composing whatever it likes (the file has no
-syntax for combinators because a factory can return any
-arrangement):
+must return a `Sink`. So a daily rotating trace, a printer writing
+timestamped lines to a file, and a factory composing whatever it
+likes (the file has no syntax for combinators because a factory can
+return any arrangement):
+
+```toml
+[sink]
+type = "jsonlines"
+path = "traces/trace-{date}-{pid}.jsonl"
+rotate = "1d"
+align = true
+```
 
 ```toml
 [sink]
@@ -617,7 +669,10 @@ def make_sink(endpoint):
 ```
 
 Sink references resolve when the file loads, because the sink must
-exist before events can flow.
+exist before events can flow. A relative `path` on a builtin sink is
+anchored to the config file's own directory, as `pythonpath` entries
+are, so the file says where its output goes whatever the process's
+working directory; a factory receives its keys as written.
 
 ### Setup callbacks
 
