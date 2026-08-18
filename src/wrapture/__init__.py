@@ -86,6 +86,9 @@ from .iterators import (
     IteratorProxy,
     iterator,
 )
+from .lifecycle import (
+    shutdown,
+)
 from .observed import (
     ObservedCallable,
     observed,
@@ -194,6 +197,7 @@ __all__ = [
     "propagate",
     "redact",
     "remove_sink",
+    "shutdown",
     "stack_frames",
     "timeline",
     "window",

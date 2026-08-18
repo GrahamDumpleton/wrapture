@@ -568,3 +568,75 @@ def test_a_run_hears_events_from_other_threads() -> None:
         worker.join()
 
     assert run.reports[0].data == {"count": 1}
+
+
+# ---------------------------------------------------------------------------
+# shutdown
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_closes_open_runs_then_flushes_sinks_and_is_repeatable() -> None:
+    from wrapture import shutdown
+    from wrapture.sinks import add_sink, remove_sink
+
+    calls: list[str] = []
+
+    class Flushing(Sink):
+        def flush(self) -> None:
+            calls.append("flush")
+
+    counting = Counting()
+    span = Window(name="open", duration="1h", collect=[counting])
+    flushing = add_sink(Flushing())
+    charge = binding(Gateway, "charge")
+
+    span.start()
+    try:
+        with charge:
+            Gateway().charge(1)
+
+        shutdown()
+
+        # The run was closed and reported (cut short, having had a
+        # scheduled end), and the sink flushed after; the binding is
+        # still applied and the sink still registered.
+
+        assert span.run is None
+        (report,) = span.reports
+        assert report.cut_short is True
+        assert report.data == {"count": 1}
+        assert calls == ["flush"]
+        assert flushing in _process_sinks
+
+        shutdown()
+
+        assert calls == ["flush", "flush"]
+        assert len(span.reports) == 1
+    finally:
+        span.stop()
+        remove_sink(flushing)
+
+
+def test_a_failing_shutdown_step_does_not_stop_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wrapture.lifecycle as lifecycle
+
+    ran: list[str] = []
+
+    def explode() -> None:
+        ran.append("explode")
+        raise RuntimeError("boom")
+
+    def fine() -> None:
+        ran.append("fine")
+
+    monkeypatch.setattr(lifecycle, "_steps", [])
+    lifecycle._on_shutdown("explode", explode, phase=1)
+    lifecycle._on_shutdown("fine", fine, phase=2)
+    lifecycle._on_shutdown("fine again", fine, phase=3)  # same callback: no-op
+
+    with pytest.warns(RuntimeWarning, match="shutdown step 'explode' raised"):
+        lifecycle.shutdown()
+
+    assert ran == ["explode", "fine"]

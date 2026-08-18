@@ -375,10 +375,9 @@ def test_process_sinks_are_flushed_at_shutdown_with_isolation() -> None:
     broken = add_sink(Unflushable())
     buffered = add_sink(Buffered())
 
-    # flush_sinks() is the same operation the atexit handler performs,
-    # for hosts whose shutdown fires outside atexit (mod_wsgi and other
-    # embeddings): the broken sink is counted and skipped, the one
-    # registered after it still flushes, and repeating is safe.
+    # flush_sinks() is the sink half of shutdown(): the broken sink is
+    # counted and skipped, the one registered after it still flushes,
+    # and repeating is safe.
 
     try:
         with warnings.catch_warnings(record=True):

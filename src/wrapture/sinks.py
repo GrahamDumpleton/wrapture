@@ -23,7 +23,6 @@ across every sink active at once.
 
 from __future__ import annotations
 
-import atexit
 import contextvars
 import json
 import os
@@ -50,6 +49,7 @@ from .capture import (
 )
 from .events import Event, _format_time
 from .exceptions import ConfigWarning, SinkErrorWarning
+from .lifecycle import SINKS, _on_shutdown
 from .outputs import OutputPath, open_output
 from .scheduler import Schedule, every, parse_duration
 
@@ -113,7 +113,6 @@ _scoped_sinks: contextvars.ContextVar[tuple[Sink, ...]] = contextvars.ContextVar
 )
 
 _registry_lock = threading.Lock()
-_flush_registered = False
 
 
 def add_sink(sink: Sink) -> Sink:
@@ -123,21 +122,17 @@ def add_sink(sink: Sink) -> Sink:
     This is the tier for observing a whole running application; there
     is no enclosing scope, so pair it with remove_sink() when the sink
     should stop listening. For a scope that ends, use a timeline. The
-    first registration installs an atexit handler that calls flush()
-    on the process sinks still registered at interpreter shutdown, so
-    the tail of a trace is not lost in a sink's buffers.
+    first registration adds flushing the process sinks to what
+    shutdown() does at interpreter exit, so the tail of a trace is not
+    lost in a sink's buffers.
 
     Returns the sink, so registration can wrap construction.
     """
 
-    global _flush_registered
-
     with _registry_lock:
         _process_sinks.append(sink)
 
-        if not _flush_registered:
-            _flush_registered = True
-            atexit.register(_flush_process_sinks)
+    _on_shutdown("flush process sinks", _flush_process_sinks, phase=SINKS)
 
     return sink
 
@@ -160,15 +155,10 @@ def remove_sink(sink: Sink) -> None:
 def flush_sinks() -> None:
     """Flush every registered process sink now.
 
-    The same operation the atexit handler performs at interpreter
-    shutdown, callable directly for environments where atexit cannot be
-    relied on: an embedded or sub interpreter may be destroyed without
-    its atexit callbacks ever running. Hosts such as mod_wsgi provide
-    their own process shutdown notification that fires while the
-    interpreter is still fully alive; subscribe that notification to
-    this function. Safe to call any number of times; a sink that raises
-    from flush() is counted and warned about like any other sink error,
-    and the remaining sinks still flush.
+    The sink half of what shutdown() does at interpreter exit, for
+    when a trace should be on disk mid-run. Safe to call any number of
+    times; a sink that raises from flush() is counted and warned about
+    like any other sink error, and the remaining sinks still flush.
     """
 
     _flush_process_sinks()

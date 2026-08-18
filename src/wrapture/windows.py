@@ -35,7 +35,6 @@ start afresh at start(); nothing is persisted or resumed.
 
 from __future__ import annotations
 
-import atexit
 import os
 import random
 import threading
@@ -49,6 +48,7 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from .exceptions import ConfigWarning
+from .lifecycle import WINDOWS, _on_shutdown
 from .outputs import OutputPath, open_output
 from .scheduler import (
     Schedule,
@@ -184,8 +184,9 @@ class Window:
 
     start() arms the schedule and stop() takes it down, closing an open
     run; open() and close() drive runs by hand between them. Config
-    windows are started by apply() and stopped by revert(); an
-    interpreter exit closes any open run and delivers its reports.
+    windows are started by apply() and stopped by revert(); shutdown()
+    (and so interpreter exit) closes any open run and delivers its
+    reports.
     """
 
     def __init__(
@@ -684,23 +685,18 @@ def _release(sink: Any) -> None:
         _note_sink_error(sink)
 
 
-# Every started window is registered so interpreter exit can close an
-# open run and deliver its reports; the hook is installed once, on the
-# first start.
+# Every started window is registered so shutdown() (and so interpreter
+# exit) can close an open run and deliver its reports.
 
 _windows: weakref.WeakSet[Window] = weakref.WeakSet()
 _registry_lock = threading.Lock()
-_hooked = False
 
 
 def _register(window: Window) -> None:
-    global _hooked
-
     with _registry_lock:
         _windows.add(window)
-        if not _hooked:
-            _hooked = True
-            atexit.register(_shutdown_windows)
+
+    _on_shutdown("close window runs", _shutdown_windows, phase=WINDOWS)
 
 
 def _shutdown_windows() -> None:

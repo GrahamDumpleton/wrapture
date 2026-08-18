@@ -267,8 +267,9 @@ restart-proof by construction: `every = "1h"` with `align = true`
 simply waits for the next hour boundary and carries on, each run
 named by its own timestamp. Reach for `at` plus `times` when the
 batch itself is the point, knowing a restart ends it early. A clean
-shutdown during an open run closes it, marks its report `cut_short`
-and delivers it; a hard kill loses it.
+shutdown during an open run (interpreter exit, or `wrapture.shutdown()`
+called from a host's own shutdown notification) closes it, marks its
+report `cut_short` and delivers it; a hard kill loses it.
 
 Pre-fork servers give each worker its own windows, so "one report an
 hour" is one per worker per hour; put `{pid}` in the report path and

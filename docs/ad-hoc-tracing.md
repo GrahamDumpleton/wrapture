@@ -92,21 +92,23 @@ are invisible to a timeline; the
 [thread limitation](known-limitations.md#calls-on-other-threads-may-not-be-recorded)
 is a property of scoped recording, not of recording itself.
 
-The first `add_sink()` also installs an atexit handler that calls
-`flush()` on every process sink still registered at interpreter
-shutdown, so the tail of a trace, usually the interesting part, is not
-lost in a sink's buffers.
-
-Some environments tear the interpreter down without ever running atexit
-callbacks: embedded interpreters and subinterpreters are destroyed by
-their host, and hosting platforms typically offer their own shutdown
-notification instead. `flush_sinks()` performs exactly the operation
-the atexit handler would, on demand, so it can be subscribed to
-whatever the host provides. Under mod_wsgi, for example, subscribe it
-to the process shutdown event, which fires while the interpreter and
-its threads are still fully alive. Calling it more than once is safe,
-and a sink that fails to flush is counted and skipped so the rest
-still get their chance.
+At interpreter exit wrapture delivers everything it still owes:
+`flush()` is called on every process sink still registered, so the
+tail of a trace, usually the interesting part, is not lost in a
+sink's buffers, and any [window](windows.md) with a run open closes
+it and writes its reports. `wrapture.shutdown()` performs exactly
+that operation on demand, and it is the one call to know for
+environments that tear the interpreter down without ever running
+atexit callbacks: embedded interpreters and subinterpreters are
+destroyed by their host, and hosting platforms typically offer their
+own shutdown notification instead. Under mod_wsgi, for example,
+subscribe `shutdown()` to the process shutdown event, which fires
+while the interpreter and its threads are still fully alive. Calling
+it more than once is safe, nothing is uninstalled (bindings stay
+applied, so it quiesces rather than tears out the tracing), and a
+step that fails is warned about while the rest still run.
+`flush_sinks()` remains as the sink half alone, for putting a trace
+on disk mid-run.
 
 ## Watching calls live: Printer
 
@@ -392,7 +394,7 @@ Two properties make it safe to leave running:
   bounded queue drained by a background writer thread; when the queue
   is full the line is dropped and counted on `dropped` rather than
   making the observed call wait. `flush()` blocks briefly until
-  queued lines are on disk (the atexit handler and `flush_sinks()`
+  queued lines are on disk (`shutdown()` and `flush_sinks()`
   call it for you); `close()` flushes, stops the writer, and closes
   the file.
 - **It declares `"summary"` capture**, so it neither retains live
