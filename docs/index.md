@@ -123,3 +123,16 @@ example-third-party-libraries
 known-limitations
 release-notes
 ```
+
+## Source, issues and releases
+
+wrapture is developed on GitHub at
+[GrahamDumpleton/wrapture](https://github.com/GrahamDumpleton/wrapture),
+under the BSD 2-Clause licence. Bug reports and feature requests go to
+the [issue tracker](https://github.com/GrahamDumpleton/wrapture/issues);
+a report is easiest to act on when it names the wrapture and Python
+versions and includes a small binding that reproduces the problem.
+Releases are published to [PyPI](https://pypi.org/project/wrapture/),
+and each page of these docs carries an "Edit on GitHub" link to its
+source under `docs/` in the repository, so a documentation fix can be
+raised the same way.

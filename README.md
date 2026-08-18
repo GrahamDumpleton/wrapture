@@ -135,6 +135,13 @@ testing assertion library, a tracing tool, or both at once.
 - Python 3.12+
 - [wrapt](https://github.com/GrahamDumpleton/wrapt) 2.4.0+
 
+## Issues
+
+Bug reports and feature requests go to the
+[issue tracker](https://github.com/GrahamDumpleton/wrapture/issues).
+Include the wrapture and Python versions and, where you can, a small
+binding that reproduces the problem.
+
 ## License
 
 BSD 2-Clause. See

@@ -27,3 +27,13 @@ myst_heading_anchors = 2
 exclude_patterns = ["_build"]
 
 html_theme = "sphinx_rtd_theme"
+
+# Give every page an "Edit on GitHub" link pointing at its source in the
+# repository, so readers can reach the project from wherever they land.
+html_context = {
+    "display_github": True,
+    "github_user": "GrahamDumpleton",
+    "github_repo": "wrapture",
+    "github_version": "develop",
+    "conf_py_path": "/docs/",
+}
