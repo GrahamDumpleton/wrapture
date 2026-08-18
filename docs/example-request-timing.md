@@ -185,12 +185,12 @@ GET /quote/gadget (shop)
   __main__.quote_view(item='gadget')
     quote(item='gadget')
       fetch(item='gadget')
-      fetch -> 120 [...ms]
-    quote -> {'item': 'gadget', 'price': 120} [...ms]
+      fetch -> 120 [...]
+    quote -> {'item': 'gadget', 'price': 120} [...]
     render(quote={'item': 'gadget', 'price': 120})
-    render -> b'gadget: 120\n' [...us]
-  __main__.quote_view -> b'gadget: 120\n' [...ms]
-shop -> '200 OK' [...ms, body ...us over 1 chunk]
+    render -> b'gadget: 120\n' [...]
+  __main__.quote_view -> b'gadget: 120\n' [...]
+shop -> '200 OK' [..., body ... over 1 chunk]
 
 >>> wrapture.remove_sink(printer)
 
@@ -224,7 +224,7 @@ opening and one closing line per request, an access log with timings:
 
 >>> _ = get(application, "/quote/gadget")
 GET /quote/gadget (shop)
-shop -> '200 OK' [...ms, body ...us over 1 chunk]
+shop -> '200 OK' [..., body ... over 1 chunk]
 
 >>> wrapture.remove_sink(printer)
 
@@ -287,11 +287,11 @@ that of its observed children. `tape.tree(times=True)` shows both, and
 >>> with wrapture.timeline() as tape:
 ...     _ = get(application, "/quote/widget")
 ...     print(tape.tree(times=True))
-GET /quote/widget (shop)  -> '200 OK'  [...ms, self ...us]
-  __main__.quote_view(item='widget')  -> b'widget: 25\n'  [...ms, self ...us]
-    quote(item='widget')  -> {'item': 'widget', 'price': 25}  [...ms, self ...us]
-      fetch(item='widget')  -> 25  [...ms]
-    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...us]
+GET /quote/widget (shop)  -> '200 OK'  [..., self ...]
+  __main__.quote_view(item='widget')  -> b'widget: 25\n'  [..., self ...]
+    quote(item='widget')  -> {'item': 'widget', 'price': 25}  [..., self ...]
+      fetch(item='widget')  -> 25  [...]
+    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...]
 
 >>> request, view, quote, fetch, render = tape.all
 >>> tape.self_time(fetch) > 0.5 * view.duration
