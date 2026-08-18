@@ -11,10 +11,9 @@ import textwrap
 import threading
 import time
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -304,13 +303,53 @@ def test_next_at_is_the_next_local_occurrence() -> None:
     assert time.localtime(skipped)[:5] == (2026, 3, 11, 22, 0)
 
 
+class _NewYork2026(tzinfo):
+    """America/New_York for 2026 by hand, so the test needs no zone
+    database (Windows ships none): EST is UTC-5, EDT is UTC-4, clocks
+    go forward at 02:00 on 8 March and back at 02:00 on 1 November."""
+
+    _forward = datetime(2026, 3, 8, 2, 0)
+    _back = datetime(2026, 11, 1, 1, 0)
+
+    def _dst_active(self, moment: datetime) -> bool:
+        naive = moment.replace(tzinfo=None)
+        if naive < self._forward or naive >= self._back + timedelta(hours=1):
+            return False
+        if naive >= self._back:
+            return moment.fold == 0  # the repeated hour: first pass is EDT
+        return True
+
+    def utcoffset(self, moment: datetime | None) -> timedelta:
+        assert moment is not None
+        return timedelta(hours=-4 if self._dst_active(moment) else -5)
+
+    def dst(self, moment: datetime | None) -> timedelta:
+        assert moment is not None
+        return timedelta(hours=1 if self._dst_active(moment) else 0)
+
+    def tzname(self, moment: datetime | None) -> str:
+        assert moment is not None
+        return "EDT" if self._dst_active(moment) else "EST"
+
+    def fromutc(self, moment: datetime) -> datetime:
+        # Standard time first; if that lands in DST, add the hour, and
+        # mark the second pass through the repeated hour with fold=1.
+
+        standard = moment.replace(tzinfo=None) - timedelta(hours=5)
+        if self._forward <= standard < self._back:
+            return (standard + timedelta(hours=1)).replace(tzinfo=self)
+        if self._back <= standard < self._back + timedelta(hours=1):
+            return standard.replace(tzinfo=self, fold=1)
+        return standard.replace(tzinfo=self)
+
+
 def test_next_at_follows_daylight_saving() -> None:
     # America/New_York, 2026: clocks go forward on 8 March (02:00 to
     # 03:00 does not exist) and back on 1 November (01:00 to 02:00
-    # happens twice). The zone is injected so the test does not depend
-    # on the machine's own.
+    # happens twice). The zone is injected so the test depends neither
+    # on the machine's own zone nor on a zone database being installed.
 
-    zone = ZoneInfo("America/New_York")
+    zone = _NewYork2026()
 
     before_gap = datetime(2026, 3, 8, 1, 0, tzinfo=zone).timestamp()
     skipped = datetime.fromtimestamp(_next_at("02:30", before_gap, tz=zone), zone)
