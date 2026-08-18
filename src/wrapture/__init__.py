@@ -20,7 +20,7 @@ def _format_version(parts: tuple[str, ...]) -> str:
 __version_info__ = ("1", "0", "0", "dev6")
 __version__ = _format_version(__version_info__)
 
-from wrapt import MISSING
+from wrapt import MISSING, register_post_import_hook, when_imported
 
 from .asgi import (
     ASGIMiddleware,
@@ -131,6 +131,8 @@ from .wsgi import (
 
 __all__ = [
     "MISSING",
+    "register_post_import_hook",
+    "when_imported",
     "ASGIMiddleware",
     "Aggregate",
     "AlreadyAppliedError",

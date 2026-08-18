@@ -278,21 +278,88 @@ binding must hold the wrapper it applied in order to remove, suspend
 and report on it:
 
 ```python
->>> wrapture.binding("vendored.client?", "Client.request")
+>>> wrapture.binding("vendored_client?", "Client.request")
 Traceback (most recent call last):
     ...
 wrapture.exceptions.DeferredTargetError: deferred patching is not supported: ...
 
 ```
 
-Deferral belongs to the config layer instead. A `[[setup]]` entry
-names a trigger module and a callback: the callback runs with the
-module as its argument as soon as that module is imported, or
-immediately if it already was, and the binding it creates lands before
-the application's first call. Applied by `python -m wrapture` or by
-autowrapt, the config is in place before the application imports
-anything, so the ordering nothing enforced in the naive version is now
-guaranteed by the launcher. The last section shows the file.
+What is supported is running the binding code from a post-import
+hook. `wrapture.when_imported` (wrapt's decorator of the same name,
+re-exported so application code need not import wrapt for this one
+job) registers a callback against a module name; the callback runs
+with the module as its argument the moment that module is imported,
+or immediately if it already was. To show it firing, the vendored
+client here is written to disk as a real module the interpreter has
+not yet seen:
+
+```python
+>>> import pathlib
+>>> import tempfile
+
+>>> libdir = tempfile.TemporaryDirectory()
+>>> _ = pathlib.Path(libdir.name, "vendored_client.py").write_text(
+...     "class Client:\n"
+...     "    def request(self, method, path):\n"
+...     "        return {'method': method, 'path': path, 'headers': {}}\n"
+... )
+>>> sys.path.insert(0, libdir.name)
+
+>>> installed: list[wrapture.Binding] = []
+
+>>> @wrapture.when_imported("vendored_client")
+... def install(module):
+...     request = wrapture.binding(module.Client, "request")
+...     request.on_call.transforms_result(lambda r: {**r, "headers": {"X-Tenant": "acme"}})
+...     installed.append(request.apply())
+
+>>> "vendored_client" in sys.modules
+False
+>>> installed
+[]
+
+>>> import vendored_client
+>>> installed
+[<Binding 'Client.request' callable active>]
+>>> vendored_client.Client().request("GET", "/orders")
+{'method': 'GET', 'path': '/orders', 'headers': {'X-Tenant': 'acme'}}
+
+```
+
+The hook created the binding after the import it depends on, by
+construction, and the patch was in place before any caller could
+reach `request()`. Because it runs on the first import of that
+module, wherever that import happens, the application only has to
+register the hook early (its own package `__init__`, or a startup
+module) and no longer cares which of its modules imports the client
+first. Keeping the applied binding in a module-level list is
+deliberate: the hook's local variable is gone once it returns, so
+hold the handle if you want to `suspend()` or `remove()` the patch
+later. Registering after the module is already imported is harmless,
+the hook simply runs at once, so the same code works whether or not
+something imported the library first.
+
+The function form, `wrapture.register_post_import_hook(callback,
+"module.name")`, does the same without the decorator, for the case
+where the patches are built in a loop or from data.
+
+```python
+>>> _ = installed[0].remove()
+>>> vendored_client.Client().request("GET", "/orders")
+{'method': 'GET', 'path': '/orders', 'headers': {}}
+
+```
+
+The config layer offers the same trigger without any code in the
+application. A `[[setup]]` entry names a trigger module and a
+callback: the callback runs with the module as its argument as soon
+as that module is imported, or immediately if it already was, and the
+binding it creates lands before the application's first call. Applied
+by `python -m wrapture` or by autowrapt, the config is in place before
+the application imports anything, so the ordering nothing enforced in
+the naive version is now guaranteed by the launcher. The last section
+shows the file.
 
 ## Recording calls without recording the token
 
@@ -369,7 +436,7 @@ to the callback as a keyword argument:
 pythonpath = "."
 
 [[setup]]
-module = "vendored.client"
+module = "vendored_client"
 call = "wrapture_local.patches:install"
 tenant = "acme"
 ```
@@ -392,7 +459,7 @@ def install(module, *, tenant: str) -> None:
     installed.append(request.apply())
 ```
 
-The callback receives the freshly imported `vendored.client` module,
+The callback receives the freshly imported `vendored_client` module,
 so `module.Client` is the real class, and the binding is created after
 the import it depends on by construction. The callback reference
 resolves only when the hook fires, so naming operator code here never

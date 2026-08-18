@@ -135,7 +135,8 @@ def _reject_deferred(target: Any) -> None:
             f" wrapt's trailing `?` syntax. A deferred wrap registers a"
             f" post-import hook and returns no handle, so a binding would"
             f" have nothing to remove, suspend or query. Import the module"
-            f" first and bind against it."
+            f" first and bind against it, or create the binding inside a"
+            f" `wrapture.when_imported` hook for that module."
         )
 
 

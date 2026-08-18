@@ -48,7 +48,8 @@ class NotImplementedYetError(NotImplementedError):
 
 class DeferredTargetError(ValueError):
     """A string target used wrapt's trailing `?` deferred-patching syntax,
-    which is not supported. Import the module first and bind against it.
+    which is not supported. Import the module first and bind against it,
+    or create the binding inside a `wrapture.when_imported` hook.
     """
 
 

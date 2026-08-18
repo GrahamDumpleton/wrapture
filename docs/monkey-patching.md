@@ -45,8 +45,11 @@ genuinely is not defined on the class, typically one assigned in
 `__init__`; a typo is then accepted too.
 
 The target module must already be imported. wrapt's trailing `?` syntax for
-deferred patching is rejected with `DeferredTargetError`; import the module
-first and bind against it.
+deferred patching is rejected with `DeferredTargetError`, because a binding
+must hold the wrapper it applied in order to remove, suspend and report on
+it. To patch a module the application has not imported yet, create the
+binding inside a post-import hook instead; see
+[patching a module before it is imported](#patching-a-module-before-it-is-imported).
 
 ## Applying and removing
 
@@ -501,6 +504,52 @@ Applying the factory to an iterable that is not an iterator, such as a
 list, raises `TypeError` rather than silently replacing the container
 with an iterator of a different type; call `iter()` on it first if that
 is what you want.
+
+## Patching a module before it is imported
+
+A binding needs its target to exist, but application code often wants
+to patch a third-party module it does not itself import first, and
+without caring which of its own modules eventually does.
+`wrapture.when_imported` handles the ordering: it is wrapt's
+post-import hook decorator, re-exported so this one job does not
+require importing wrapt alongside wrapture. The decorated function
+runs with the module as its argument the moment that module is first
+imported, or immediately if it already has been, so it is the place
+to create and apply the binding:
+
+```python
+import wrapture
+
+patches: list[wrapture.Binding] = []
+
+
+@wrapture.when_imported("requests.sessions")
+def _patch_requests(module):
+    def with_tenant(args, kwargs):
+        headers = {**(kwargs.get("headers") or {}), "X-Tenant": "acme"}
+        return args, {**kwargs, "headers": headers}
+
+    request = wrapture.binding(module.Session, "request")
+    request.on_call.transforms_args(with_tenant)
+
+    patches.append(request.apply())
+```
+
+Register the hook early, typically from the application package's
+`__init__` or a startup module, and the patch is in place before the
+first call regardless of who imports the library. Registering after
+the module has already been imported is harmless: the hook simply
+runs at once. Keep the applied binding somewhere, a module-level list
+or a [binding group](#binding-groups), because the hook's local
+variable is gone as soon as it returns and the handle is what
+`suspend()`, `remove()` and `discover()` work from. The function form,
+`wrapture.register_post_import_hook(callback, "module.name")`, does
+the same without the decorator, for patches built in a loop or from
+data. [Changing what a third-party library does](example-third-party-libraries.md#applying-before-the-library-is-imported)
+walks through a hook firing on a real import, and the config file's
+`[[setup]]` entry, described in
+[configuring from a file](ad-hoc-tracing.md#configuring-from-a-file),
+gives the same trigger without any code in the application.
 
 ## Escape hatch: dropping down to wrapt
 

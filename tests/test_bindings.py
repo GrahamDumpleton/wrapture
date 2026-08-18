@@ -250,6 +250,24 @@ def test_deferred_target_error_is_a_value_error() -> None:
     assert issubclass(DeferredTargetError, ValueError)
 
 
+def test_deferred_target_error_points_at_when_imported() -> None:
+    with pytest.raises(DeferredTargetError, match="wrapture.when_imported"):
+        binding("mymodule?", "handler")
+
+
+def test_post_import_hook_helpers_are_reexported_from_wrapt() -> None:
+    # The supported route to patching a module before it is imported is
+    # a post-import hook, so wrapt's helpers are available under the
+    # wrapture name to save application code importing wrapt for them.
+
+    import wrapture
+
+    assert wrapture.when_imported is wrapt.when_imported
+    assert wrapture.register_post_import_hook is wrapt.register_post_import_hook
+    assert "when_imported" in wrapture.__all__
+    assert "register_post_import_hook" in wrapture.__all__
+
+
 # ---------------------------------------------------------------------------
 # modes and behaviour namespaces
 # ---------------------------------------------------------------------------
