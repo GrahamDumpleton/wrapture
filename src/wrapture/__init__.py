@@ -41,6 +41,11 @@ from .bindings import (
 from .capture import (
     redact,
 )
+from .collectors import (
+    Aggregate,
+    Counter,
+    PathStats,
+)
 from .config import (
     AppliedConfig,
     Config,
@@ -86,13 +91,10 @@ from .observed import (
     observed,
 )
 from .sinks import (
-    Aggregate,
-    Counter,
     Depth,
     Fanout,
     Filter,
     JSONLines,
-    PathStats,
     Printer,
     Sample,
     Sink,

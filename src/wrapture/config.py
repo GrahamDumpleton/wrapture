@@ -42,6 +42,7 @@ import wrapt
 from .bindings import Binding, _select_members, binding
 from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
+from .collectors import Aggregate, Counter
 from .events import Event
 from .exceptions import ConfigError, ConfigWarning
 from .outputs import OutputPath
@@ -928,6 +929,15 @@ _BUILTIN_SINKS: dict[str, Callable[..., Sink]] = {
     "jsonlines": JSONLines,
 }
 
+# The collectors a [[window.collect]] entry can name by short name.
+# Naming one in [[sink]] is an error pointing at [[window]]: a
+# collector needs a run to close before it has anything to report.
+
+_BUILTIN_COLLECTORS: dict[str, Callable[..., Sink]] = {
+    "aggregate": Aggregate,
+    "counter": Counter,
+}
+
 _FILTER_FIELDS = ("kind", "path", "label")
 
 
@@ -973,7 +983,11 @@ def _filter_predicate(spec: Any, *, where: str) -> Callable[[Event], bool]:
 
 
 def _build_sink(
-    table: Any, *, anchor: str | None = None, where: str = "[[sink]]"
+    table: Any,
+    *,
+    anchor: str | None = None,
+    where: str = "[[sink]]",
+    collectors: bool = False,
 ) -> Sink:
     # Construct the sink one [[sink]] table describes: a builtin short
     # name or a module:attr factory, called with the remaining keys as
@@ -1044,13 +1058,24 @@ def _build_sink(
                 f"{where}: to only applies to a module:attr factory that"
                 f" routes to other sinks; {reference!r} is a builtin sink"
             )
-        try:
-            factory = _BUILTIN_SINKS[reference]
-        except KeyError:
+
+        builtins = dict(_BUILTIN_SINKS)
+        if collectors:
+            builtins.update(_BUILTIN_COLLECTORS)
+        elif reference in _BUILTIN_COLLECTORS:
             raise ConfigError(
-                f"{where}: type {reference!r} is not a builtin sink"
-                f" (one of {sorted(_BUILTIN_SINKS)}) or a module:attr"
-                f" factory"
+                f"{where}: {reference!r} is a collector, which reports at the"
+                f" close of a window's run; put it under [[window.collect]]"
+                f" rather than [[sink]]"
+            )
+
+        try:
+            factory = builtins[reference]
+        except KeyError:
+            kinds = "builtin sink or collector" if collectors else "builtin sink"
+            raise ConfigError(
+                f"{where}: type {reference!r} is not a {kinds}"
+                f" (one of {sorted(builtins)}) or a module:attr factory"
             ) from None
 
     if inner is not None:
@@ -1129,7 +1154,12 @@ def _build_window(table: Any, *, index: int, anchor: str | None) -> Window:
         )
 
     collect = [
-        _build_sink(item, anchor=anchor, where=f"{where} collect entry {position}")
+        _build_sink(
+            item,
+            anchor=anchor,
+            where=f"{where} collect entry {position}",
+            collectors=True,
+        )
         for position, item in enumerate(contents, 1)
     ]
 

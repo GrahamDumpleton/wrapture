@@ -58,7 +58,7 @@ from .scheduler import (
     once,
     parse_duration,
 )
-from .sinks import Sink, _note_sink_error, add_sink, remove_sink
+from .sinks import Depth, Filter, Sample, Sink, _note_sink_error, add_sink, remove_sink
 
 __all__ = ["Collector", "Report", "Run", "Window", "window"]
 
@@ -241,15 +241,18 @@ class Window:
             raise ValueError(f"retain must be a non-negative integer, got {retain!r}")
 
         # Sort the contents: a collector satisfies the protocol (and may
-        # be a sink as well, registered while armed); anything else
-        # must be a plain sink.
+        # be a sink as well, registered while armed), possibly beneath
+        # gating combinators, in which case the outer gate is what is
+        # registered and the collector within is what is armed;
+        # anything else must be a plain sink.
 
-        self._collectors: list[Collector] = []
+        self._collectors: list[tuple[Any, Collector]] = []
         self._sinks: list[Sink] = []
 
         for item in collect:
-            if isinstance(item, Collector):
-                self._collectors.append(item)
+            core = _innermost(item)
+            if isinstance(core, Collector):
+                self._collectors.append((item, core))
             elif isinstance(item, Sink):
                 self._sinks.append(item)
             else:
@@ -352,7 +355,7 @@ class Window:
 
     @property
     def collectors(self) -> tuple[Collector, ...]:
-        return tuple(self._collectors)
+        return tuple(core for _, core in self._collectors)
 
     @property
     def sinks(self) -> tuple[Sink, ...]:
@@ -457,10 +460,10 @@ class Window:
                 _bind_context(sink, run.context)
                 add_sink(sink)
 
-            for collector in self._collectors:
-                if isinstance(collector, Sink):
+            for outer, collector in self._collectors:
+                if isinstance(outer, Sink):
                     _bind_context(collector, run.context)
-                    add_sink(collector)
+                    add_sink(outer)
                 try:
                     collector.arm()
                 except Exception:
@@ -499,20 +502,20 @@ class Window:
             run.ended = datetime.now().astimezone()
             run.cut_short = cut_short
 
-            for collector in self._collectors:
+            for outer, collector in self._collectors:
                 try:
                     collector.disarm()
                 except Exception:
                     self._note_error(collector)
-                if isinstance(collector, Sink):
-                    remove_sink(collector)
+                if isinstance(outer, Sink):
+                    remove_sink(outer)
 
             for sink in self._sinks:
                 remove_sink(sink)
                 _release(sink)
 
             reports: list[Report] = []
-            for collector in self._collectors:
+            for _, collector in self._collectors:
                 try:
                     reports.append(collector.report(run))
                 except Exception:
@@ -647,6 +650,14 @@ class Window:
                 stream.write("\n")
 
         os.replace(temporary, path)
+
+
+def _innermost(item: Any) -> Any:
+    # The thing beneath any gating combinators wrapped around it.
+
+    while isinstance(item, (Filter, Depth, Sample)):
+        item = item._sink
+    return item
 
 
 def _bind_context(sink: Any, context: Mapping[str, Any]) -> None:

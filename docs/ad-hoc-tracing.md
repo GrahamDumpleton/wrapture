@@ -186,21 +186,28 @@ keep the timeline for assertions and add a `Printer` while debugging.
 ## Counting without retaining
 
 Not every question needs the events themselves; often a number is the
-answer. Two sinks keep numbers and nothing else, so they are safe to
-leave running for a whole test suite or a long-lived process:
+answer. Two **collectors** keep numbers and nothing else, so they are
+safe to leave running for a whole test suite or a long-lived process:
 
 - `Counter()` counts operations as they begin, failures included. One
   number, no retention.
-- `Aggregate()` keeps one row per path: how many operations began, and
-  the total, self, fastest and slowest execution times of the ones
-  that completed, exceptions included. Memory is bounded by the number
-  of bound locations, however many events flow.
+- `Aggregate()` keeps one row per path: how many operations began,
+  how many completed and how many of those raised, and the total,
+  self, fastest and slowest execution times of the completed ones.
+  Memory is bounded by the number of bound locations, however many
+  events flow.
 
-Both declare `"none"` on both capture axes, which matters: when no
-other active sink asks for more, recording skips value capture
-entirely, including signature binding, the dominant cost of recording
-a call. A counter over a hot method costs a fraction of what a
-recording tape does.
+Both are collectors in the sense of the [windows page](windows.md):
+placed in a window they accumulate while a run is open and hand back
+a report when it closes, which is how "a summary every hour" or "one
+report for the whole process" is spelled, in code or in a config file.
+Both are also sinks, hearing events while registered, so in code they
+can equally be registered with `add_sink()` and read directly. Both
+declare `"none"` on both capture axes, which matters: when no other
+active sink asks for more, recording skips value capture entirely,
+including signature binding, the dominant cost of recording a call. A
+counter over a hot method costs a fraction of what a recording tape
+does.
 
 Counting across a whole suite is how the classic N+1 query regression
 gets caught. Bind the database layer's entry point once, register a
@@ -232,28 +239,34 @@ number attached, and because the counter asks for no values, the whole
 suite pays almost nothing for the guarantee.
 
 `Aggregate` answers the follow-up question, "where is the time going",
-without retaining a single event:
+without retaining a single event. Its `stats` are there to read at
+any time, and its report renders them as a table:
 
 ```python
-hot = wrapture.add_sink(wrapture.Aggregate())
-...
-for path, row in sorted(
-    hot.stats.items(), key=lambda item: item[1].self_total, reverse=True
-):
-    print(
-        f"{path}: {row.count} calls,"
-        f" {row.total:.3f}s total, {row.self_total:.3f}s self"
-    )
+with wrapture.window(collect=[wrapture.Aggregate()]) as run:
+    drive_traffic()
+
+print(run.reports[0].text)
 ```
 
-`self_total` is the figure profilers rank by: the time spent in the
-operation itself, excluding the time its observed children account
-for. A method that is slow because of what it calls ranks low on self
-time; a method that is slow in its own right ranks high, and that
-distinction is what tells you where to look. No external profiler can
-compute it for an arbitrary handful of bindings, because it only sees
-whole call stacks; wrapture computes it from the parent links as
-events close, retaining nothing.
+```text
+aggregate "aggregate" run 1, 2026-08-18 14:05:30 to 14:06:00 +10:00 (30.0s), pid 4142
+3 paths, 153 operations begun, 153 completed, 3 raised
+
+calls    total     self  per-call    min    max  errors  path
+  100  114.0ms  114.0ms     1.1ms  1.0ms  1.9ms          shop:Gateway.charge
+   50  118.2ms    4.2ms     2.4ms  2.1ms  3.4ms          shop:Processor.process
+    3     24us     24us       8us    2us   14us       3  shop:Gateway.refund
+```
+
+`self` is the figure profilers rank by, and the table is sorted by
+it: the time spent in the operation itself, excluding the time its
+observed children account for. A method that is slow because of what
+it calls ranks low on self time; a method that is slow in its own
+right ranks high, and that distinction is what tells you where to
+look. No external profiler can compute it for an arbitrary handful of
+bindings, because it only sees whole call stacks; wrapture computes it
+from the parent links as events close, retaining nothing.
 
 Every recorded event carries `started` and `duration` (exceptions
 included), which is what the rows are built from. For generators the

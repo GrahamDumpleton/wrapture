@@ -35,7 +35,6 @@ import time
 import warnings
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, TextIO
 
 from wrapt import MISSING
@@ -49,7 +48,7 @@ from .capture import (
     summarize,
     type_name,
 )
-from .events import Event, _format_time, _own_time
+from .events import Event, _format_time
 from .exceptions import ConfigWarning, SinkErrorWarning
 from .outputs import OutputPath, open_output
 from .scheduler import Schedule, every, parse_duration
@@ -571,138 +570,6 @@ def _forward(sink: Sink, notification: str, event: Event) -> None:
         getattr(sink, notification)(event)
     except Exception:
         _note_sink_error(sink)
-
-
-class Counter(Sink):
-    """A sink that counts events and retains nothing.
-
-    The count is of operations observed beginning, whether or not they
-    completed. Declaring "none" on both capture axes matters: when no
-    other active sink asks for more, recording skips value capture
-    entirely, including signature binding, the dominant cost, so a
-    counter over a hot method is cheap enough to leave on for a whole
-    test suite.
-    """
-
-    capture_args: CapturePolicy | str = "none"
-    capture_result: CapturePolicy | str = "none"
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._count = 0
-
-    @property
-    def count(self) -> int:
-        """How many operations this sink has heard begin."""
-
-        with self._lock:
-            return self._count
-
-    def on_enter(self, event: Event) -> None:
-        """Count the event."""
-
-        with self._lock:
-            self._count += 1
-
-    def __repr__(self) -> str:
-        return f"<Counter: {self.count}>"
-
-
-@dataclass(frozen=True)
-class PathStats:
-    """Aggregated figures for one path: how many operations began, and
-    the total, self, fastest and slowest execution times of those that
-    closed with one.
-
-    Execution time is the event's duration, except for generators,
-    whose accumulated body time is used instead, since their wall
-    duration includes the consumer's time between yields. self_total
-    is total minus the time spent in observed children: the figure
-    profilers rank by.
-    """
-
-    count: int
-    total: float
-    self_total: float
-    min: float | None
-    max: float | None
-
-
-class Aggregate(Sink):
-    """Per-path statistics in bounded memory.
-
-    One row per path: how many operations began, and the total, self,
-    fastest and slowest execution times of the ones that completed,
-    exceptions included. Self time is computed as events close, from
-    the parent links alone, so no events are retained; memory is
-    bounded by the number of bound locations plus the operations in
-    flight at any moment. Like Counter, it declares "none" capture on
-    both axes, so it never causes values to be captured.
-    """
-
-    capture_args: CapturePolicy | str = "none"
-    capture_result: CapturePolicy | str = "none"
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._rows: dict[str, list[Any]] = {}
-
-        # Children's execution time accumulated against each event
-        # still in flight, keyed by seq; an event's self time is its
-        # own time minus what its children deposited here.
-
-        self._pending: dict[int, float] = {}
-
-    @property
-    def stats(self) -> dict[str, PathStats]:
-        """A snapshot of the per-path figures, keyed by event path."""
-
-        with self._lock:
-            return {
-                path: PathStats(row[0], row[1], row[4], row[2], row[3])
-                for path, row in self._rows.items()
-            }
-
-    def on_enter(self, event: Event) -> None:
-        """Count the operation against its path and mark it in flight."""
-
-        with self._lock:
-            row = self._rows.setdefault(event.path, [0, 0.0, None, None, 0.0])
-            row[0] += 1
-
-            self._pending[event.seq] = 0.0
-
-    def _observe(self, event: Event) -> None:
-        own = _own_time(event)
-
-        with self._lock:
-            children = self._pending.pop(event.seq, 0.0)
-
-            if own is None:
-                return
-
-            # Deposit this event's time with its parent, if the parent
-            # is still in flight; a parent that already closed (a late
-            # child) can no longer be adjusted.
-
-            if event.parent_id is not None and event.parent_id in self._pending:
-                self._pending[event.parent_id] += own
-
-            row = self._rows.setdefault(event.path, [0, 0.0, None, None, 0.0])
-            row[1] += own
-            row[2] = own if row[2] is None else min(row[2], own)
-            row[3] = own if row[3] is None else max(row[3], own)
-            row[4] += max(0.0, own - children)
-
-    def on_exit(self, event: Event) -> None:
-        """Fold the completed operation's time into its row."""
-
-        self._observe(event)
-
-    def on_error(self, event: Event) -> None:
-        """Fold the failed operation's time into its row."""
-
-        self._observe(event)
 
 
 class Fanout(Sink):

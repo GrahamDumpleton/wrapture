@@ -91,7 +91,7 @@ def test_counter_counts_operations_and_retains_nothing() -> None:
     # Failures count too: the count is of operations beginning.
 
     assert counter.count == 3
-    assert repr(counter) == "<Counter: 3>"
+    assert repr(counter) == "<Counter 'counter': 3>"
     assert Counter.capture_args == "none"
     assert Counter.capture_result == "none"
 

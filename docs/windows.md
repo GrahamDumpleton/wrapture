@@ -13,8 +13,8 @@ Two things live inside a window. **Sinks**, the same ones as
 anywhere else, become per-run streams: a printer or JSONLines file
 in a window opens its file when a run opens and releases it when the
 run closes, one file per run. **Collectors** accumulate while a run
-is open and hand back a `Report` object when it closes; the built-in
-collectors are described on their own pages as they arrive, and the
+is open and hand back a `Report` object when it closes; `Counter`
+and `Aggregate` are the built-in ones, described below, and the
 protocol is small enough to implement in a few lines.
 
 ## In code: `window()` and `Window`
@@ -24,7 +24,7 @@ entry, closes on exit, and is yielded so its reports can be read
 afterwards.
 
 ```python
-with wrapture.window(collect=[Counting(), wrapture.Printer()]) as run:
+with wrapture.window(collect=[wrapture.Aggregate(), wrapture.Printer()]) as run:
     drive_traffic()
 
 for report in run.reports:
@@ -39,7 +39,7 @@ triggers described below, and up to three report destinations, and
 window = wrapture.Window(
     name="stats",
     after="5m", duration="30s", every="1h", align=True,
-    collect=[Counting()],
+    collect=[wrapture.Aggregate()],
     report="reports/{window}-{first}/run-{run:02}.txt",
     on_report=publish,
 )
@@ -121,6 +121,69 @@ repeating window that names the same file for every run (no run or
 time variable) rewrites it each time, and is warned about where the
 window is built.
 
+## The built-in collectors
+
+`Counter` and `Aggregate` are introduced on the
+[ad-hoc tracing page](ad-hoc-tracing.md#counting-without-retaining);
+here are their report shapes. Both take a `name=` (config key
+`name`), defaulting to their kind, which is what `{name}` expands to
+and what the report header shows. Gating keys apply to them as to
+any entry: `filter = { kind = "request" }` on an aggregate reports
+requests alone.
+
+**Counter** (`kind = "counter"`): `text` is the header line and the
+count; `data` is `{"count": n}`.
+
+```text
+counter "queries" run 4, 2026-08-18 14:00:00 to 15:00:00 +10:00 (1h 0m 0s), pid 4142
+21,884 operations
+```
+
+**Aggregate** (`kind = "aggregate"`): `text` is the header, a totals
+line, and a table sorted by self time with one row per path, columns
+`calls`, `total`, `self`, `per-call`, `min`, `max`, `path`, plus an
+`errors` column when any operation raised; a path begun but never
+completed shows its count with the timing cells blank. `data` is
+`{"paths": {path: {"count", "completed", "errors", "total", "self",
+"min", "max"}}, "begun": n, "completed": n, "raised": n}`, the paths
+in table order.
+
+```text
+aggregate "stats" run 3, 2026-08-18 14:00:00 to 15:00:00 +10:00 (1h 0m 0s), pid 4142
+7 paths, 21,884 operations begun, 21,879 completed, 12 raised
+
+calls    total     self  per-call    min      max  errors  path
+9,412  84.211s  31.870s     8.9ms  1.2ms  412.7ms          myapp.wsgi:application
+9,412  52.341s  40.106s     5.6ms  0.8ms  388.2ms          myapp.views:OrderView.get
+9,401  12.235s  12.235s     1.3ms  0.4ms   96.1ms      12  myapp.services:Pricing.quote
+```
+
+The two shapes people usually want are both windows: one report for
+the whole process is a window with no trigger and no `for`; a report
+every hour with totals reset each hour is `every = "1h"` with
+`align = true`, one file per run:
+
+```toml
+[[window]]
+name = "stats"
+report = "reports/stats-{datetime}.txt"
+
+[[window.collect]]
+type = "aggregate"
+
+[[window]]
+name = "hourly"
+every = "1h"
+align = true
+report = "reports/{window}-{first}/run-{run:02}.txt"
+
+[[window.collect]]
+type = "aggregate"
+```
+
+Naming a collector in `[[sink]]` is a load-time error pointing here:
+a collector needs a run to close before it has anything to report.
+
 ## In config: `[[window]]`
 
 Windows are top-level `[[window]]` tables beside `[[sink]]`: the sink
@@ -167,7 +230,7 @@ for = "20s"
 report = "reports/{window}-{first}/run-{run:02}.txt"
 
 [[window.collect]]
-type = "myapp.tracing:HotPaths"
+type = "aggregate"
 ```
 
 Relative paths, `report` and the `path` of a builtin sink alike,
