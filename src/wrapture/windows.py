@@ -13,7 +13,10 @@ Triggers, all optional and combinable within the rules given on
 Window: `after` opens once, that long after start(); `every` repeats;
 `times` caps the repeats; `align` puts the repeats on the local
 wall-clock boundary; `at` opens the first run at the next local
-occurrence of a time of day. `duration` is how long a run stays open,
+occurrence of a time of day; `on_signal` opens a run when the process
+receives a signal and `on_file` when a named file appears (it is
+consumed), the two ways an operator opens a run from outside. `duration`
+is how long a run stays open,
 with two shortcuts: no trigger and no duration is one run for the
 whole process; `every` without duration is back-to-back runs, each
 the whole period. A window's runs never overlap: an open while a run
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import os
 import random
+import signal
 import threading
 import time
 import warnings
@@ -55,12 +59,15 @@ from .scheduler import (
     _next_aligned,
     _next_at,
     _parse_hhmm,
+    every,
     once,
     parse_duration,
 )
 from .sinks import Depth, Filter, Sample, Sink, _note_sink_error, add_sink, remove_sink
 
 __all__ = ["Collector", "Report", "Run", "Window", "window"]
+
+_POLL_INTERVAL = 2.0
 
 
 @dataclass(frozen=True)
@@ -176,7 +183,13 @@ class Window:
     described in the module docstring, all durations in the forms
     rotate= accepts ("30s", "1h", or seconds) and `at` a local "HH:MM".
     `at` cannot be combined with `after` or `align`; `times` and `align`
-    need `every`; `duration` must be shorter than `every`.
+    need `every`; `duration` must be shorter than `every`. `on_signal`
+    (a signal.Signals member, its number, or its name with or without
+    the SIG prefix) and `on_file` (a path whose appearance opens a run,
+    the file being removed as it is consumed, polled every couple of
+    seconds) open runs from outside; with either and no other trigger
+    the window opens only when kicked, and a kick with no `duration`
+    closes any open run and starts the next, so a signal toggles.
 
     `report` is an output path template for the file destination,
     `on_report` a callable given each Report, and `retain` how many
@@ -200,6 +213,8 @@ class Window:
         align: bool = False,
         at: str | None = None,
         jitter: str | int | float | None = None,
+        on_signal: str | int | signal.Signals | None = None,
+        on_file: str | os.PathLike[str] | None = None,
         collect: Iterable[Any] = (),
         report: str | os.PathLike[str] | None = None,
         on_report: Callable[[Report], Any] | None = None,
@@ -215,6 +230,8 @@ class Window:
         self._jitter = parse_duration(jitter) if jitter is not None else None
         self._align = bool(align)
         self._at = at
+        self._signal = _signal_named(on_signal) if on_signal is not None else None
+        self._file = os.fspath(on_file) if on_file is not None else None
 
         if at is not None:
             _parse_hhmm(at)
@@ -306,6 +323,8 @@ class Window:
         self._reports: deque[Report] = deque(maxlen=retain)
         self._open_schedule: Schedule | None = None
         self._close_schedule: Schedule | None = None
+        self._poll: Schedule | None = None
+        self._kicks = 0
         self.errors = 0
 
     def __repr__(self) -> str:
@@ -316,6 +335,10 @@ class Window:
                 parts.append(f", {key}={value!r}")
         if self._align:
             parts.append(", align=True")
+        if self._signal is not None:
+            parts.append(f", on_signal={self._signal.name!r}")
+        if self._file is not None:
+            parts.append(f", on_file={self._file!r}")
         if self._report_path is not None:
             parts.append(f", report={self._report_path.template!r}")
         return "".join(parts) + ")"
@@ -348,6 +371,13 @@ class Window:
             return self._refused
 
     @property
+    def kicks(self) -> int:
+        """How many times a signal or file trigger fired."""
+
+        with self._lock:
+            return self._kicks
+
+    @property
     def reports(self) -> tuple[Report, ...]:
         """The most recent reports, oldest first, up to `retain`."""
 
@@ -372,6 +402,10 @@ class Window:
         """One line saying when the window runs, for config.report()."""
 
         clauses: list[str] = []
+        if self._signal is not None:
+            clauses.append(f"on {self._signal.name}")
+        if self._file is not None:
+            clauses.append(f"on touch of {self._file}")
         if self._at is not None:
             clauses.append(f"at {self._at}")
         if self._after is not None:
@@ -387,16 +421,36 @@ class Window:
             clauses.append(f"for {self._duration:g}s")
         elif self._every is not None:
             clauses.append("back to back")
+        elif self._kicked:
+            clauses.append("until the next kick")
         elif not clauses:
             clauses.append("whole process")
 
         return ", ".join(clauses)
 
+    @property
+    def _kicked(self) -> bool:
+        return self._signal is not None or self._file is not None
+
+    @property
+    def _scheduled(self) -> bool:
+        # Whether anything opens runs on a timer, as opposed to only
+        # when kicked from outside.
+
+        return (
+            self._after is not None
+            or self._every is not None
+            or self._at is not None
+            or not self._kicked
+        )
+
     # -- lifecycle ----------------------------------------------------
 
     def start(self) -> None:
         """Arm the schedule: open the first run now or at its trigger,
-        and repeat as configured. Idempotent."""
+        install the signal handler or file poll, and repeat as
+        configured. Idempotent. Installing a signal handler is only
+        possible from the main thread; starting elsewhere raises."""
 
         with self._lock:
             if self._started:
@@ -405,6 +459,17 @@ class Window:
             self._stopped = False
 
         _register(self)
+
+        if self._signal is not None:
+            _listen(self._signal, self)
+
+        if self._file is not None:
+            self._poll = every(
+                self._poll_file, _POLL_INTERVAL, name=f"window {self._name!r} poll"
+            )
+
+        if not self._scheduled:
+            return
 
         delay = self._first_delay()
         if delay <= 0:
@@ -425,9 +490,31 @@ class Window:
                 self._open_schedule.cancel()
                 self._open_schedule = None
 
+            if self._poll is not None:
+                self._poll.cancel()
+                self._poll = None
+
             planned = self._duration is not None or self._every is not None
 
+        if self._signal is not None:
+            _unlisten(self._signal, self)
+
         self.close(cut_short=planned)
+
+    def kick(self) -> None:
+        """What a signal or file trigger does: open a run, or with no
+        duration set, close the open run and start the next. Refused
+        and counted while a timed run is in progress."""
+
+        with self._lock:
+            self._kicks += 1
+            if self._stopped:
+                return
+
+        if self._duration is None and self._run is not None:
+            self.close()
+
+        self.open()
 
     def open(self) -> bool:
         """Open a run now. Returns False, and counts the refusal, when a
@@ -619,6 +706,33 @@ class Window:
             self._close_schedule = None
         self.close()
 
+    def _poll_file(self) -> None:
+        # The file trigger: when the file is there, consume it and open
+        # a run. A file that cannot be removed would fire on every poll,
+        # so that is warned about once and the poll stops.
+
+        assert self._file is not None
+
+        if not os.path.exists(self._file):
+            return
+
+        try:
+            os.remove(self._file)
+        except OSError as exc:
+            warnings.warn(
+                f"window {self._name!r} cannot remove its trigger file"
+                f" {self._file!r} ({exc}); the file trigger is disabled",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            with self._lock:
+                if self._poll is not None:
+                    self._poll.cancel()
+                    self._poll = None
+            return
+
+        self.kick()
+
     def _deliver(self, report: Report, run: Run, *, several: bool) -> None:
         if self._on_report is not None:
             try:
@@ -683,6 +797,100 @@ def _release(sink: Any) -> None:
             release()
     except Exception:
         _note_sink_error(sink)
+
+
+def _signal_named(value: str | int | signal.Signals) -> signal.Signals:
+    # Normalise a signal given as a signal.Signals member, its number,
+    # or its name with or without the SIG prefix, to the member, so a
+    # window reports it one way whichever form it was given in.
+
+    if isinstance(value, bool):
+        raise ValueError(f"on_signal must name a signal, got {value!r}")
+
+    if isinstance(value, str):
+        name = value.strip().upper()
+        if not name.startswith("SIG"):
+            name = "SIG" + name
+        try:
+            return signal.Signals[name]
+        except KeyError:
+            raise ValueError(
+                f"on_signal {value!r} is not a signal on this platform"
+            ) from None
+
+    if isinstance(value, int):
+        try:
+            return signal.Signals(value)
+        except ValueError:
+            raise ValueError(
+                f"on_signal {value!r} is not a signal number on this platform"
+            ) from None
+
+    raise ValueError(f"on_signal must name a signal, got {value!r}")
+
+
+# One real handler per signal, dispatching to every window listening
+# for it; the handler that was there before is chained after them when
+# it was a Python callable, and restored when the last window leaves.
+
+_listeners: dict[signal.Signals, tuple[Any, list[Window]]] = {}
+_signal_lock = threading.Lock()
+
+
+def _listen(signum: signal.Signals, window: Window) -> None:
+    with _signal_lock:
+        entry = _listeners.get(signum)
+        if entry is not None:
+            entry[1].append(window)
+            return
+
+        try:
+            previous = signal.signal(signum, _dispatch)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"window {window.name!r}: a signal handler for"
+                f" {signum.name} can only be installed from the main thread"
+                f" ({exc})"
+            ) from None
+
+        _listeners[signum] = (previous, [window])
+
+
+def _unlisten(signum: signal.Signals, window: Window) -> None:
+    with _signal_lock:
+        entry = _listeners.get(signum)
+        if entry is None:
+            return
+
+        previous, windows = entry
+        if window in windows:
+            windows.remove(window)
+        if windows:
+            return
+
+        del _listeners[signum]
+        try:
+            signal.signal(signum, previous if previous is not None else signal.SIG_DFL)
+        except (ValueError, TypeError, OSError):
+            pass
+
+
+def _dispatch(signum: int, frame: Any) -> None:
+    # Runs on the main thread between bytecodes, so it does the least
+    # possible: hands each listening window's kick to the scheduler
+    # thread, where every other trigger opens runs, then chains to the
+    # handler that was there before.
+
+    with _signal_lock:
+        entry = _listeners.get(signal.Signals(signum))
+        previous, windows = entry if entry is not None else (None, [])
+        windows = list(windows)
+
+    for window in windows:
+        once(window.kick, 0, name=f"window {window.name!r} signal")
+
+    if callable(previous):
+        previous(signum, frame)
 
 
 # Every started window is registered so shutdown() (and so interpreter

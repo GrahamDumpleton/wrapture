@@ -1122,6 +1122,8 @@ _WINDOW_KEYS = {
     "align",
     "at",
     "jitter",
+    "on_signal",
+    "on_file",
     "report",
     "collect",
 }
@@ -1174,6 +1176,13 @@ def _build_window(table: Any, *, index: int, anchor: str | None) -> Window:
     if not isinstance(align, bool):
         raise ConfigError(f"{where}: align must be true or false")
 
+    on_file = table.get("on_file")
+    if on_file is not None:
+        if not isinstance(on_file, str) or not on_file:
+            raise ConfigError(f"{where}: on_file must be a path string")
+        if anchor is not None and not os.path.isabs(on_file):
+            on_file = os.path.normpath(os.path.join(anchor, on_file))
+
     try:
         return Window(
             name=name,
@@ -1184,6 +1193,8 @@ def _build_window(table: Any, *, index: int, anchor: str | None) -> Window:
             align=align,
             at=table.get("at"),
             jitter=table.get("jitter"),
+            on_signal=table.get("on_signal"),
+            on_file=on_file,
             collect=collect,
             report=report,
         )

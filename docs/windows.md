@@ -69,6 +69,23 @@ number of seconds); the config key for `duration` is `for`.
 | `align = true` | put the repeats on the local wall-clock boundary of `every`: hourly on the hour, daily at midnight; with `after`, the first boundary after the delay (needs `every`) |
 | `at = "22:00"` | open the first run at the next local occurrence of a time of day; `every`/`times` continue from there; cannot combine with `after` or `align` |
 | `jitter = "10s"` | add a random delay of up to this to each opening, so a fleet of workers does not fire together |
+| `on_signal = "SIGUSR2"` | open a run when the process receives the signal (in code a `signal.Signals` member, its number, or its name with or without `SIG`) |
+| `on_file = "run/profile-now"` | open a run when the file appears; it is removed as it is consumed, so touch once means run once |
+
+`on_signal` and `on_file` are the two ways an operator opens a run
+from outside, without a restart: `kill -USR2 <pid>`, or `touch` a
+file, from a shell or a deploy script. A window with either and no
+timed trigger opens only when kicked; with `every` as well the kicks
+add runs to the schedule. A kick during a timed run (one with `for`)
+is refused and counted on `refused`, since runs never overlap; a
+kick with no `for` closes the open run and starts the next, so a
+signal toggles: kick to start, kick again to report and start over.
+The signal handler is installed at `start()` (for a config window,
+at apply), which must happen on the main thread, and any handler
+already there is called after wrapture's and restored when the last
+window listening for that signal stops. `SIGUSR1`/`SIGUSR2` do not
+exist on Windows; `on_file` is the cross-platform equivalent, and
+the one that works under servers where signal handling is awkward.
 
 Two shortcuts make the commonest shapes the shortest spellings. A
 window with no trigger and no `for` is **one run for the whole
@@ -220,6 +237,16 @@ for = "2m"
 type = "printer"
 depth = 2
 
+# Operator-triggered: count for a minute when kicked.
+[[window]]
+name = "kick"
+on_signal = "SIGUSR2"
+for = "60s"
+report = "reports/{window}-{datetime}.txt"
+
+[[window.collect]]
+type = "counter"
+
 # Overnight batch: twelve runs, one an hour from 22:00.
 [[window]]
 name = "overnight"
@@ -233,8 +260,8 @@ report = "reports/{window}-{first}/run-{run:02}.txt"
 type = "aggregate"
 ```
 
-Relative paths, `report` and the `path` of a builtin sink alike,
-anchor to the config file's directory. `config.report()` lists each
+Relative paths, `report`, `on_file` and the `path` of a builtin sink
+alike, anchor to the config file's directory. `config.report()` lists each
 window with its schedule in words. A window without a `name` is
 named by position (`window1`); the window variables in a top-level
 `[[sink]]` path are a load-time error, since there they have nothing

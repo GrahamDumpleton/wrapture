@@ -5,6 +5,8 @@ report delivered to its destinations."""
 from __future__ import annotations
 
 import io
+import os
+import signal
 import textwrap
 import threading
 import time
@@ -640,3 +642,175 @@ def test_a_failing_shutdown_step_does_not_stop_the_rest(
         lifecycle.shutdown()
 
     assert ran == ["explode", "fine"]
+
+
+# ---------------------------------------------------------------------------
+# signal and file triggers
+# ---------------------------------------------------------------------------
+
+
+def test_on_signal_accepts_a_member_a_number_or_a_name() -> None:
+    for given in (signal.SIGTERM, int(signal.SIGTERM), "SIGTERM", "term", " Term "):
+        span = Window(name="sig", on_signal=given, collect=[Counting()])
+        assert span._signal is signal.SIGTERM
+        assert "on_signal='SIGTERM'" in repr(span)
+        assert span.describe() == "on SIGTERM, until the next kick"
+
+    with pytest.raises(ValueError, match="not a signal on this platform"):
+        Window(on_signal="SIGNOPE")
+
+    with pytest.raises(ValueError, match="not a signal number"):
+        Window(on_signal=999999)
+
+    with pytest.raises(ValueError, match="must name a signal"):
+        Window(on_signal=True)
+
+
+def test_a_kicked_window_opens_only_when_kicked() -> None:
+    seen: list[Report] = []
+    span = Window(
+        name="kicked",
+        on_signal=signal.SIGTERM,
+        collect=[Counting()],
+        on_report=seen.append,
+    )
+    charge = binding(Gateway, "charge")
+
+    span.start()
+    try:
+        assert span.run is None  # not opened at start
+
+        with charge:
+            span.kick()
+            assert span.run is not None and span.runs == 1
+            Gateway().charge(1)
+
+            # No duration: the next kick closes and reopens.
+
+            span.kick()
+            assert span.runs == 2
+            assert [report.data["count"] for report in seen] == [1]
+    finally:
+        span.stop()
+
+    assert span.kicks == 2
+    assert [report.run for report in seen] == [1, 2]
+    assert [report.cut_short for report in seen] == [False, False]
+
+
+def test_a_kick_during_a_timed_run_is_refused() -> None:
+    span = Window(
+        name="timed", on_signal=signal.SIGTERM, duration="1h", collect=[Counting()]
+    )
+
+    span.start()
+    try:
+        span.kick()
+        span.kick()
+        assert span.runs == 1
+        assert span.refused == 1
+    finally:
+        span.stop()
+
+    assert span.describe() == "on SIGTERM, for 3600s"
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR2"), reason="POSIX signal")
+def test_a_real_signal_opens_a_run_and_chains_and_restores_the_old_handler() -> None:
+    chained: list[int] = []
+    previous = signal.signal(
+        signal.SIGUSR2, lambda signum, frame: chained.append(signum)
+    )
+    try:
+        span = Window(
+            name="usr2", on_signal="USR2", duration="1h", collect=[Counting()]
+        )
+        span.start()
+        try:
+            os.kill(os.getpid(), signal.SIGUSR2)
+            wait_for(lambda: span.run is not None)
+        finally:
+            span.stop()
+
+        assert span.kicks == 1
+        assert chained == [signal.SIGUSR2]
+
+        # Our handler is gone again once the last window stops.
+
+        assert signal.getsignal(signal.SIGUSR2) is not None
+        os.kill(os.getpid(), signal.SIGUSR2)
+        wait_for(lambda: len(chained) == 2)
+        assert span.kicks == 1
+    finally:
+        signal.signal(signal.SIGUSR2, previous)
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGUSR2"), reason="POSIX signal")
+def test_a_signal_handler_can_only_be_installed_from_the_main_thread() -> None:
+    span = Window(name="offthread", on_signal="USR2", collect=[Counting()])
+    failure: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            span.start()
+        except BaseException as exc:  # noqa: BLE001
+            failure.append(exc)
+
+    worker = threading.Thread(target=start)
+    worker.start()
+    worker.join()
+
+    assert failure and isinstance(failure[0], RuntimeError)
+    assert "main thread" in str(failure[0])
+    span.stop()
+
+
+def test_a_touched_file_opens_a_run_and_is_consumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import wrapture.windows as windows
+
+    monkeypatch.setattr(windows, "_POLL_INTERVAL", 0.02)
+
+    trigger = tmp_path / "profile-now"
+    span = Window(name="touch", on_file=trigger, duration="1h", collect=[Counting()])
+
+    span.start()
+    try:
+        assert span.run is None
+        trigger.write_text("")
+        wait_for(lambda: span.run is not None)
+        assert not trigger.exists()
+        assert span.describe() == f"on touch of {trigger}, for 3600s"
+    finally:
+        span.stop()
+
+    assert span.kicks == 1
+
+
+def test_config_takes_on_signal_and_on_file(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            [[window]]
+            name = "kick"
+            on_signal = "SIGTERM"
+            on_file = "run/profile-now"
+            for = "60s"
+
+            [[window.collect]]
+            type = "counter"
+            """
+        )
+    )
+
+    (span,) = load_config(source).windows
+
+    assert span._signal is signal.SIGTERM
+    assert span._file == str(tmp_path / "run" / "profile-now")
+
+    source.write_text('[[window]]\nname = "x"\non_signal = "SIGNOPE"\n')
+
+    with pytest.raises(ConfigError, match="not a signal on this platform"):
+        load_config(source)
