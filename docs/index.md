@@ -11,10 +11,10 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on
 the safe monkey-patching machinery wrapt provides.
 
 ```{note}
-wrapture is in early development. The monkey patching, unit testing
-and ad-hoc tracing layers are implemented, including WSGI and ASGI
-request tracing. Development previews are published to
-[PyPI](https://pypi.org/project/wrapture/); the API may still shift
+wrapture is stabilising ahead of 1.0.0. The feature set is complete
+for a first release and development previews are published to
+[PyPI](https://pypi.org/project/wrapture/). The API is being exercised
+and tidied rather than extended, so small changes are still possible
 before 1.0.0.
 ```
 
