@@ -85,6 +85,9 @@ dev = [
 # getting started page run as doctests and cannot rot.
 testpaths = ["tests", "docs"]
 addopts = "--doctest-glob=*.md"
+# ELLIPSIS lets a transcript elide values that vary between runs, such
+# as the elapsed time on a printer's closing line.
+doctest_optionflags = ["ELLIPSIS"]
 
 [tool.mypy]
 python_version = "3.12"

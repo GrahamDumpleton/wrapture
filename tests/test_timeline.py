@@ -19,8 +19,9 @@ from wrapture import (
     bindings,
     timeline,
 )
+from wrapture.events import _format_time
 from wrapture.sinks import _active_sinks, _record_event
-from wrapture.timeline import _current_tape, _format_time, _pop, _push, _stack
+from wrapture.timeline import _current_tape, _pop, _push, _stack
 
 
 class Gateway:

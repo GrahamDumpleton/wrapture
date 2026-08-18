@@ -61,13 +61,14 @@ the server drives a streaming tail as it iterates the body.
   same signal an abandoned generator gives.
 
 In the live printer a request reads access-log style, with the
-closing line arriving when the body closes:
+closing line arriving when the body closes and showing the time to
+last byte alongside the body's own share:
 
 ```
 GET /orders/42?expand=items (myapp.wsgi.application)
   shop.OrderService.load(order_id=42)
-  shop.OrderService.load -> <Order 42>
-myapp.wsgi.application -> '200 OK'
+  shop.OrderService.load -> <Order 42> [3.2ms]
+myapp.wsgi.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
 ```
 
 ## Redaction

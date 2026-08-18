@@ -82,13 +82,14 @@ exporters need nothing new.
   because the client went away, the disconnect message it read is
   recorded as `data["disconnect"] = True` alongside.
 
-In the live printer a request reads access-log style:
+In the live printer a request reads access-log style, the closing
+line showing the time to last byte and the body's own share of it:
 
 ```
 GET /orders/42?expand=items (myapp.main.application)
   shop.OrderService.load(order_id=42)
-  shop.OrderService.load -> <Order 42>
-myapp.main.application -> '200 OK'
+  shop.OrderService.load -> <Order 42> [3.2ms]
+myapp.main.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
 ```
 
 ## Redaction

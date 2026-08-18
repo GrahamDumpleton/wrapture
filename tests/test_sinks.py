@@ -9,11 +9,13 @@ fast path a bound but unmonitored call takes.
 
 import importlib
 import io
+import re
 import threading
 import time
 import warnings
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -409,7 +411,7 @@ def test_printer_prints_the_call_and_its_outcome() -> None:
     output = io.StringIO()
     charge = binding(Gateway, "charge")
 
-    with charge, listening(Printer(output)):
+    with charge, listening(Printer(output, timing=False)):
         Gateway().charge(500)
 
     assert output.getvalue() == (
@@ -422,7 +424,7 @@ def test_printer_indents_by_depth_and_marks_errors() -> None:
     process = binding(Processor, "process")
     refund = binding(Gateway, "refund")
 
-    with process, refund, listening(Printer(output)):
+    with process, refund, listening(Printer(output, timing=False)):
         Processor().process()
 
     assert output.getvalue() == (
@@ -437,10 +439,123 @@ def test_printer_skips_the_outcome_line_when_nothing_was_captured() -> None:
     output = io.StringIO()
     charge = binding(Gateway, "charge", capture="none")
 
-    with charge, listening(Printer(output)):
+    with charge, listening(Printer(output, timing=False)):
         Gateway().charge(500)
 
     assert output.getvalue() == "Gateway.charge()\n"
+
+
+def test_printer_times_closing_lines_by_default() -> None:
+    output = io.StringIO()
+    process = binding(Processor, "process")
+    refund = binding(Gateway, "refund")
+
+    with process, refund, listening(Printer(output)):
+        Processor().process()
+
+    lines = output.getvalue().splitlines()
+
+    assert lines[0] == "Processor.process()"
+    assert lines[1] == "  Gateway.refund(amount=1)"
+    assert re.fullmatch(r"  Gateway.refund !! TimeoutError \[\d+us\]", lines[2])
+    assert re.fullmatch(r"Processor.process -> 'ok' \[[\d.]+(us|ms|s)\]", lines[3])
+
+
+def test_printer_still_closes_a_timed_line_with_no_captured_result() -> None:
+    output = io.StringIO()
+    charge = binding(Gateway, "charge", capture="none")
+
+    with charge, listening(Printer(output)):
+        Gateway().charge(500)
+
+    lines = output.getvalue().splitlines()
+
+    assert lines[0] == "Gateway.charge()"
+    assert re.fullmatch(r"Gateway.charge \[\d+us\]", lines[1])
+
+
+class Streamer:
+    def stream(self) -> Generator[int]:
+        yield 1
+        yield 2
+        yield 3
+
+
+def test_printer_shows_the_body_split_for_a_streamed_result() -> None:
+    output = io.StringIO()
+    stream = binding(Streamer, "stream")
+
+    with stream, listening(Printer(output)):
+        list(Streamer().stream())
+
+    closing = output.getvalue().splitlines()[-1]
+
+    unit = r"[\d.]+(us|ms|s)"
+
+    assert re.fullmatch(
+        rf"Streamer.stream -> None \[{unit}, body {unit} over 3 items\]", closing
+    )
+
+
+def test_printer_timestamps_opening_lines_and_pads_the_rest() -> None:
+    output = io.StringIO()
+    process = binding(Processor, "process")
+    refund = binding(Gateway, "refund")
+
+    with process, refund, listening(Printer(output, timing=False, timestamps=True)):
+        Processor().process()
+
+    lines = output.getvalue().splitlines()
+    clock = r"\d\d:\d\d:\d\d\.\d\d\d"
+
+    assert re.fullmatch(clock + r" Processor.process\(\)", lines[0])
+    assert re.fullmatch(clock + r"   Gateway.refund\(amount=1\)", lines[1])
+    assert lines[2] == " " * 13 + "  Gateway.refund !! TimeoutError"
+    assert lines[3] == " " * 13 + "Processor.process -> 'ok'"
+
+
+def test_printer_appends_to_a_file_at_path(tmp_path: Path) -> None:
+    target = tmp_path / "logs" / "trace.log"
+    target.parent.mkdir()
+    target.write_text("earlier\n")
+
+    printer = Printer(path=target, timing=False)
+    charge = binding(Gateway, "charge")
+
+    with charge, listening(printer):
+        Gateway().charge(500)
+
+    printer.close()
+    printer.close()
+
+    assert target.read_text() == (
+        "earlier\nGateway.charge(amount=500)\nGateway.charge -> 'ch_500'\n"
+    )
+
+    # Lines after close are dropped rather than reopening the file.
+
+    with charge, listening(printer):
+        Gateway().charge(1)
+
+    assert target.read_text().count("Gateway.charge(") == 1
+
+
+def test_printer_opens_the_file_lazily(tmp_path: Path) -> None:
+    target = tmp_path / "trace.log"
+
+    printer = Printer(path=target)
+
+    assert not target.exists()
+
+    printer.flush()
+    printer.close()
+
+    assert not target.exists()
+
+
+def test_printer_refuses_both_stream_and_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="either stream or path"):
+        Printer(io.StringIO(), path=tmp_path / "trace.log")
 
 
 def test_printer_defaults_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:

@@ -112,10 +112,10 @@ still get their chance.
 
 `Printer` is the simplest real sink: it prints each event as it
 happens, one line when an operation begins, indented by nesting depth,
-and a closing line with the outcome, using the same `->` and `!!`
-markers as `tape.tree()`. It writes to the stream you give it, or to
-`sys.stderr` by default, flushing every line so the trace is intact up
-to the moment of a crash or hang.
+and a closing line with the outcome and how long it took, using the
+same `->` and `!!` markers as `tape.tree()`. It writes to the stream
+you give it, or to `sys.stderr` by default, flushing every line so the
+trace is intact up to the moment of a crash or hang.
 
 ```pycon
 >>> import sys
@@ -130,13 +130,45 @@ to the moment of a crash or hang.
 
 >>> Gateway().charge(500)
 Gateway.charge(amount=500, currency='USD')
-Gateway.charge -> 'ch_500'
+Gateway.charge -> 'ch_500' [...]
 'ch_500'
 
 >>> wrapture.remove_sink(printer)
 >>> _ = charge.remove()
 
 ```
+
+The bracketed figure on the closing line is the elapsed time, in the
+same adaptive units `tape.tree(times=True)` uses (`12us`, `3.2ms`,
+`1.40s`), and for a streamed body (a generator, a request) it also
+shows the time spent producing the body and how many items or chunks
+there were: `[11.8ms, body 4.1ms over 3 chunks]`. An operation whose
+result was not captured still gets a closing line with the time. Pass
+`timing=False` when stable output matters more than the figure, as in
+a doctest or a diff.
+
+Two more options make the printer useful away from a terminal. `path`
+appends to a file instead of a stream (opened on the first line
+written, and closed by `close()`; the file, being a plain path, is
+also what a config file can name). `timestamps=True` prefixes each
+opening line with the local wall-clock time to the millisecond, so a
+printer file can be lined up with server logs afterwards. Closing
+lines are not timestamped; the opening time plus the duration locates
+them, and it keeps the tree readable:
+
+```text
+14:05:30.117 GET /orders/42?expand=items (myapp.wsgi.application)
+14:05:30.118   shop.OrderService.load(order_id=42)
+               shop.OrderService.load -> <Order 42> [3.2ms]
+             myapp.wsgi.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
+```
+
+```python
+wrapture.add_sink(wrapture.Printer(path="trace.log", timestamps=True))
+```
+
+`stream` and `path` are mutually exclusive; with neither, output goes
+to `sys.stderr`.
 
 No timeline appears anywhere above: the binding is applied, a sink is
 listening, and events flow. This is the minimal form of tracing a
@@ -555,9 +587,17 @@ the entry, where they never reach any sink at all.
 constructor. Two builtin names cover the no-code cases: `printer` and
 `jsonlines`. Anything else is reached by `module:attr` reference: a
 callable, invoked with the remaining keys as keyword arguments, that
-must return a `Sink`. The factory is also the composition escape
-hatch; the file has no syntax for combinators because a factory can
-return any arrangement:
+must return a `Sink`. So a printer writing timestamped lines to a
+file, and a factory composing whatever it likes (the file has no
+syntax for combinators because a factory can return any
+arrangement):
+
+```toml
+[sink]
+type = "printer"
+path = "trace.log"
+timestamps = true
+```
 
 ```toml
 [sink]

@@ -972,6 +972,24 @@ def test_load_config_builds_builtin_sinks(tmp_path: Path) -> None:
     assert isinstance(config.sink, JSONLines)
 
 
+def test_load_config_passes_printer_options_through(tmp_path: Path) -> None:
+    from wrapture import Printer
+
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        '[sink]\ntype = "printer"\n'
+        f'path = "{(tmp_path / "trace.log").as_posix()}"\n'
+        "timestamps = true\ntiming = false\n"
+    )
+
+    config = load_config(source)
+
+    assert isinstance(config.sink, Printer)
+    assert config.sink._path == str(tmp_path / "trace.log")
+    assert config.sink._timestamps is True
+    assert config.sink._timing is False
+
+
 def test_an_unknown_builtin_sink_fails_loudly(tmp_path: Path) -> None:
     source = tmp_path / "trace.toml"
     source.write_text('[sink]\ntype = "carrier-pigeon"\n')

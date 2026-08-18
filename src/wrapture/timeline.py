@@ -27,19 +27,8 @@ from wrapt import MISSING
 
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
-from .events import Event, _own_time
+from .events import Event, _format_time, _own_time
 from .sinks import Sink, _in_recorder, _scoped_sinks
-
-
-def _format_time(seconds: float) -> str:
-    # Adaptive units so a tree of mixed magnitudes stays readable:
-    # seconds, milliseconds, then microseconds.
-
-    if seconds >= 1.0:
-        return f"{seconds:.2f}s"
-    if seconds >= 0.001:
-        return f"{seconds * 1000:.1f}ms"
-    return f"{seconds * 1_000_000:.0f}us"
 
 
 @runtime_checkable

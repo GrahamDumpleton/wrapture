@@ -166,6 +166,18 @@ class Event:
         return ", ".join(positional + keyword)
 
 
+def _format_time(seconds: float) -> str:
+    # Adaptive units so a display of mixed magnitudes stays readable:
+    # seconds, milliseconds, then microseconds. Shared by tape.tree()
+    # and the Printer sink so the two views agree.
+
+    if seconds >= 1.0:
+        return f"{seconds:.2f}s"
+    if seconds >= 0.001:
+        return f"{seconds * 1000:.1f}ms"
+    return f"{seconds * 1_000_000:.0f}us"
+
+
 def _own_time(event: Event) -> float | None:
     # The execution-time basis for self-time arithmetic. A generator's
     # wall duration includes the consumer's time between yields, so its

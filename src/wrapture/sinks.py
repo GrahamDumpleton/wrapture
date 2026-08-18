@@ -31,6 +31,7 @@ import queue
 import random
 import sys
 import threading
+import time
 import warnings
 import weakref
 from collections.abc import Callable
@@ -48,7 +49,7 @@ from .capture import (
     summarize,
     type_name,
 )
-from .events import Event, _own_time
+from .events import Event, _format_time, _own_time
 from .exceptions import SinkErrorWarning
 
 
@@ -295,45 +296,155 @@ class Printer(Sink):
     """A sink that prints events live, as they happen.
 
     One line when an operation begins, indented by nesting depth, and a
-    closing line with the outcome when there is one to show: `->` for a
+    closing line with the outcome and how long it took: `->` for a
     result, `!!` for an exception, matching the markers tape.tree()
     uses. This is the live view of a trace, for watching calls while
     they run; tree() is the tidy reconstruction afterwards.
 
-    Writes to the given stream, or to sys.stderr when none is given,
-    resolved at write time so redirection is respected. Every line is
-    flushed as written, so a trace is intact up to the moment of a
-    crash or hang.
+    Writes to `stream` when one is given (any text-writable object: an
+    open file, sys.stdout, an io.StringIO), or appends to the file at
+    `path`, opened on the first line written, or to sys.stderr when
+    neither is given, resolved at write time so redirection is
+    respected. Every line is flushed as written, so a trace is intact
+    up to the moment of a crash or hang.
+
+    `timing` (on by default) appends the elapsed time to each closing
+    line, in the units tape.tree() uses, and for a streamed body (a
+    generator, a request) the time spent in the body and how many items
+    or chunks it produced. Switch it off where stable output matters
+    more, such as a doctest or a diff. `timestamps` prefixes each
+    opening line with the local wall-clock time, HH:MM:SS.mmm; off by
+    default because at a terminal it is noise, on is what you want when
+    the output goes to a file.
     """
 
-    def __init__(self, stream: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        *,
+        path: str | os.PathLike[str] | None = None,
+        timing: bool = True,
+        timestamps: bool = False,
+    ) -> None:
+        if stream is not None and path is not None:
+            raise ValueError("Printer takes either stream or path, not both")
+
         self._stream = stream
+        self._path = os.fspath(path) if path is not None else None
+        self._timing = timing
+        self._timestamps = timestamps
+
+        self._lock = threading.Lock()
+        self._file: TextIO | None = None
+        self._closed = False
 
     def _write(self, line: str) -> None:
-        stream = self._stream if self._stream is not None else sys.stderr
-        print(line, file=stream, flush=True)
+        with self._lock:
+            if self._path is not None:
+                if self._closed:
+                    return
+                if self._file is None:
+                    self._file = open(self._path, "a", encoding="utf-8")
+                stream = self._file
+            elif self._stream is not None:
+                stream = self._stream
+            else:
+                stream = sys.stderr
+
+            print(line, file=stream, flush=True)
+
+    def _prefix(self, event: Event) -> str:
+        indent = "  " * event.depth
+        if not self._timestamps:
+            return indent
+
+        # Closing lines are not timestamped: the opening time plus the
+        # duration locates them, and it keeps the tree readable, so
+        # they are padded to keep the indentation aligned.
+
+        return f"{_wall_clock()} {indent}"
+
+    def _suffix(self, event: Event) -> str:
+        if not self._timing or event.duration is None:
+            return ""
+
+        # A streamed body reports its split too: the accumulated time
+        # spent producing items (or body chunks, for a request) and how
+        # many there were, when there were any.
+
+        elapsed = _format_time(event.duration)
+        if event.body_duration is not None and event.items:
+            unit = "chunk" if event.kind == "request" else "item"
+            plural = "s" if event.items != 1 else ""
+            body = _format_time(event.body_duration)
+            return f" [{elapsed}, body {body} over {event.items} {unit}{plural}]"
+
+        return f" [{elapsed}]"
 
     def on_enter(self, event: Event) -> None:
         """Print the operation as it begins."""
 
-        self._write("  " * event.depth + str(event))
+        self._write(self._prefix(event) + str(event))
 
     def on_exit(self, event: Event) -> None:
-        """Print the result, when one was captured."""
+        """Print the outcome: the result when one was captured, and the
+        elapsed time when timing is on."""
+
+        suffix = self._suffix(event)
+        if event.result is MISSING and not suffix:
+            return
+
+        indent = "  " * event.depth
+        pad = " " * len(_wall_clock()) + " " if self._timestamps else ""
+        where = event.label or event.path
 
         if event.result is MISSING:
+            self._write(f"{pad}{indent}{where}{suffix}")
             return
 
         injected = " (injected)" if event.injected else ""
-        where = event.label or event.path
-        self._write("  " * event.depth + f"{where} -> {event.result!r}{injected}")
+        self._write(f"{pad}{indent}{where} -> {event.result!r}{injected}{suffix}")
 
     def on_error(self, event: Event) -> None:
         """Print the exception the operation raised."""
 
+        indent = "  " * event.depth
+        pad = " " * len(_wall_clock()) + " " if self._timestamps else ""
         where = event.label or event.path
         exception = type(event.exception).__name__
-        self._write("  " * event.depth + f"{where} !! {exception}")
+        self._write(f"{pad}{indent}{where} !! {exception}{self._suffix(event)}")
+
+    def flush(self) -> None:
+        """Flush the destination; lines are already flushed as written,
+        so this only matters for a stream that buffers beneath that."""
+
+        with self._lock:
+            stream = self._file if self._file is not None else self._stream
+            if stream is not None:
+                stream.flush()
+
+    def close(self) -> None:
+        """Close the file opened for `path`; lines printed after this
+        are dropped. Idempotent, and a no-op for a stream, which the
+        caller owns."""
+
+        with self._lock:
+            if self._path is None or self._closed:
+                return
+
+            self._closed = True
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+
+def _wall_clock() -> str:
+    # Local time to the millisecond, for the printer's timestamps. The
+    # date is not repeated per line; a file named by date carries it.
+
+    now = time.time()
+    local = time.localtime(now)
+    return f"{time.strftime('%H:%M:%S', local)}.{int((now % 1) * 1000):03d}"
 
 
 def _forward(sink: Sink, notification: str, event: Event) -> None:
