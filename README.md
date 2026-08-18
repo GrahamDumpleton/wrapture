@@ -39,7 +39,10 @@ Start with the [getting started](https://wrapture.readthedocs.io/en/latest/getti
 page: everything on it can be pasted into a Python interpreter. Coming
 from `unittest.mock`? There is a
 [comparison page](https://wrapture.readthedocs.io/en/latest/coming-from-mock.html)
-mapping each mock idiom to its wrapture counterpart.
+mapping each mock idiom to its wrapture counterpart. After that, the
+worked examples, starting with
+[testing code that calls external services](https://wrapture.readthedocs.io/en/latest/example-external-services.html),
+each take one question you might arrive with and answer it end to end.
 
 ## Thirty seconds of it
 

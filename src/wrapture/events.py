@@ -181,9 +181,17 @@ def _format_time(seconds: float) -> str:
 def _own_time(event: Event) -> float | None:
     # The execution-time basis for self-time arithmetic. A generator's
     # wall duration includes the consumer's time between yields, so its
-    # accumulated body time is the honest measure of the code itself;
-    # everything else uses its duration. None when the event has not
-    # closed with a time.
+    # accumulated body time is the honest measure of the code itself. A
+    # request has two phases of application code, the synchronous call
+    # and the body it then streams, and its own time is their sum, again
+    # leaving out the server's time between chunks. Everything else uses
+    # its duration. None when the event has not closed with a time.
+
+    if event.kind == "request" and event.body_duration is not None:
+        app_duration = event.data.get("app_duration")
+        if app_duration is None:
+            return event.duration
+        return float(app_duration) + event.body_duration
 
     if event.body_duration is not None:
         return event.body_duration

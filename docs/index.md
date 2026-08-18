@@ -77,18 +77,49 @@ page maps each mock idiom to its wrapture counterpart.
 
 ## Documentation
 
+The guides are organised by mechanism: bindings and behaviours, then
+recording in tests, then tracing a running process. The worked examples
+are organised by the question you arrive with, and each one combines
+several of those mechanisms on a small concrete scenario, building up
+from the problem to a finished test or configuration.
+
 ```{toctree}
 :maxdepth: 2
+:caption: Start here
 
 getting-started
 coming-from-mock
 design-philosophy
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Guides
+
 monkey-patching
 unit-testing
 ad-hoc-tracing
 wsgi-tracing
 asgi-tracing
 scheduled-tracing
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Worked examples
+
+example-external-services
+example-resource-hygiene
+example-streaming-data
+example-request-timing
+example-service-over-time
+example-third-party-libraries
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Reference
+
 known-limitations
 release-notes
 ```

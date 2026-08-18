@@ -354,6 +354,18 @@ def test_tree_renders_nesting_results_and_failures() -> None:
     assert lines[2] == "Gateway.refund(amount=100)  !! TimeoutError (injected)"
 
 
+def test_tree_shows_a_get_event_value_once() -> None:
+    class Settings:
+        retries = 3
+
+    retries = binding(Settings, "retries")
+
+    with timeline(retries) as tape:
+        _ = Settings().retries
+
+    assert tape.tree() == "get Settings.retries -> 3"
+
+
 def test_tree_of_an_empty_tape_is_empty() -> None:
     with timeline() as tape:
         pass

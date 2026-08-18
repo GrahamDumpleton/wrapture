@@ -246,8 +246,13 @@ class Tape(Sink):
         def emit(event: Event) -> None:
             injected = " (injected)" if event.injected else ""
 
+            # A get event's str() already carries its value, so only the
+            # injected mark is added to it.
+
             if event.exception is not None:
                 marker = f"  !! {type(event.exception).__name__}{injected}"
+            elif event.kind == "get":
+                marker = injected
             elif event.result is not MISSING:
                 marker = f"  -> {event.result!r}{injected}"
             else:

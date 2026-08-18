@@ -9,10 +9,16 @@ import gc
 import weakref
 from typing import Any
 
+import pytest
 from wrapt import MISSING
 
 from wrapture import Event
-from wrapture.events import _signature, _signature_cache, normalized_arguments
+from wrapture.events import (
+    _own_time,
+    _signature,
+    _signature_cache,
+    normalized_arguments,
+)
 
 
 def charge(amount: int, currency: str = "USD", *, retries: int = 3) -> None:
@@ -189,3 +195,21 @@ def test_cache_does_not_keep_the_function_alive() -> None:
 
     gc.collect()
     assert alive() is None
+
+
+def test_own_time_of_a_request_sums_both_application_phases() -> None:
+    # A request's own time is the synchronous call plus the body it
+    # produced, not the wall time that includes the server between chunks.
+
+    request = Event(kind="request", path="app:wsgi_app", duration=1.0)
+    request.body_duration = 0.2
+    request.data["app_duration"] = 0.3
+
+    assert _own_time(request) == pytest.approx(0.5)
+
+
+def test_own_time_of_a_generator_is_its_body_time() -> None:
+    call = Event(kind="call", path="mod:gen", duration=1.0)
+    call.body_duration = 0.25
+
+    assert _own_time(call) == 0.25
