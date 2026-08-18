@@ -272,7 +272,7 @@ peek.describe()   # 'on SIGUSR1, for 60s'
 ...     collect=[wrapture.Aggregate()],
 ... )
 >>> profile.describe()
-'on touch of .../profile-now, until the next kick'
+'on touch of ...profile-now, until the next kick'
 
 ```
 
