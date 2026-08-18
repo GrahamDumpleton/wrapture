@@ -106,7 +106,7 @@ numbers arrive as separate log lines that you correlate by eye, and
 none of them are tied to the request they belong to, so a slow request
 among fast ones is invisible in the average.
 
-## Step 1: one request as one event
+## One request as one event
 
 `WSGIMiddleware` wraps a WSGI application and records each request as
 a single event: the method and path on the opening line, the status
@@ -137,7 +137,7 @@ application the body is one chunk built before the call returned, so
 almost all of the time is in the synchronous phase, which is where the
 layers beneath run.
 
-## Step 2: the layers beneath the request
+## The layers beneath the request
 
 The service, repository and template are methods on classes, so
 bindings reach them, held here in one group and applied together. The
@@ -169,7 +169,7 @@ GET /quote/widget (shop)  -> '200 OK'
 That is the request as it ran, with real arguments and real results,
 and no timer in any of the layers.
 
-## Step 3: watching it live, with timings
+## Watching it live, with timings
 
 `Printer` is a process sink: register it and every recorded event
 prints as it happens, an opening line as each operation begins and a
@@ -201,7 +201,7 @@ The answer is already readable: `fetch` accounts for essentially all of
 is microseconds. The request's closing line shows time to last byte
 and the body's own share.
 
-## Step 4: printing less
+## Printing less: depth, filters and samples
 
 On a busy application the full tree per request is too much. The
 combinators wrap a sink and gate what reaches it. `Depth(1, ...)`
@@ -265,7 +265,7 @@ slow: GET /quote/gadget ...ms
 
 ```
 
-## Step 5: reading the time off the tree
+## Reading the time off the tree
 
 The tape gives the same picture after the fact, and adds the figure
 that settles the question: self time, an event's execution time minus
@@ -310,7 +310,7 @@ True
 
 ```
 
-## Step 6: tagging a request with who it was for
+## Tagging a request with who it was for
 
 A slow endpoint is often slow for one tenant, one account or one
 request id, and the middleware cannot know which header carries that.
@@ -319,7 +319,7 @@ a `decorates()` handler on the request is a place to call it from where
 the environ is in hand. That handler lives on the `on_request`
 namespace of a `mode="wsgi"` binding, which installs the same
 middleware at the attribute the application exposes, so the direct
-`WSGIMiddleware` from step 1 is set aside here in favour of the binding
+`WSGIMiddleware` used above is set aside here in favour of the binding
 form:
 
 ```python
@@ -352,7 +352,7 @@ and in a test the same expression selects the request to assert on;
 because the binding has patched `shop.wsgi_app` and wrapping the app
 twice would record every request twice.
 
-## Step 7: handing the trace to other tools
+## Handing the trace to other tools
 
 For a request with a dozen layers the printed tree stops being the
 easiest reading. `chrome_trace()` renders a tape as Chrome trace JSON,
@@ -434,7 +434,7 @@ depth = 3
 
 Every key after `type` goes to the `Printer` constructor, except the
 gating keys `depth`, `sample` and `filter`, which are the file's
-spelling of the combinators from step 4; `filter = { kind = "request" }`
+spelling of the combinators shown earlier; `filter = { kind = "request" }`
 would give the access-log view. Save it as `timing.toml` next to the
 example and run the example's script under it; the runner applies the
 config, then runs `main.py` as `__main__` (Flask is not a dependency
@@ -460,7 +460,7 @@ The same file traces the development server, with the trees arriving
 in its log as requests come in
 (`uv run --with flask python -m wrapture --config timing.toml -m flask --app myapp run`),
 and adding a second `[[sink]]` of type `jsonlines` streams every event
-to a file for step 7's exporters afterwards.
+to a file for the exporters afterwards.
 
 ## Where next
 
