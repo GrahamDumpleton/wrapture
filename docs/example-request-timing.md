@@ -196,6 +196,17 @@ shop -> '200 OK' [...ms, body ...us over 1 chunk]
 
 ```
 
+The timings are elided above because they differ from run to run; the
+closing lines from one run read:
+
+```text
+      fetch -> 120 [5.9ms]
+    quote -> {'item': 'gadget', 'price': 120} [6.0ms]
+    render -> b'gadget: 120\n' [11us]
+  __main__.quote_view -> b'gadget: 120\n' [6.3ms]
+shop -> '200 OK' [6.4ms, body 2us over 1 chunk]
+```
+
 The answer is already readable: `fetch` accounts for essentially all of
 `quote`, which accounts for essentially all of the view, and `render`
 is microseconds. The request's closing line shows time to last byte
@@ -288,6 +299,16 @@ True
 >>> tape.self_time(quote) < 0.5 * quote.duration
 True
 
+```
+
+With the numbers in, one run of that tree looked like this:
+
+```text
+GET /quote/widget (shop)  -> '200 OK'  [5.3ms, self 40us]
+  __main__.quote_view(item='widget')  -> b'widget: 25\n'  [5.3ms, self 154us]
+    quote(item='widget')  -> {'item': 'widget', 'price': 25}  [5.1ms, self 59us]
+      fetch(item='widget')  -> 25  [5.1ms]
+    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [6us]
 ```
 
 `quote` and the view are slow only because of what they call; `fetch`
