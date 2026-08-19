@@ -30,22 +30,33 @@ metaclass, binding the attribute name on the metaclass does work as a
 recipe, but almost every class's metaclass is `type`, which cannot be
 patched.
 
-## Module attributes cannot be intercepted
+## Module attributes are intercepted through a type swap
 
-Binding an attribute of a module for interception (positional
-`binding(module, "NAME")`) is refused with `NotImplementedYetError`. A
-module is an instance of `ModuleType`, so intercepting `module.attr`
-access needs a descriptor on the module's type, which plain descriptor
-installation cannot provide. (CPython allows assigning a `ModuleType`
-subclass to a module's `__class__`, which is the known route should
-this ever be supported.)
+Binding an attribute of a module for interception
+(`binding(module, "NAME")`) works, but by a different mechanism from a
+class: a module is an instance of `ModuleType`, whose attributes cannot
+take a descriptor, so the binding assigns a private `ModuleType`
+subclass to the module's `__class__` while any binding on it is applied
+and installs the descriptor there (see
+[Attribute bindings](monkey-patching.md#attribute-bindings)). The limits
+that follow:
 
-Holding a value in the attribute is a different thing and is
-supported: `binding(module, attr="NAME").overrides(v)` is a
-[value binding](monkey-patching.md#value-bindings-holding-a-value-in-place),
-which sets the attribute while applied and restores it afterwards,
-without observing reads. Module-level *functions* are unaffected:
-callable-mode bindings on module functions work normally.
+- `type(module) is types.ModuleType` is False while a binding is
+  applied. `isinstance(module, ModuleType)`, `inspect.ismodule()` and
+  the module's repr are unaffected.
+- A module whose type does not permit `__class__` assignment (an
+  extension module with its own layout) is refused with `TypeError` at
+  `apply()`. `binding(module, attr="NAME").overrides(v)`, a
+  [value binding](monkey-patching.md#value-bindings-holding-a-value-in-place),
+  still works there, without observing reads.
+- Access that does not go through the module object is not seen: a
+  name copied with `from module import NAME`, and reads or writes made
+  on `module.__dict__` directly, which is also how `importlib.reload()`
+  rebinds names.
+- If something else assigns the module's `__class__` after the binding
+  is applied, the binding keeps working beneath it, but on removal the
+  module's type is not restored, since it is no longer wrapture's to
+  restore.
 
 ## Attribute bindings install on the class, never one instance
 

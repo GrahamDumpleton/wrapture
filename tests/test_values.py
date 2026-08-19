@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from wrapture import (
-    NotImplementedYetError,
     WrongModeError,
     binding,
     bindings,
@@ -100,9 +99,6 @@ def test_an_instance_data_attribute_still_needs_a_slot_or_the_class() -> None:
 
     with pytest.raises(TypeError, match="use attr='timeout'"):
         binding(client, "timeout").apply()
-
-    with pytest.raises(NotImplementedYetError, match="use attr='TIMEOUT'"):
-        binding(config, "TIMEOUT").apply()
 
 
 # ---------------------------------------------------------------------------
