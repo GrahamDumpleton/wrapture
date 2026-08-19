@@ -209,11 +209,15 @@ future import:
 
 ## Observing a bare callable
 
-A binding names an attribute: a location that can be resolved,
-patched and restored. Plenty of callables never sit at one: view
-functions captured into a framework's dispatch table, callbacks
-handed to a registry, closures, partials, work put on a queue.
-`observed()` wraps the value instead of the location:
+A binding names a location that can be resolved, patched and
+restored: an attribute, or a mapping entry named with `item=` (a
+handler in a dispatch table is
+`binding(HANDLERS, item="GET", mode="callable")`, removal included).
+Plenty of callables never sit at a nameable location: closures,
+partials, work put on a queue, callbacks handed over and kept
+somewhere private, a view function on its way into a framework's
+registration call. `observed()` wraps the value instead of the
+location:
 
 ```python
 wrapped = wrapture.observed(fn)

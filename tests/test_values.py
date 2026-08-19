@@ -68,9 +68,6 @@ def test_slot_keywords_are_validated() -> None:
     with pytest.raises(TypeError, match="not a descriptor slot"):
         binding(config, "SETTINGS", item="currency", mode="attribute")
 
-    with pytest.raises(NotImplementedYetError, match="not implemented yet"):
-        binding(config, "SETTINGS", item="currency", mode="callable")
-
     with pytest.raises(ValueError, match="mode must be"):
         binding(config, "SETTINGS", item="currency", mode="bogus")
 
@@ -392,3 +389,149 @@ def test_os_environ_rejects_non_strings_as_it_would_by_hand() -> None:
         key.apply()
 
     assert not key.applied
+
+
+# ---------------------------------------------------------------------------
+# callable, wsgi and asgi modes on a mapping entry
+# ---------------------------------------------------------------------------
+
+
+def handle_get(request: dict[str, Any]) -> str:
+    return f"got {request['path']}"
+
+
+HANDLERS: dict[str, Any] = {"GET": handle_get}
+
+
+def test_a_callable_in_a_mapping_is_wrapped_in_place() -> None:
+    from wrapture import Binding
+
+    handler = binding(sys.modules[__name__], "HANDLERS", item="GET", mode="callable")
+    assert handler.mode == "callable"
+    assert handler.label == f"{__name__}.HANDLERS['GET']"
+    assert handler.path == f"{__name__}:HANDLERS['GET']"
+
+    handler.on_call.raises(RuntimeError("unavailable"))
+    handler.on_call.then(after=2).passes_through()
+
+    original = HANDLERS["GET"]
+
+    with handler, timeline() as tape:
+        assert handler.active
+        assert handler.wrapper is HANDLERS["GET"]
+        assert isinstance(handler, Binding)
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                HANDLERS["GET"]({"path": "/a"})
+
+        assert HANDLERS["GET"]({"path": "/b"}) == "got /b"
+
+    assert HANDLERS["GET"] is original
+    assert not handler.applied
+
+    events = tape.for_binding(handler)
+    events.in_phase(0).assert_times(2)
+    events.in_phase(1).with_args(request={"path": "/b"}).assert_once()
+
+
+def test_a_wrapped_mapping_entry_is_strict_and_records_arguments() -> None:
+    handler = binding(HANDLERS, item="GET", mode="callable")
+    handler.on_call.returns("stub")
+
+    with handler:
+        assert HANDLERS["GET"]({"path": "/x"}) == "stub"
+
+        with pytest.raises(TypeError, match="stubbed"):
+            HANDLERS["GET"]({"path": "/x"}, bogus=1)
+
+
+def test_wrapping_a_missing_entry_is_an_error_and_displacement_is_reported() -> None:
+    absent = binding(HANDLERS, item="PUT", mode="callable")
+
+    with pytest.raises(KeyError, match="no entry 'PUT'"):
+        absent.apply()
+
+    handler = binding(HANDLERS, item="GET", mode="callable")
+    original = HANDLERS["GET"]
+
+    with handler:
+        HANDLERS["GET"] = handle_get  # someone rebinds the entry
+        assert handler.applied and not handler.active
+        assert "displaced" in repr(handler)
+
+    # remove() left the rebinding alone rather than clobbering it
+
+    assert HANDLERS["GET"] is original
+
+
+def test_a_wsgi_application_in_a_registry() -> None:
+    def site(environ: dict[str, Any], start_response: Any) -> Any:
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        return [b"hello"]
+
+    registry: dict[str, Any] = {"site": site}
+    app = binding(registry, item="site", mode="wsgi")
+
+    def serve(environ: dict[str, Any]) -> bytes:
+        status: list[str] = []
+        body = registry["site"](environ, lambda s, h, e=None: status.append(s))
+        return b"".join(body)
+
+    environ = {
+        "REQUEST_METHOD": "GET",
+        "PATH_INFO": "/hello",
+        "SERVER_PROTOCOL": "HTTP/1.1",
+        "wsgi.url_scheme": "http",
+    }
+
+    with app, timeline() as tape:
+        assert app.active
+        assert serve(environ) == b"hello"
+
+    assert registry["site"] is site
+
+    (event,) = tape.all
+    assert event.kind == "request"
+    assert event.result == "200 OK"
+
+
+def test_an_asgi_application_in_a_registry() -> None:
+    import asyncio
+
+    async def site(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"hi"})
+
+    registry: dict[str, Any] = {"site": site}
+    app = binding(registry, item="site", mode="asgi")
+
+    async def serve() -> list[Any]:
+        sent: list[Any] = []
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
+        await registry["site"](scope, receive, send)
+        return sent
+
+    with app, timeline() as tape:
+        sent = asyncio.run(serve())
+
+    assert registry["site"] is site
+    assert sent[0]["status"] == 200
+
+    (event,) = tape.all
+    assert event.kind == "request"
+
+
+def test_item_with_a_recording_option_needs_a_recording_mode() -> None:
+    with pytest.raises(ValueError, match="records nothing"):
+        binding(HANDLERS, item="GET", capture="none")
+
+    handler = binding(HANDLERS, item="GET", mode="callable", capture="none")
+    assert handler.mode == "callable"

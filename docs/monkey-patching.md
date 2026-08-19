@@ -738,10 +738,26 @@ Some cases worth knowing:
   `decorates()` is usually the better tool, since the binding then
   records and can be phased.
 - `attr=` takes no `mode=`: to wrap what an attribute holds, name it
-  positionally, that spelling already exists. `item=` will take
-  `mode="callable"`, `"wsgi"` and `"asgi"` for a callable or
-  application held in a mapping, since nothing else can reach one;
-  that is not implemented yet and says so.
+  positionally, that spelling already exists. `item=` also takes
+  `mode="callable"`, `"wsgi"` or `"asgi"`, since nothing else can
+  reach a callable or an application held in a mapping: the entry is
+  wrapped in place with the whole vocabulary of that mode and the
+  original put back on `remove()`. A handler in a dispatch table,
+  with phases and recording:
+
+  ```python
+  handler = wrapture.binding("myapp.routes", "HANDLERS", item="GET", mode="callable")
+  handler.on_call.raises(ServiceUnavailable())
+  handler.on_call.then(after=2).passes_through()
+
+  with handler, wrapture.timeline() as tape:
+      ...
+  ```
+
+  This reaches what `observed()` was previously the only tool for,
+  when the callable does sit in a mapping; the usual caveat applies,
+  as for a module function, that whoever pulled `HANDLERS["GET"]`
+  into a local before `apply()` holds the original.
 
 ## Iterators and generators
 
