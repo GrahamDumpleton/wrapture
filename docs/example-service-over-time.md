@@ -37,15 +37,21 @@ This example uses:
 A stand-in small enough to fit here: a shop that answers price
 quotes, one class per layer, and a driver that plays the part of a
 day's traffic. One item in five is not in the catalog, so a share of
-the calls raise, and the shop renders each answer as a JSON page,
-which is where most of its own time goes.
+the calls raise, and the shop renders each answer as a JSON page
+listing the whole catalog, which is where most of its own time goes.
 
 ```python
 >>> import json
 >>> import wrapture
 
+>>> def price_list() -> dict[str, int]:
+...     base = {"widget": 25, "gadget": 120, "gizmo": 60}
+...     packs = {f"{name}-x{n}": price * n for name, price in base.items() for n in (2, 5, 10)}
+...
+...     return {**base, **packs}
+
 >>> class Catalog:
-...     PRICES = {"widget": 25, "gadget": 120, "gizmo": 60}
+...     PRICES = price_list()
 ...
 ...     def lookup(self, item: str) -> int:
 ...         return self.PRICES[item]
@@ -98,6 +104,16 @@ listening, they record nothing:
 
 ```
 
+One warm-up run before measuring anything, as with any profiling: the
+first call through a code path pays for imports and caches that
+later calls do not, and that one-off cost should not land in the
+numbers.
+
+```python
+>>> traffic(shop)
+
+```
+
 ## The naive approach: a log line and a stopwatch
 
 The usual answer is a `time.perf_counter()` pair and a `log.info()`
@@ -117,19 +133,19 @@ collector.
 
 ```python
 >>> with wrapture.window(collect=[wrapture.Aggregate()]) as run:
-...     traffic(shop)
+...     traffic(shop, 500)
 
 >>> run
 <Run 1 of 'window', closed>
 >>> report = run.reports[0]
 >>> print(report.text)  # doctest: +NORMALIZE_WHITESPACE
 aggregate "aggregate" run 1, ... to ... (...s), pid ...
-3 paths, 150 operations begun, 150 completed, 30 raised
+3 paths, 1,500 operations begun, 1,500 completed, 300 raised
 <BLANKLINE>
 calls  total   self  per-call    min    max  errors  path
-   50    ...    ...       ...    ...    ...      10  __main__:Shop.handle
-   50    ...    ...       ...    ...    ...      10  __main__:Pricing.quote
-   50    ...    ...       ...    ...    ...      10  __main__:Catalog.lookup
+  500    ...    ...       ...    ...    ...     100  __main__:Shop.handle
+  500    ...    ...       ...    ...    ...     100  __main__:Pricing.quote
+  500    ...    ...       ...    ...    ...     100  __main__:Catalog.lookup
 <BLANKLINE>
 
 ```
@@ -148,9 +164,9 @@ without parsing the table:
 >>> report.kind, report.window, report.run, report.cut_short
 ('aggregate', 'window', 1, False)
 >>> report.data["begun"], report.data["raised"]
-(150, 30)
+(1500, 300)
 >>> report.data["paths"]["__main__:Shop.handle"]["errors"]
-10
+100
 
 ```
 

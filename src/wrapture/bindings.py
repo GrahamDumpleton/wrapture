@@ -44,7 +44,7 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, normalized_arguments
+from .events import Event, _signature, normalized_arguments
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
@@ -489,6 +489,7 @@ class Binding:
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
         | bool
         | None = None,
+        strict: bool = True,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
@@ -555,6 +556,11 @@ class Binding:
         )
         self._stack_depth = stack
         self._when = when
+
+        # Whether a call that behaviour answers without reaching the
+        # real callable is still checked against its signature.
+
+        self._strict = strict
 
         # The behaviour phases, keyed by operation ("call", "get", "set"
         # or "delete"): each operation has a chain of Phase records
@@ -1034,6 +1040,9 @@ class Binding:
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> Any:
+            if bnd._strict:
+                bnd._check_signature(wrapped, args, kwargs)
+
             phase = bnd._select("call")
 
             # when=False is a behaviour-only binding: it never records,
@@ -1367,6 +1376,35 @@ class Binding:
                 if slot is not None:
                     slot[0] = phase
 
+    def _check_signature(
+        self, wrapped: WrappedFunction, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> None:
+        """Reject a call that does not fit the callable's signature when
+        behaviour would answer it without the real callable ever seeing
+        it.
+
+        A phase with a terminal (returns, raises, returns_from or
+        decorates) may do exactly that, so the call shape is checked
+        first, raising TypeError as the real call would; a phase without
+        one runs the real callable, which does its own checking. The
+        check runs before the call is counted, drawn from a sequence, or
+        recorded, so a rejected call leaves no trace, and targets with
+        no obtainable signature are not checked.
+        """
+
+        active = self._active.get("call")
+        if active is None or active.terminal is None:
+            return
+
+        signature = _signature(wrapped)
+        if signature is None:
+            return
+
+        try:
+            signature.bind(*args, **kwargs)
+        except TypeError as exc:
+            raise TypeError(f"{self._label} (stubbed): {exc}") from None
+
     def _completed(self, operation: str, phase: Phase | None, event: Event) -> None:
         """Show a completed operation to the phase's until= predicate,
         handing over to the successor when it says so.
@@ -1686,6 +1724,7 @@ def binding(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    strict: bool = True,
 ) -> Binding:
     """Create a binding for one target attribute.
 
@@ -1737,6 +1776,16 @@ def binding(
     records and counts nothing, for plumbing that must not put itself
     in the trace, and `when=True` is the always-record default.
 
+    `strict=` (default True) checks each call that behaviour answers
+    without reaching the real callable (a phase with a terminal:
+    returns, raises, returns_from or decorates) against the callable's
+    signature, raising TypeError as the real call would, so a call
+    site that drifts from the signature cannot pass on the strength
+    of a stub. Calls that reach the real callable are checked by it,
+    and targets with no obtainable signature are not checked. Pass
+    strict=False for a patch that deliberately accepts a different
+    call shape.
+
     Does NOT apply the wrapper; call apply() or use the binding as a
     context manager.
     """
@@ -1752,6 +1801,7 @@ def binding(
         capture_result=capture_result,
         stack=stack,
         when=when,
+        strict=strict,
     )
 
 
@@ -1777,6 +1827,7 @@ def discover(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    strict: bool = True,
 ) -> BindingGroup:
     """Create bindings for every member of a target matching a pattern.
 
@@ -1858,6 +1909,7 @@ def discover(
                 capture_result=capture_result,
                 stack=stack,
                 when=when,
+                strict=strict,
             )
             for member in members
         }

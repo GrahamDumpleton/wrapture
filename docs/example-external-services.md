@@ -131,6 +131,20 @@ The binding is a context manager, so the patch lasts exactly for the
 block. Outside it `charge()` is the real method again, and the order
 recorded inside the block is real state in the real service.
 
+The stub answers without running `charge()`, but a call that would not
+have fitted `charge()` is still refused, as the real method would
+refuse it, so a service that drifts from the client's signature cannot
+pass its tests on the strength of the stub:
+
+```python
+>>> with charge:
+...     service.client.charge(500, memo="gift")
+Traceback (most recent call last):
+    ...
+TypeError: PaymentClient.charge (stubbed): got an unexpected keyword argument 'memo'
+
+```
+
 ## Injecting a timeout and checking the service copes
 
 Swap the terminal behaviour to `raises()` and the service sees the
