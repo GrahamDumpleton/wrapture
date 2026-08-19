@@ -49,6 +49,7 @@ from .timeline import (
 )
 
 if TYPE_CHECKING:
+    from .behaviours import Phase
     from .bindings import Binding
 
 
@@ -119,6 +120,7 @@ def _record(
     attribute: str,
     operate: Callable[[], Any],
     value: Any = MISSING,
+    phase: Phase | None = None,
 ) -> Any:
     """Run one attribute operation, recording it onto the ambient tape.
 
@@ -175,7 +177,8 @@ def _record(
             instance=instance,
             binding=binding,
             capture=_level_of(policy),
-            injected=binding._injected(kind),
+            injected=phase is not None and phase.injected,
+            phase=binding._phase_of(phase),
         )
 
         if binding._stack_depth is not None:
@@ -262,7 +265,8 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             binding._suspended_calls += 1
             return _read(prior, attribute, instance, owner)
 
-        behaviour = binding._behaviour("get")
+        phase = binding._select("get")
+        behaviour = None if phase is None else phase.behaviour()
 
         def read() -> Any:
             return _read(prior, attribute, instance, owner)
@@ -272,7 +276,7 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
                 return read()
             return behaviour(read, instance, (), {})
 
-        return _record(binding, "get", instance, attribute, operate)
+        return _record(binding, "get", instance, attribute, operate, phase=phase)
 
     def __set__(self, instance: Any, value: Any) -> None:
         binding = self._self_wrapture_binding
@@ -284,7 +288,8 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             _write(prior, attribute, instance, value)
             return
 
-        behaviour = binding._behaviour("set")
+        phase = binding._select("set")
+        behaviour = None if phase is None else phase.behaviour()
 
         def write(new_value: Any) -> None:
             _write(prior, attribute, instance, new_value)
@@ -295,7 +300,7 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
                 return None
             return behaviour(write, instance, (value,), {})
 
-        _record(binding, "set", instance, attribute, operate, value=value)
+        _record(binding, "set", instance, attribute, operate, value=value, phase=phase)
 
     def __delete__(self, instance: Any) -> None:
         binding = self._self_wrapture_binding
@@ -307,7 +312,8 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             _delete(prior, attribute, instance)
             return
 
-        behaviour = binding._behaviour("delete")
+        phase = binding._select("delete")
+        behaviour = None if phase is None else phase.behaviour()
 
         def erase() -> None:
             _delete(prior, attribute, instance)
@@ -318,7 +324,7 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
                 return None
             return behaviour(erase, instance, (), {})
 
-        _record(binding, "delete", instance, attribute, operate)
+        _record(binding, "delete", instance, attribute, operate, phase=phase)
 
 
 def _resolve_parent(target: Any, name: str) -> tuple[Any, str]:

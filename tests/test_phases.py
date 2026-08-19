@@ -1,0 +1,412 @@
+"""Tests for phased behaviour: then(), advance(), phase, and the phase
+stamp on events."""
+
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+import pytest
+
+from wrapture import (
+    CallBehaviour,
+    CallPhase,
+    GetPhase,
+    binding,
+    timeline,
+)
+
+
+class Gateway:
+    # Returns Any so tests can compare stubbed values of other types.
+
+    def charge(self, amount: int, currency: str = "USD") -> Any:
+        return {"id": f"ch_{amount}", "amount": amount}
+
+
+class Settings:
+    beta_enabled = False
+    retries = 3
+
+
+# ---------------------------------------------------------------------------
+# then(): namespaces and the chain
+# ---------------------------------------------------------------------------
+
+
+def test_base_namespace_verbs_return_the_binding_and_phase_verbs_the_phase() -> None:
+    charge = binding(Gateway, "charge")
+
+    assert isinstance(charge.on_call, CallBehaviour)
+    assert charge.on_call.returns(1) is charge
+
+    later = charge.on_call.then(after=1)
+    assert isinstance(later, CallPhase)
+    assert later.returns(2) is later
+    assert later.transforms_result(lambda r: r) is later
+
+
+def test_then_is_the_same_successor_each_time() -> None:
+    charge = binding(Gateway, "charge")
+
+    first = charge.on_call.then(after=2)
+    again = charge.on_call.then()
+
+    assert first._phase is again._phase
+    assert charge.on_call.then(after=2)._phase is first._phase
+
+
+def test_then_repeat_with_argument_replaces_the_exit_and_bare_repeat_keeps_it() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+
+    later = charge.on_call.then(after=5)
+    later.returns("b")
+
+    charge.on_call.then()  # bare repeat: exit still after=5
+    charge.on_call.then(after=1)  # replaces: now after=1
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(1) == "b"
+
+
+def test_then_rejects_both_conditions_and_bad_counts() -> None:
+    charge = binding(Gateway, "charge")
+
+    with pytest.raises(TypeError, match="not both"):
+        charge.on_call.then(after=1, until=lambda e: True)
+
+    with pytest.raises(ValueError, match="positive int"):
+        charge.on_call.then(after=0)
+
+    with pytest.raises(ValueError, match="positive int"):
+        charge.on_call.then(after=True)
+
+
+def test_successor_of_a_successor_is_relative_to_that_phase() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns("a")
+
+    second = lookup.on_call.then(after=1)
+    second.returns("b")
+
+    third = second.then(after=2)
+    third.returns("c")
+
+    with lookup:
+        gateway = Gateway()
+        seen = [gateway.charge(1) for _ in range(5)]
+
+    assert seen == ["a", "b", "b", "c", "c"]
+    assert lookup.phase == 2
+
+
+# ---------------------------------------------------------------------------
+# count exits, phase and advance()
+# ---------------------------------------------------------------------------
+
+
+def test_after_n_hands_over_after_exactly_n_calls_and_the_last_phase_stays() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.raises(TimeoutError("down"))
+
+    recovered = charge.on_call.then(after=2)
+    recovered.passes_through()
+
+    with charge:
+        gateway = Gateway()
+        assert charge.phase == 0
+
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                gateway.charge(1)
+
+        assert charge.phase == 1
+        assert gateway.charge(1) == {"id": "ch_1", "amount": 1}
+        assert gateway.charge(2) == {"id": "ch_2", "amount": 2}
+        assert charge.phase == 1
+
+
+def test_a_phase_with_no_verbs_passes_through() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("stub")
+    charge.on_call.then(after=1)
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1) == "stub"
+        assert gateway.charge(1) == {"id": "ch_1", "amount": 1}
+
+
+def test_phases_are_independent_nothing_is_inherited() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.transforms_result(lambda r: "transformed")
+    charge.on_call.returns("stub")
+
+    later = charge.on_call.then(after=1)
+    later.returns("other")
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1) == "transformed"
+        assert gateway.charge(1) == "other"
+
+
+def test_a_second_terminal_on_a_phase_replaces_the_first() -> None:
+    charge = binding(Gateway, "charge")
+    later = charge.on_call.then(after=1)
+    later.returns("b").raises(KeyError("no"))
+
+    with charge:
+        gateway = Gateway()
+        gateway.charge(1)
+        with pytest.raises(KeyError):
+            gateway.charge(1)
+
+
+def test_manual_phase_ends_only_on_advance() -> None:
+    remote = binding(Gateway, "charge")
+    remote.on_call.raises(ConnectionError("down"))
+
+    online = remote.on_call.then()
+    online.passes_through()
+
+    with remote:
+        gateway = Gateway()
+        for _ in range(3):
+            with pytest.raises(ConnectionError):
+                gateway.charge(1)
+
+        assert remote.advance() is remote
+        assert remote.phase == 1
+        assert gateway.charge(1)["id"] == "ch_1"
+
+
+def test_advance_forces_a_count_phase_early_and_is_a_noop_at_the_end() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=10).returns("b")
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+
+        charge.advance()
+        assert gateway.charge(1) == "b"
+
+        charge.advance()
+        charge.advance()
+        assert charge.phase == 1
+        assert gateway.charge(1) == "b"
+
+
+def test_phase_and_advance_on_an_unphased_binding() -> None:
+    charge = binding(Gateway, "charge")
+    assert charge.phase == 0
+    assert charge.advance() is charge
+    assert charge.phase == 0
+
+    charge.on_call.returns("stub")
+    assert charge.phase == 0
+
+
+def test_apply_restarts_from_phase_zero_but_suspend_and_resume_do_not() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=1).returns("b")
+
+    gateway = Gateway()
+
+    with charge:
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(1) == "b"
+
+        charge.suspend()
+        gateway.charge(1)  # real call, not counted
+        charge.resume()
+        assert charge.phase == 1
+        assert gateway.charge(1) == "b"
+
+    with charge:
+        assert charge.phase == 0
+        assert gateway.charge(1) == "a"
+
+
+def test_behaviour_only_and_filtered_calls_still_count() -> None:
+    quiet = binding(Gateway, "charge", when=False)
+    quiet.on_call.returns("a")
+    quiet.on_call.then(after=1).returns("b")
+
+    with quiet:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(1) == "b"
+
+    filtered = binding(Gateway, "charge", when=lambda i, a, k: False)
+    filtered.on_call.returns("a")
+    filtered.on_call.then(after=1).returns("b")
+
+    with filtered, timeline() as tape:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(1) == "b"
+
+    assert len(tape.all) == 0
+
+
+def test_passes_through_on_the_base_namespace_drops_the_chain() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=1).returns("b")
+
+    charge.on_call.passes_through()
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1)["id"] == "ch_1"
+        assert gateway.charge(1)["id"] == "ch_1"
+
+    assert charge.phase == 0
+
+
+def test_passes_through_on_a_phase_clears_only_that_phase() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+
+    later = charge.on_call.then(after=1)
+    later.returns("b")
+    later.passes_through()
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(1)["id"] == "ch_1"
+
+
+def test_a_phase_namespace_can_advance_and_report_its_operation() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then().returns("b")
+
+    with charge:
+        gateway = Gateway()
+        assert charge.on_call.phase == 0
+        charge.on_call.advance()
+        assert charge.on_call.phase == 1
+        assert gateway.charge(1) == "b"
+
+
+# ---------------------------------------------------------------------------
+# attribute bindings
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_reads_flip_after_three_reads() -> None:
+    flag = binding(Settings, "beta_enabled")
+    flag.on_get.returns(False)
+
+    enabled = flag.on_get.then(after=3)
+    assert isinstance(enabled, GetPhase)
+    enabled.returns(True)
+
+    with flag:
+        settings = Settings()
+        assert [settings.beta_enabled for _ in range(5)] == [
+            False,
+            False,
+            False,
+            True,
+            True,
+        ]
+
+    assert flag.phase == 1
+
+
+def test_binding_phase_is_ambiguous_across_operations() -> None:
+    flag = binding(Settings, "beta_enabled")
+    flag.on_get.then(after=1)
+    flag.on_set.then(after=1)
+
+    with pytest.raises(ValueError, match="on_get.phase"):
+        _ = flag.phase
+
+    assert flag.on_get.phase == 0
+    assert flag.on_set.phase == 0
+
+    # advance() still moves every phased operation on
+
+    flag.advance()
+    assert flag.on_get.phase == 1
+    assert flag.on_set.phase == 1
+
+
+# ---------------------------------------------------------------------------
+# events
+# ---------------------------------------------------------------------------
+
+
+def test_events_carry_the_phase_only_when_the_binding_is_phased() -> None:
+    plain = binding(Gateway, "charge")
+    plain.on_call.returns("stub")
+
+    with plain, timeline() as tape:
+        Gateway().charge(1)
+
+    assert tape.all[0].phase is None
+    assert tape.all[0].injected
+
+    charge = binding(Gateway, "charge")
+    charge.on_call.raises(TimeoutError("down"))
+    charge.on_call.then(after=2).passes_through()
+
+    with charge, timeline() as tape:
+        gateway = Gateway()
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                gateway.charge(1)
+        gateway.charge(1)
+
+    assert [event.phase for event in tape.all] == [0, 0, 1]
+    assert [event.injected for event in tape.all] == [True, True, False]
+
+
+def test_phase_rides_into_json_records() -> None:
+    from wrapture.sinks import _event_record
+
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=1).returns("b")
+
+    with charge, timeline() as tape:
+        Gateway().charge(1)
+        Gateway().charge(1)
+
+    records = [_event_record(event) for event in tape.all]
+    assert [record["phase"] for record in records] == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_exactly_n_calls_run_under_a_count_phase_with_concurrent_callers() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("first")
+    charge.on_call.then(after=50).returns("second")
+
+    gateway = Gateway()
+    start = threading.Barrier(8)
+
+    def worker() -> list[str]:
+        start.wait()
+        return [gateway.charge(1) for _ in range(25)]
+
+    with charge, ThreadPoolExecutor(max_workers=8) as pool:
+        results = [
+            item for batch in pool.map(lambda _: worker(), range(8)) for item in batch
+        ]
+
+    assert results.count("first") == 50
+    assert results.count("second") == 150

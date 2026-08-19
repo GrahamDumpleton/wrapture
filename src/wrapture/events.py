@@ -112,12 +112,14 @@ class Event:
 
     # Recording provenance: the capture level values were recorded at,
     # whether the outcome was supplied by returns()/raises() rather than
-    # produced by the real operation, the interned id of the captured
-    # call stack when the binding asked for one, and caller-supplied
-    # annotations merged in with annotate().
+    # produced by the real operation, which phase of a phased binding
+    # handled the operation (None when the binding has a single phase),
+    # the interned id of the captured call stack when the binding asked
+    # for one, and caller-supplied annotations merged in with annotate().
 
     capture: int = REFERENCE
     injected: bool = False
+    phase: int | None = None
     stack: int | None = None
     data: dict[str, Any] = field(default_factory=dict)
 

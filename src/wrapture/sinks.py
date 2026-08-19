@@ -857,6 +857,8 @@ def _event_record(event: Event) -> dict[str, Any]:
 
     if event.injected:
         record["injected"] = True
+    if event.phase is not None:
+        record["phase"] = event.phase
     if event.stack is not None:
         record["stack"] = event.stack
     if event.data:

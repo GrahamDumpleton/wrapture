@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import threading
 import time
 import types
 import warnings
@@ -112,7 +113,7 @@ class RequestNamespace(Protocol):
     def passes_through(self) -> Binding: ...
 
 
-_BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
+_BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour[Any])
 
 # Every currently applied binding, so tooling such as the pytest plugin
 # can sweep for patches left behind. Weak references, so the registry
@@ -556,6 +557,7 @@ class Binding:
 
         self._heads: dict[str, Phase] = {}
         self._active: dict[str, Phase] = {}
+        self._phase_lock = threading.Lock()
         self._request_hooks: dict[str, Any] = {
             "inbound": [],
             "response": [],
@@ -780,6 +782,10 @@ class Binding:
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
+
+        # Behaviour restarts from phase 0 on every apply.
+
+        self._restart_phases()
 
         # A fresh apply may warn about missed thread calls again.
 
@@ -1020,7 +1026,8 @@ class Binding:
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> Any:
-            behaviour = bnd._behaviour("call")
+            phase = bnd._select("call")
+            behaviour = None if phase is None else phase.behaviour()
 
             # when=False is a behaviour-only binding: it never records,
             # counts nothing, and takes no part in gap detection.
@@ -1073,7 +1080,7 @@ class Binding:
 
             guard = _in_recorder.set(True)
             try:
-                event = bnd._record_call(active, wrapped, instance, args, kwargs)
+                event = bnd._record_call(active, wrapped, instance, args, kwargs, phase)
             finally:
                 _in_recorder.reset(guard)
 
@@ -1144,6 +1151,7 @@ class Binding:
         instance: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        phase: Phase | None,
     ) -> Event:
         # Resolve the argument capture policy: the binding's override,
         # else the highest level the active sinks declare.
@@ -1160,7 +1168,8 @@ class Binding:
             instance=instance,
             binding=self,
             capture=level,
-            injected=self._injected("call"),
+            injected=phase is not None and phase.injected,
+            phase=self._phase_of(phase),
         )
 
         if self._stack_depth is not None:
@@ -1232,25 +1241,131 @@ class Binding:
         self._heads.pop(operation, None)
         self._active.pop(operation, None)
 
-    def _behaviour(self, operation: str) -> WrapperFunction | None:
-        """The composed pipeline of the operation's active phase, or None
-        when nothing is configured for it."""
+    def _then(
+        self, operation: str, phase: Phase, exit: tuple[str, Any] | None
+    ) -> Phase:
+        """Create or fetch the successor of `phase`, recording the exit
+        condition that hands over to it."""
+
+        with self._phase_lock:
+            if phase.successor is None:
+                phase.successor = Phase(phase.index + 1)
+                phase.exit = exit
+            elif exit is not None:
+                phase.exit = exit
+
+            return phase.successor
+
+    def _select(self, operation: str) -> Phase | None:
+        """The phase that handles the operation now, or None when nothing
+        is configured.
+
+        Choosing the phase also counts the operation against a count exit,
+        so that exactly n operations run under a phase whose exit is
+        after=n, even with concurrent callers: the phase is chosen and
+        counted under the lock, and a count reached by this operation
+        moves subsequent operations on while this one keeps its phase.
+        """
 
         active = self._active.get(operation)
 
-        if active is None:
+        # The common case, one phase or the last of the chain, needs no
+        # counting and no lock.
+
+        if active is None or active.successor is None:
+            return active
+
+        with self._phase_lock:
+            active = self._active[operation]
+            active.handled += 1
+
+            if (
+                active.exit is not None
+                and active.exit[0] == "after"
+                and active.handled >= active.exit[1]
+                and active.successor is not None
+            ):
+                self._active[operation] = active.successor
+
+            return active
+
+    def _advance(self, operation: str) -> bool:
+        """Move the operation to its successor phase; False when it is
+        already on the last one."""
+
+        with self._phase_lock:
+            active = self._active.get(operation)
+
+            if active is None or active.successor is None:
+                return False
+
+            self._active[operation] = active.successor
+            return True
+
+    def _restart_phases(self) -> None:
+        """Return every operation to phase 0 with fresh counters."""
+
+        with self._phase_lock:
+            for operation, head in self._heads.items():
+                self._active[operation] = head
+
+                phase: Phase | None = head
+                while phase is not None:
+                    phase.handled = 0
+                    phase = phase.successor
+
+    def _phase_index(self, operation: str) -> int:
+        active = self._active.get(operation)
+        return 0 if active is None else active.index
+
+    def _phased(self) -> list[str]:
+        """The operations that have more than one phase."""
+
+        return [
+            operation
+            for operation, head in self._heads.items()
+            if head.successor is not None
+        ]
+
+    @property
+    def phase(self) -> int:
+        """Index of the phase currently deciding the binding's behaviour.
+
+        Zero for a binding that never called then(). An attribute binding
+        with phases on more than one operation has no single answer; ask
+        the namespace instead (`on_get.phase`).
+        """
+
+        phased = self._phased()
+
+        if len(phased) > 1:
+            raise ValueError(
+                f"{self._label} has phases on {', '.join(sorted(phased))};"
+                f" use the operation's namespace, e.g. on_get.phase"
+            )
+
+        return self._phase_index(phased[0]) if phased else 0
+
+    def advance(self) -> Self:
+        """Move every operation with phases on to its next phase, whatever
+        the current phase's exit condition. A no-op on the last phase.
+        Returns self."""
+
+        for operation in self._phased():
+            self._advance(operation)
+
+        return self
+
+    @staticmethod
+    def _phase_of(phase: Phase | None) -> int | None:
+        """The phase index to stamp on an event: None unless the operation
+        actually has more than one phase, so unphased bindings record
+        nothing new."""
+
+        if phase is None or (phase.index == 0 and phase.successor is None):
             return None
 
-        return active.behaviour()
-
-    def _injected(self, operation: str) -> bool:
-        """Whether the operation's active behaviour injects its outcome."""
-
-        if operation == "request":
-            return self._injects.get("request", False)
-
-        active = self._active.get(operation)
-        return active is not None and active.injected
+        return phase.index
 
 
 class BindingGroup:
