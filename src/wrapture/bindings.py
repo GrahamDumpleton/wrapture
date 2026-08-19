@@ -50,6 +50,7 @@ from .exceptions import (
     DeferredTargetError,
     ExpectationNotMetError,
     NeverAppliedError,
+    NotImplementedYetError,
     RecordingGapWarning,
     SequenceExhaustedError,
     WrongModeError,
@@ -72,6 +73,14 @@ from .timeline import (
     _push,
     _stack,
     _timelines_active,
+)
+from .values import (
+    resolve_owner,
+    slot_delete,
+    slot_prior,
+    slot_read,
+    slot_restore,
+    slot_write,
 )
 
 
@@ -230,7 +239,9 @@ def _select_members(
     return selected
 
 
-def _location(target: Any, attrs: tuple[Any, ...]) -> tuple[Any, str]:
+def _location(
+    target: Any, attrs: tuple[Any, ...], *, allow_bare: bool = False
+) -> tuple[Any, str]:
     """Collapse `binding(target, *attrs)` to wrapt's (owner, "dotted.name").
 
     `target` is an object, a "module" string or a "module:path" string;
@@ -256,6 +267,9 @@ def _location(target: Any, attrs: tuple[Any, ...]) -> tuple[Any, str]:
             steps.insert(0, path)
 
     if not steps:
+        if allow_bare:
+            return target, ""
+
         if isinstance(target, str):
             module, _, last = target.rpartition(".")
             hint = (
@@ -536,17 +550,37 @@ class Binding:
         | bool
         | None = None,
         strict: bool = True,
+        attr: str | None = None,
+        item: Any = MISSING,
     ) -> None:
         # Validate the target and settle the mode before anything is
         # stored, so a bad binding fails on the line that created it.
 
         _reject_deferred(target)
 
+        # A slot keyword makes this a value binding: the location is the
+        # owner, and attr= or item= names the slot in it that is held.
+
+        if attr is not None and item is not MISSING:
+            raise TypeError("binding() takes attr= or item=, not both")
+
+        slot = attr is not None or item is not MISSING
+
+        if slot:
+            self._check_slot_options(
+                attr, item, mode, capture, capture_args, capture_result, stack, when
+            )
+        elif mode == "value":
+            raise ValueError(
+                "mode='value' needs a slot: name the owner positionally and"
+                " the slot with attr= or item="
+            )
+
         # Collapse the location to an owner and a dotted name, so the
         # colon spelling, the multi-step spelling and the dotted-name
         # spelling of the same member are one binding from here on.
 
-        target, name = _location(target, attrs)
+        target, name = _location(target, attrs, allow_bare=slot)
 
         stack = _resolve_depth(stack)
         if stack is not None and stack < 1:
@@ -567,7 +601,9 @@ class Binding:
                 f" args, kwargs), or None, got {when!r}"
             )
 
-        if mode is None:
+        if slot:
+            mode = "value"
+        elif mode is None:
             mode = _detect_mode(target, name, missing_ok=missing_ok)
         elif mode not in ("callable", "attribute", "wsgi", "asgi"):
             raise ValueError(
@@ -579,9 +615,26 @@ class Binding:
         self._mode = mode
         self._target = target
         self._name = name
-        self._path = _derive_path(target, name)
-        self._label = label or self._default_label(target, name)
         self._missing_ok = missing_ok
+
+        # The slot of a value binding: its kind, its name or key, the
+        # owner it lives in (resolved now, so a bad location fails here),
+        # what the binding is configured to hold, and, while applied,
+        # what the slot held before.
+
+        self._slot_kind = "attr" if attr is not None else "item"
+        self._slot: Any = attr if attr is not None else item
+        self._owner: Any = resolve_owner(target, name) if slot else None
+        self._holding: tuple[str, Any] = ("through", None)
+        self._prior: Any = MISSING
+        self._value_applied = False
+
+        if slot:
+            self._path = self._slot_path(target, name)
+            self._label = label or self._slot_label(target, name)
+        else:
+            self._path = _derive_path(target, name)
+            self._label = label or self._default_label(target, name)
 
         # Capture policy overrides. None means follow whatever the sink
         # consuming the events declares; capture= is shorthand for both
@@ -652,16 +705,87 @@ class Binding:
         owner = getattr(target, "__name__", None) or repr(target)
         return f"{owner}.{name}"
 
+    @staticmethod
+    def _check_slot_options(
+        attr: str | None,
+        item: Any,
+        mode: str | None,
+        *recording: Any,
+    ) -> None:
+        # A slot is value mode. attr= accepts no mode, since wrapping
+        # what an attribute holds is already the positional spelling;
+        # item= accepts the modes that have no other way to reach a
+        # mapping entry, which are not implemented yet. A value binding
+        # records nothing, so the recording options are refused rather
+        # than silently ignored.
+
+        if attr is not None and mode is not None:
+            raise TypeError(
+                f"attr= is a value slot and takes no mode= (got {mode!r}); to"
+                f" wrap what the attribute holds, name it positionally:"
+                f" binding(owner, {attr!r})"
+            )
+
+        if item is not MISSING and mode not in (None, "value"):
+            if mode == "attribute":
+                raise TypeError(
+                    "a mapping entry is not a descriptor slot, so item= cannot"
+                    " take mode='attribute'; bind the attribute on its class"
+                )
+            if mode in ("callable", "wsgi", "asgi"):
+                raise NotImplementedYetError(
+                    f"mode={mode!r} on a mapping entry is not implemented yet"
+                )
+            raise ValueError(
+                f"mode must be 'value', 'callable', 'wsgi' or 'asgi' for item=,"
+                f" got {mode!r}"
+            )
+
+        if any(option is not None for option in recording):
+            raise ValueError(
+                "a value binding records nothing, so capture=, capture_args=,"
+                " capture_result=, stack= and when= do not apply to it"
+            )
+
+    def _slot_label(self, target: Any, name: str) -> str:
+        # An owner given as an object with no name of its own (an
+        # instance, os.environ) is labelled by its type: a repr can be
+        # arbitrarily long and, carrying an address, unstable.
+
+        if name:
+            owner = self._default_label(target, name)
+        elif isinstance(target, str):
+            owner = target
+        else:
+            owner = getattr(target, "__name__", None) or type(target).__qualname__
+
+        if self._slot_kind == "attr":
+            return f"{owner}.{self._slot}"
+
+        return f"{owner}[{self._slot!r}]"
+
+    def _slot_path(self, target: Any, name: str) -> str:
+        owner = _derive_path(target, name).rstrip(".")
+
+        if self._slot_kind == "attr":
+            separator = "" if owner.endswith(":") else "."
+            return f"{owner}{separator}{self._slot}"
+
+        return f"{owner}[{self._slot!r}]"
+
     # -- identity ----------------------------------------------------------
 
     @property
     def mode(self) -> str:
-        """'callable', 'attribute', 'wsgi' or 'asgi'.
+        """'callable', 'attribute', 'wsgi', 'asgi' or 'value'.
 
         Names what is bound, not the operation: a 'callable' binding
         exposes on_call, an 'attribute' binding exposes on_get / on_set /
-        on_delete, and the request modes expose on_request. Detected at
-        creation, except the request modes, which are always explicit.
+        on_delete, the request modes expose on_request, and a 'value'
+        binding (a slot named with attr= or item=) exposes overrides(),
+        hides() and passes_through(). Detected at creation, except the
+        request modes, which are always explicit, and value mode, which
+        the slot keyword selects.
         """
 
         return self._mode
@@ -701,7 +825,7 @@ class Binding:
         return self._wrapper
 
     def __repr__(self) -> str:
-        if self._wrapper is None:
+        if not self.applied:
             state = "unapplied"
         else:
             state = "active" if self.active else "displaced"
@@ -719,6 +843,7 @@ class Binding:
             "attribute": "on_get, on_set or on_delete",
             "wsgi": "on_request",
             "asgi": "on_request",
+            "value": "overrides(), hides() or passes_through()",
         }[self._mode]
         article = "an" if self._mode == "attribute" else "a"
 
@@ -786,9 +911,10 @@ class Binding:
 
     @property
     def applied(self) -> bool:
-        """Whether apply() installed a wrapper that has not been removed."""
+        """Whether apply() installed a wrapper, or a value binding wrote
+        its slot, and remove() has not been called since."""
 
-        return self._wrapper is not None
+        return self._wrapper is not None or self._value_applied
 
     @property
     def suspended(self) -> bool:
@@ -808,6 +934,9 @@ class Binding:
         object's back is reported honestly. Three states: unapplied /
         active / displaced.
         """
+
+        if self._mode == "value":
+            return self._value_applied and self._slot_as_configured()
 
         if self._wrapper is None:
             return False
@@ -829,12 +958,32 @@ class Binding:
         resume() is called.
         """
 
-        if self._wrapper is not None:
+        if self.applied:
             raise AlreadyAppliedError(
                 f"{self._label} is already applied. Use either"
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
+
+        # A value binding has no wrapper: it notes what the slot holds
+        # and writes what it is configured to hold. Nothing else below
+        # applies to it.
+
+        if self._mode == "value":
+            self._prior = slot_prior(self._owner, self._slot_kind, self._slot)
+
+            # Write before marking applied, so a slot that refuses the
+            # value (os.environ given a non-string) leaves nothing to
+            # undo and the binding unapplied.
+
+            if not suspended:
+                self._write_slot()
+
+            self._value_applied = True
+            self._suspended = suspended
+            self._apply_count += 1
+            _applied_bindings.add(self)
+            return self
 
         # Behaviour restarts from phase 0 on every apply.
 
@@ -908,14 +1057,24 @@ class Binding:
         """Make an applied wrapper inert without removing it.
 
         The wrapper stays in the chain, so nothing structural changes and
-        reconfiguration is atomic from a caller's point of view.
+        reconfiguration is atomic from a caller's point of view. A value
+        binding puts the slot's prior state back until resume().
         """
+
+        if self._mode == "value" and self._value_applied and not self._suspended:
+            slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
 
         self._suspended = True
         return self
 
     def resume(self) -> Self:
-        """Reactivate a suspended wrapper."""
+        """Reactivate a suspended wrapper; a value binding writes its slot
+        again."""
+
+        if self._mode == "value" and self._value_applied and self._suspended:
+            self._suspended = False
+            self._write_slot()
+            return self
 
         self._suspended = False
         return self
@@ -982,6 +1141,12 @@ class Binding:
         applied, and RuntimeError outside a timeline.
         """
 
+        if self._mode == "value":
+            raise WrongModeError(
+                f"{self._label} is a value binding and records nothing; there"
+                f" are no events to read"
+            )
+
         if self._apply_count == 0:
             raise NeverAppliedError(
                 f"{self._label} was never applied; call apply() or use it"
@@ -1000,6 +1165,16 @@ class Binding:
         """Remove the wrapper. Idempotent. The binding can be applied
         again afterwards, starting unsuspended."""
 
+        if self._mode == "value":
+            if self._value_applied:
+                if not self._suspended:
+                    slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
+                self._value_applied = False
+                self._suspended = False
+                self._prior = MISSING
+                _applied_bindings.discard(self)
+            return self
+
         if self._wrapper is None:
             return self
 
@@ -1016,7 +1191,98 @@ class Binding:
     def __exit__(self, *exc: object) -> None:
         self.remove()
 
+    # -- value bindings ----------------------------------------------------
+
+    def _value_only(self, verb: str) -> None:
+        if self._mode != "value":
+            raise WrongModeError(
+                f"{verb}() is only available on a value binding (a slot named"
+                f" with attr= or item=); {self._label} is a {self._mode!r}"
+                f" binding"
+            )
+
+    def overrides(self, value: Any) -> Self:
+        """Hold `value` in the slot while applied. Value bindings only.
+
+        Settable before or after apply(); on an applied binding the slot
+        is written at once. Returns self, so it chains into apply() or
+        the context manager.
+        """
+
+        self._value_only("overrides")
+        self._holding = ("overrides", value)
+        self._write_slot_if_live()
+        return self
+
+    def hides(self) -> Self:
+        """Keep the slot absent while applied: the environment variable
+        unset, the key not in the mapping, the attribute not on the
+        owner. Value bindings only. Returns self."""
+
+        self._value_only("hides")
+        self._holding = ("hides", None)
+        self._write_slot_if_live()
+        return self
+
+    def passes_through(self) -> Self:
+        """Leave the slot as it really is: the initial state, and the way
+        back to it on an applied binding without removing it. Value
+        bindings only. Returns self."""
+
+        self._value_only("passes_through")
+        self._holding = ("through", None)
+        self._write_slot_if_live()
+        return self
+
+    def _write_slot_if_live(self) -> None:
+        if self._value_applied and not self._suspended:
+            self._write_slot()
+
+    def _write_slot(self) -> None:
+        # Put the slot into the configured state, relative to what it
+        # held when the binding was applied.
+
+        state, value = self._holding
+
+        if state == "overrides":
+            slot_write(self._owner, self._slot_kind, self._slot, value)
+        elif state == "hides":
+            slot_delete(self._owner, self._slot_kind, self._slot)
+        else:
+            slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
+
+    def _slot_as_configured(self) -> bool:
+        # Whether the slot still holds what the binding put there. A
+        # suspended binding put the prior back, so that is what counts;
+        # equality is the fallback for immutables such as the strings
+        # os.environ hands back.
+
+        state, value = self._holding
+        current = slot_read(self._owner, self._slot_kind, self._slot)
+
+        if self._suspended or state == "through":
+            expected = self._prior
+        elif state == "hides":
+            return current is MISSING
+        else:
+            expected = value
+
+        if current is MISSING or expected is MISSING:
+            return current is expected
+
+        return bool(current is expected or current == expected)
+
     # -- declared expectations ---------------------------------------------
+
+    def _expects(self, kind: str, count: int) -> Self:
+        if self._mode == "value":
+            raise WrongModeError(
+                f"{self._label} is a value binding and records nothing; it"
+                f" cannot carry an expectation"
+            )
+
+        self._expectations.append((kind, count))
+        return self
 
     def expect_times(self, count: int) -> Self:
         """Declare that this binding records exactly `count` events.
@@ -1025,8 +1291,7 @@ class Binding:
         cannot be forgotten; a mismatch raises ExpectationNotMetError.
         """
 
-        self._expectations.append(("times", count))
-        return self
+        return self._expects("times", count)
 
     def expect_once(self) -> Self:
         """Declare that this binding records exactly one event."""
@@ -1036,14 +1301,12 @@ class Binding:
     def expect_never(self) -> Self:
         """Declare that this binding records no events."""
 
-        self._expectations.append(("never", 0))
-        return self
+        return self._expects("never", 0)
 
     def expect_at_least(self, count: int) -> Self:
         """Declare that this binding records at least `count` events."""
 
-        self._expectations.append(("at_least", count))
-        return self
+        return self._expects("at_least", count)
 
     def _verify(self, tape: Any) -> None:
         # Called by the timeline at exit. Reuses the assertion methods
@@ -1764,8 +2027,10 @@ def binding(
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     strict: bool = True,
+    attr: str | None = None,
+    item: Any = MISSING,
 ) -> Binding:
-    """Create a binding for one target attribute.
+    """Create a binding for one target attribute, or for a slot in it.
 
     The positional arguments name a location. `target` is a module,
     class, instance, or a string: "module" or "module:path", the colon
@@ -1779,6 +2044,20 @@ def binding(
     colon form for a member owned by a class: point `target` at the
     owner and keep the last step the bare member name, as discover()
     spells it.
+
+    With `attr=` or `item=` the location is instead the owner of a
+    slot, and the binding is a value binding: it holds a value in the
+    slot (`overrides(value)`), keeps the slot absent (`hides()`), or
+    leaves it alone (`passes_through()`), for as long as it is applied,
+    restoring the prior state on remove(). `attr=` names an attribute
+    of the owner, `item=` a mapping entry (any key: an os.environ
+    variable, a dict key, a sys.modules name, a list index). The owner
+    is never replaced, so every reference to it sees the change. Such
+    a binding records nothing and has no behaviour namespaces; the
+    recording options below do not apply and are refused. `attr=`
+    takes no mode= (to wrap what an attribute holds, name it
+    positionally); `item=` will take mode= for wrapping a callable or
+    application held in a mapping.
 
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
@@ -1846,6 +2125,8 @@ def binding(
         stack=stack,
         when=when,
         strict=strict,
+        attr=attr,
+        item=item,
     )
 
 

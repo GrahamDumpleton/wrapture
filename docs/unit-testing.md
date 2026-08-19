@@ -70,6 +70,23 @@ def test_gateway_recovers(stub_charge):
     assert place_order("widget")["charge"] == "retry"
 ```
 
+The same shape suits a value binding, one that holds an environment
+variable, a settings entry or a module constant rather than wrapping a
+call: apply it in the fixture holding nothing, and let each test say
+what the slot should be:
+
+```python
+@pytest.fixture
+def api_key():
+    with wrapture.binding(os.environ, item="API_KEY") as key:
+        yield key
+
+def test_missing_key_is_reported(api_key):
+    api_key.hides()
+    with pytest.raises(ConfigError, match="API_KEY"):
+        make_client()
+```
+
 Keep fixtures that apply bindings **function scoped** (the pytest
 default). A session or module scoped fixture leaves the patch applied
 across every test in between, which reintroduces exactly the leakage the

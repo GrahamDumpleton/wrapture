@@ -496,6 +496,11 @@ namespaces do. A binding created with an explicit `mode=` and a
 misspelled name fails with `AttributeError` at `apply()`, since such
 bindings skip the creation-time check.
 
+A third mode, `value`, is never detected: it is selected by naming a
+slot with `attr=` or `item=` instead of what to wrap, and holds a
+value in that slot rather than intercepting anything. See
+[Value bindings](#value-bindings-holding-a-value-in-place).
+
 ## Attribute bindings
 
 An attribute-mode binding intercepts reads, writes and deletes of an
@@ -621,6 +626,122 @@ descriptor is installed on the class and would affect every instance,
 not just the one given. See [Known limitations](known-limitations.md)
 for the full list, including that attribute bindings intercept access
 made through instances only.
+
+## Value bindings: holding a value in place
+
+Everything above wraps something: a call or an attribute access passes
+through wrapture, which records it or changes what it does. Some
+patches are not like that. A test wants an environment variable set,
+a key in a settings dict changed, a module constant lowered, an
+attribute on one object pointed elsewhere, for the duration of the
+test and then put back, and nothing needs to be observed. That is a
+**value binding**: name the owner positionally, name the slot in it
+with `attr=` or `item=`, and say what the slot should hold:
+
+```python
+timeout = wrapture.binding("myapp.config", attr="TIMEOUT").overrides(0.5)
+api_key = wrapture.binding(os.environ, item="API_KEY").overrides("sk_test")
+```
+
+`attr=` names an attribute of the owner; `item=` names a mapping
+entry, any key: an `os.environ` variable, a dict key, a `sys.modules`
+name, a list index. The positional part names the owner, in every
+form [Creating a binding](#creating-a-binding) allows, so
+`binding("os", "environ", item="API_KEY")` and
+`binding("myapp.config", "SETTINGS", item="currency")` read the way
+the code does. Three verbs, each returning the binding so it chains
+into `apply()` or a `with`:
+
+- `overrides(value)`: the slot holds `value` while applied.
+- `hides()`: the slot is **absent** while applied: the variable is
+  unset, the key is not in the mapping, the attribute is not on the
+  owner. This is what "the setting is missing" tests need, which
+  `overrides(None)` cannot say (None is a value that is there).
+- `passes_through()`: leave the slot as it really is. A binding starts
+  in this state, and it is the way back to it on an applied binding
+  without removing it.
+
+```python
+with wrapture.binding(os.environ, item="API_KEY").hides():
+    with pytest.raises(ConfigError, match="API_KEY"):
+        make_client()
+```
+
+`apply()` (or entering the `with`) notes what the slot held, or that
+it held nothing, and writes the configured state; `remove()` puts the
+prior state back, deleting the slot if it did not exist before. The
+owner is never replaced, so every reference to it sees the change:
+`os.environ` is one object, and a settings dict imported elsewhere
+with `from config import SETTINGS` is the same dict the binding wrote
+into. Rebinding the *attribute* (`binding("config", attr="SETTINGS").overrides({...})`)
+is different: it gives `config.SETTINGS` a new
+object, which reaches code that reads it through the module and not
+code that copied the name at import; use `item=` on the dict itself
+when the point is a changed entry.
+
+The verbs may be called before or after `apply()`, and on an applied
+binding they take effect at once, so the fixture shape is one binding
+applied for the test and a verb per case:
+
+```python
+@pytest.fixture
+def api_key():
+    with wrapture.binding(os.environ, item="API_KEY") as key:
+        yield key                     # applied, holding nothing yet
+
+def test_sandbox_key(api_key):
+    api_key.overrides("sk_test")
+    ...
+
+def test_missing_key(api_key):
+    api_key.hides()
+    ...
+```
+
+Everything around bindings applies. `suspend()` puts the prior state
+back until `resume()`; `active` reports whether the slot still holds
+what the binding put there, so a teardown can see that something else
+overwrote it (`repr()` shows `displaced`); a
+[group](#binding-groups) applies and removes several together, in
+order, with rollback; the pytest plugin's leak sweep reports a value
+binding left applied like any other.
+
+What a value binding does not do is record: there is no call to
+observe, only a value in a slot. It has no `on_*` namespaces, no
+events, no phases, and the recording options (`capture=`, `stack=`,
+`when=`) are refused rather than ignored. If what you want is to see
+who reads a setting, or to transform the value as it is read, give the
+code an accessor (`get_setting("TIMEOUT")`, `config.timeout()`) and
+bind that in callable mode: reads then go through one callable with
+the whole vocabulary, and it is usually better code anyway.
+
+Some cases worth knowing:
+
+- An instance attribute, on one object only:
+  `binding(client, attr="base_url").overrides("http://localhost:9999")`.
+  If the value
+  came from the class, the instance is left without its own copy
+  afterwards, exactly as before. (Positional
+  `binding(client, "base_url")` is still refused: an attribute binding
+  installs a descriptor on a class, and the error now names `attr=`
+  for this case.)
+- A module constant:
+  `binding("myapp.http", attr="TIMEOUT").overrides(0.01)`. Positional
+  `binding("myapp.http", "TIMEOUT")` is still refused for
+  interception; the error names `attr=`.
+- A stand-in module: `binding(sys.modules, item="boto3").overrides(fake)`,
+  affecting imports made while applied, as `patch.dict(sys.modules, ...)`
+  does.
+- Replacing a function wholesale rather than wrapping it,
+  `binding("myapp.clock", attr="now").overrides(lambda: FIXED)`, when
+  a whole different object is wanted; `on_call.returns()` or
+  `decorates()` is usually the better tool, since the binding then
+  records and can be phased.
+- `attr=` takes no `mode=`: to wrap what an attribute holds, name it
+  positionally, that spelling already exists. `item=` will take
+  `mode="callable"`, `"wsgi"` and `"asgi"` for a callable or
+  application held in a mapping, since nothing else can reach one;
+  that is not implemented yet and says so.
 
 ## Iterators and generators
 
