@@ -815,7 +815,12 @@ Each filter returns a new, narrowed `EventLog`, so filters chain freely:
   exception types; `raising()` keeps events that raised anything.
 - `with_args(amount=500)` keeps calls whose *normalized* arguments
   include the given values, so `with_args(currency="USD")` also matches
-  calls that relied on the default.
+  calls that relied on the default. A name that is not a parameter
+  falls through into the target's `**kwargs` bundle when it has one:
+  against `def dispatch(job, **options)`, `with_args(priority=5)`
+  matches a call that passed `priority` through `**options`, other
+  keys free, while `with_args(options={"priority": 5})` names the
+  bundle parameter itself and compares the whole mapping.
 - `returning(value)` keeps events whose outcome was the value: a call's
   return value, or the value an attribute read produced.
 - `with_value(value)` keeps attribute writes of that value.

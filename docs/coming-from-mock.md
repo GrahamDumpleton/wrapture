@@ -287,7 +287,11 @@ Events carry signature-normalized arguments, real return values (which
 mock does not record), exceptions, nesting and ordering, and the same
 handle asserts on them. Two habits transfer directly, upgraded: argument
 matching is by parameter name against the normalized call, so
-`with_args(amount=500)` matches however the caller spelled it; and where
+`with_args(amount=500)` matches however the caller spelled it, and
+keywords the target collects in `**kwargs` match the same way, so a
+mock-style `assert_called_with(..., priority=5)` against a
+`def dispatch(job, **options)` target translates to
+`with_args(priority=5)` unchanged; and where
 mock's misspelled `assert_calld_once` famously passed silently for
 years, a misspelled wrapture assertion is an `AttributeError`.
 

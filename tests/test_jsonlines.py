@@ -36,6 +36,11 @@ class Gateway:
         return None
 
 
+class Dispatcher:
+    def submit(self, item: str, **options: Any) -> None:
+        return None
+
+
 class Processor:
     def process(self) -> str:
         return Gateway().charge(500)
@@ -102,6 +107,35 @@ def test_each_completed_event_becomes_one_json_line(tmp_path: Path) -> None:
 
     assert inner["thread_id"] == threading.get_ident()
     assert inner["thread_name"] == threading.current_thread().name
+
+
+def test_var_keyword_name_rides_the_line_and_survives_reload(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    sink = JSONLines(trace)
+
+    submit = binding(Dispatcher, "submit")
+    charge = binding(Gateway, "charge")
+
+    with submit, charge, listening(sink):
+        Dispatcher().submit("job", parent_id="id-1")
+        Gateway().charge(500)
+
+    sink.close()
+
+    from wrapture import load_events
+
+    submitted, charged = load_events(trace)
+
+    # The bundle parameter's name is on the line when the target has
+    # one, so a reloaded record still says where the extra keywords
+    # live (under this sink's summary capture, as the bundle's summary);
+    # a target without one carries no such field.
+
+    assert submitted["var_keyword"] == "options"
+    assert "parent_id" in submitted["arguments"]["options"]
+    assert "var_keyword" not in charged
 
 
 def test_a_raising_call_serialises_its_exception(tmp_path: Path) -> None:
