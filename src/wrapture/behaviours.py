@@ -92,6 +92,77 @@ def _stage_wrapper(stage: StageFunction, nxt: WrapperFunction) -> WrapperFunctio
     return call
 
 
+class Phase:
+    """One phase of a binding's behaviour for a single operation.
+
+    A phase is a complete behaviour: composing stages around at most one
+    terminal, with the composed form cached until either changes. Phases
+    form a chain per operation, each holding its successor and the exit
+    condition that hands over to it; a binding that never calls then()
+    has a single phase and behaves as a plain pipeline.
+    """
+
+    __slots__ = (
+        "index",
+        "stages",
+        "terminal",
+        "injected",
+        "_composed",
+        "successor",
+        "exit",
+        "handled",
+    )
+
+    def __init__(self, index: int = 0) -> None:
+        self.index = index
+        self.stages: list[StageFunction] = []
+        self.terminal: WrapperFunction | None = None
+        self.injected = False
+        self._composed: WrapperFunction | None = None
+
+        # Chain bookkeeping: the phase that takes over, the condition
+        # under which it does, and how many operations this phase has
+        # handled since it became active.
+
+        self.successor: Phase | None = None
+        self.exit: tuple[str, Any] | None = None
+        self.handled = 0
+
+    @property
+    def configured(self) -> bool:
+        """Whether any stage or terminal has been set."""
+
+        return bool(self.stages) or self.terminal is not None
+
+    def set_terminal(self, fn: WrapperFunction, *, injected: bool = False) -> None:
+        self.terminal = fn
+        self.injected = injected
+        self._composed = None
+
+    def add_stage(self, fn: StageFunction) -> None:
+        self.stages.append(fn)
+        self._composed = None
+
+    def clear(self) -> None:
+        """Drop stages and terminal, so the phase performs the real operation."""
+
+        self.stages = []
+        self.terminal = None
+        self.injected = False
+        self._composed = None
+
+    def behaviour(self) -> WrapperFunction | None:
+        """The composed pipeline, or None when nothing is configured."""
+
+        if not self.configured:
+            return None
+
+        if self._composed is None:
+            self._composed = _compose(self.stages, self.terminal)
+
+        return self._composed
+
+
 class _Behaviour:
     """Base for the per-operation behaviour namespaces."""
 

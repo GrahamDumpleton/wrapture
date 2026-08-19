@@ -175,7 +175,7 @@ def _record(
             instance=instance,
             binding=binding,
             capture=_level_of(policy),
-            injected=binding._injects.get(kind, False),
+            injected=binding._injected(kind),
         )
 
         if binding._stack_depth is not None:

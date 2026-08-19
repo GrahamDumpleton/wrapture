@@ -26,12 +26,12 @@ from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
     GetBehaviour,
+    Phase,
     SetBehaviour,
     StageFunction,
     WrappedFunction,
     WrapperFunction,
     _Behaviour,
-    _compose,
 )
 from .capture import (
     NONE,
@@ -547,15 +547,15 @@ class Binding:
         self._stack_depth = stack
         self._when = when
 
-        # The behaviour pipelines, keyed by operation ("call", "get",
-        # "set" or "delete"): composing stages around one terminal, with
-        # the composed form cached until either changes. Request
-        # behaviour is phase-keyed rather than composed, so it lives in
+        # The behaviour phases, keyed by operation ("call", "get", "set"
+        # or "delete"): each operation has a chain of Phase records
+        # starting at its head, and the phase currently deciding what
+        # the operation does. Both are created on first use. Request
+        # behaviour is stage-keyed rather than composed, so it lives in
         # its own structure, consumed by the WSGI and ASGI middlewares.
 
-        self._pipelines: dict[str, list[StageFunction]] = {}
-        self._terminals: dict[str, WrapperFunction] = {}
-        self._composed: dict[str, WrapperFunction] = {}
+        self._heads: dict[str, Phase] = {}
+        self._active: dict[str, Phase] = {}
         self._request_hooks: dict[str, Any] = {
             "inbound": [],
             "response": [],
@@ -580,8 +580,9 @@ class Binding:
 
         self._expectations: list[tuple[str, int]] = []
 
-        # Which operations currently have an injecting terminal
-        # (returns / raises / rejects), so their events can be marked.
+        # Whether request behaviour currently has an injecting terminal
+        # (returns / rejects), so request events can be marked. The
+        # composed operations carry the flag on their phases instead.
 
         self._injects: dict[str, bool] = {}
 
@@ -1159,7 +1160,7 @@ class Binding:
             instance=instance,
             binding=self,
             capture=level,
-            injected=self._injects.get("call", False),
+            injected=self._injected("call"),
         )
 
         if self._stack_depth is not None:
@@ -1199,42 +1200,57 @@ class Binding:
 
         return event
 
-    # -- behaviour pipelines -------------------------------------------------
+    # -- behaviour phases -----------------------------------------------------
+
+    def _head(self, operation: str) -> Phase:
+        """Phase 0 for the operation, created on first use."""
+
+        head = self._heads.get(operation)
+
+        if head is None:
+            head = self._heads[operation] = Phase()
+            self._active[operation] = head
+
+        return head
 
     def _set_terminal(
-        self, operation: str, fn: WrapperFunction, *, injected: bool = False
+        self,
+        operation: str,
+        fn: WrapperFunction,
+        *,
+        injected: bool = False,
+        phase: Phase | None = None,
     ) -> None:
-        self._terminals[operation] = fn
-        self._injects[operation] = injected
-        self._composed.pop(operation, None)
+        (phase or self._head(operation)).set_terminal(fn, injected=injected)
 
-    def _add_stage(self, operation: str, fn: StageFunction) -> None:
-        self._pipelines.setdefault(operation, []).append(fn)
-        self._composed.pop(operation, None)
+    def _add_stage(
+        self, operation: str, fn: StageFunction, *, phase: Phase | None = None
+    ) -> None:
+        (phase or self._head(operation)).add_stage(fn)
 
     def _clear_behaviour(self, operation: str) -> None:
-        self._pipelines.pop(operation, None)
-        self._terminals.pop(operation, None)
-        self._injects.pop(operation, None)
-        self._composed.pop(operation, None)
+        self._heads.pop(operation, None)
+        self._active.pop(operation, None)
 
     def _behaviour(self, operation: str) -> WrapperFunction | None:
-        """The composed pipeline for one operation, or None when nothing
-        is configured for it."""
+        """The composed pipeline of the operation's active phase, or None
+        when nothing is configured for it."""
 
-        pipeline = self._pipelines.get(operation)
-        terminal = self._terminals.get(operation)
+        active = self._active.get(operation)
 
-        if not pipeline and terminal is None:
+        if active is None:
             return None
 
-        composed = self._composed.get(operation)
+        return active.behaviour()
 
-        if composed is None:
-            composed = _compose(pipeline or (), terminal)
-            self._composed[operation] = composed
+    def _injected(self, operation: str) -> bool:
+        """Whether the operation's active behaviour injects its outcome."""
 
-        return composed
+        if operation == "request":
+            return self._injects.get("request", False)
+
+        active = self._active.get(operation)
+        return active is not None and active.injected
 
 
 class BindingGroup:
