@@ -39,6 +39,7 @@ from typing import Any, cast
 
 from wrapt import CallableObjectProxy, wrapper_chain
 
+from .behaviours import _named_after
 from .bindings import (
     _record_async_generator,
     _record_awaited,
@@ -316,10 +317,15 @@ class ObservedCallable(CallableObjectProxy[Any]):
             return _record_generator(outcome, event, base, result_policy, active)
 
         if inspect.isasyncgen(outcome):
-            return _record_async_generator(outcome, event, base, result_policy, active)
+            return _named_after(
+                _record_async_generator(outcome, event, base, result_policy, active),
+                outcome,
+            )
 
         if inspect.isawaitable(outcome):
-            return _record_awaited(outcome, event, base, result_policy, active)
+            return _named_after(
+                _record_awaited(outcome, event, base, result_policy, active), outcome
+            )
 
         event.duration = time.perf_counter() - started
         _capture_result(event, outcome, result_policy)

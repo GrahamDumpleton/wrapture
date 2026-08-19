@@ -435,6 +435,32 @@ made inside its body nest under its event even when other tasks run in
 between. Concurrent asyncio tasks each record their own correctly nested
 subtree onto the shared tape.
 
+An event therefore has two moments, the call and the completion, and
+`Event.finished` says whether the second has happened: the call
+returned or raised, the generator closed, the coroutine was awaited.
+`events.finished()` and `events.pending()` filter on it, and
+`tape.pending` counts the open events on the tape (shown in the repr
+as `<Tape: 3 events, 1 pending>` while non-zero). For an `async def`
+target that is how to catch the classic mistake of calling without
+awaiting, which otherwise surfaces only as Python's `RuntimeWarning`
+when the coroutine is collected:
+
+```python
+with wrapture.timeline(send) as tape:
+    await service.notify("hello")
+
+    send.events.assert_once()                 # called once
+    send.events.finished().assert_once()      # and awaited
+    send.events.pending().assert_never()      # nothing created and forgotten
+
+assert tape.pending == 0
+```
+
+The count is live: a coroutine awaited after the scope exits leaves
+it. A generator still being consumed, or a call in flight on another
+task, is pending for the same reason, so the filters read as "has this
+operation ended" rather than anything specific to coroutines.
+
 The tape closes when its timeline exits. Work that outlives the scope,
 a task never awaited or a thread still running, is discarded from then
 on and counted on `Tape.discarded`, so the tape a test asserted on

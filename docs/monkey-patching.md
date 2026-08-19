@@ -240,6 +240,32 @@ fetch = wrapture.binding(Service, "fetch")
 fetch.on_call.transforms_result(lambda rows: rows[:10])
 ```
 
+Stubs follow the target's calling convention too. On a coroutine
+function, `returns()`, `returns_from()` and `raises()` deliver their
+outcome on await: the call still hands back a coroutine, so code
+written as `await service.fetch(1)` works against the stub exactly as
+against the real method, and a stubbed exception is raised where the
+real one would be, at the await. On an async generator function,
+`returns(iterable)` hands back an async generator over the iterable
+(an async iterable is passed through as it is) and `raises()` raises
+on the first iteration. Argument stages and the strict signature check
+still run at the call, where a coroutine function reports a bad call
+shape too; `decorates()` owns its outcome and returns whatever it
+returns. A stub has no outcome to inspect, so it goes by what
+introspection reports (`inspect.iscoroutinefunction`), which wrapt's
+`mark_as_async` and `mark_as_sync` can correct for a function whose
+signature lies.
+
+```python
+fetch = wrapture.binding(Service, "fetch")         # async def fetch
+fetch.on_call.raises(TimeoutError("down"))
+
+async def test_retries_after_timeout():
+    with fetch:
+        with pytest.raises(TimeoutError):
+            await service.fetch(1)                   # raised here, not at the call
+```
+
 ## Phased behaviour: changing what a call does over time
 
 Everything above configures one behaviour that holds until you change

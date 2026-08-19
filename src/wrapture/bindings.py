@@ -43,6 +43,7 @@ from .behaviours import (
     WrapperFunction,
     _Behaviour,
     _Exhausted,
+    _named_after,
 )
 from .capture import (
     NONE,
@@ -333,6 +334,19 @@ def _derive_path(target: Any, name: str) -> str:
     return f"{owner.__module__}:{owner.__qualname__}.{name}"
 
 
+def _async_kind(wrapped: Any) -> str | None:
+    """The asynchronous calling protocol of a target, if it has one:
+    "coroutine" for a coroutine function, "asyncgen" for an async
+    generator function, else None. Resolved through wrapt wrappers and
+    bound methods, so a stacked binding still sees the real function."""
+
+    if inspect.iscoroutinefunction(wrapped):
+        return "coroutine"
+    if inspect.isasyncgenfunction(wrapped):
+        return "asyncgen"
+    return None
+
+
 def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
     """The `wrapped` handed to behaviour, recording what the original
     actually received, which may differ from what the caller sent."""
@@ -340,6 +354,15 @@ def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
     def forward(*args: Any, **kwargs: Any) -> Any:
         event.forwarded = (args, kwargs)
         return wrapped(*args, **kwargs)
+
+    # Carry the target's names, so anything behaviour derives from the
+    # callable it is handed (a stub coroutine's name, say) reads as the
+    # target rather than as this forwarder.
+
+    for attribute in ("__name__", "__qualname__"):
+        name = getattr(wrapped, attribute, None)
+        if isinstance(name, str):
+            setattr(forward, attribute, name)
 
     return forward
 
@@ -1695,18 +1718,24 @@ class Binding:
 
             if inspect.isasyncgen(outcome):
                 completed(event)
-                return _record_async_generator(
-                    outcome, event, base, result_policy, active
+                return _named_after(
+                    _record_async_generator(
+                        outcome, event, base, result_policy, active
+                    ),
+                    outcome,
                 )
 
             if inspect.isawaitable(outcome):
-                return _record_awaited(
+                return _named_after(
+                    _record_awaited(
+                        outcome,
+                        event,
+                        base,
+                        result_policy,
+                        active,
+                        completed if watching else None,
+                    ),
                     outcome,
-                    event,
-                    base,
-                    result_policy,
-                    active,
-                    completed if watching else None,
                 )
 
             event.duration = time.perf_counter() - started
@@ -1894,7 +1923,12 @@ class Binding:
         """
 
         while True:
-            behaviour = None if phase is None else phase.behaviour()
+            if phase is None:
+                behaviour = None
+            elif operation == "call" and phase.injected:
+                behaviour = phase.behaviour(_async_kind(wrapped))
+            else:
+                behaviour = phase.behaviour()
 
             try:
                 if behaviour is None:
@@ -2011,7 +2045,9 @@ class Binding:
         # resolves; a generator is shown at construction, with no result.
 
         if inspect.isawaitable(outcome):
-            return self._quiet_awaited(operation, final, outcome, event)
+            return _named_after(
+                self._quiet_awaited(operation, final, outcome, event), outcome
+            )
 
         if not inspect.isgenerator(outcome) and not inspect.isasyncgen(outcome):
             event.result = outcome

@@ -257,12 +257,22 @@ def test_tape_repr_shows_the_event_and_discard_counts() -> None:
     tape = Tape()
     assert repr(tape) == "<Tape: 0 events>"
 
-    _record_event(Event("call", "a"), (tape,))
+    event = _record_event(Event("call", "a"), (tape,))
+    assert repr(tape) == "<Tape: 1 event, 1 pending>"
+    assert tape.pending == 1
+
+    event.duration = 0.0
     assert repr(tape) == "<Tape: 1 event>"
+    assert tape.pending == 0
 
     tape._close()
     _record_event(Event("call", "late"), (tape,))
     assert repr(tape) == "<Tape: 1 event, 1 discarded after close>"
+
+    _record_event(Event("call", "b"), (tape,))  # discarded too: closed
+    tape._open()
+    _record_event(Event("call", "c"), (tape,))
+    assert repr(tape) == "<Tape: 2 events, 1 pending, 2 discarded after close>"
 
 
 def test_reentering_an_active_timeline_raises() -> None:

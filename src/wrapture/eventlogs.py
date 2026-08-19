@@ -131,6 +131,23 @@ class EventLog:
         suffix = "[injected]" if want else "[injected=False]"
         return self._narrow(suffix, lambda event: event.injected is want)
 
+    def finished(self) -> EventLog:
+        """Events whose operation has ended, however it ended: the call
+        returned or raised, the generator closed, the coroutine was
+        awaited. For an `async def` target this is the awaited subset,
+        so `finished().assert_once()` says "awaited once"."""
+
+        return self._narrow("[finished]", lambda event: event.finished)
+
+    def pending(self) -> EventLog:
+        """Events whose operation has not ended: a call still in flight,
+        a generator still being consumed, a coroutine created and not
+        yet awaited. After the code under test has finished, a pending
+        event on an `async def` target is a call that was never
+        awaited."""
+
+        return self._narrow("[pending]", lambda event: not event.finished)
+
     # -- assertions: raise on failure, return self so they chain -------------
 
     def assert_never(self) -> EventLog:
