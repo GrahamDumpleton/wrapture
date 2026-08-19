@@ -46,7 +46,7 @@ listing the whole catalog, which is where most of its own time goes.
 
 >>> def price_list() -> dict[str, int]:
 ...     base = {"widget": 25, "gadget": 120, "gizmo": 60}
-...     packs = {f"{name}-x{n}": price * n for name, price in base.items() for n in (2, 5, 10)}
+...     packs = {f"{name}-x{n}": price * n for name, price in base.items() for n in range(2, 21)}
 ...
 ...     return {**base, **packs}
 
