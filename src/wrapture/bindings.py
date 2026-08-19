@@ -50,7 +50,6 @@ from .exceptions import (
     DeferredTargetError,
     ExpectationNotMetError,
     NeverAppliedError,
-    NotImplementedYetError,
     RecordingGapWarning,
     SequenceExhaustedError,
     WrongModeError,
@@ -567,7 +566,7 @@ class Binding:
         slot = attr is not None or item is not MISSING
 
         if slot:
-            self._check_slot_options(
+            mode = self._check_slot_options(
                 attr, item, mode, capture, capture_args, capture_result, stack, when
             )
         elif mode == "value":
@@ -601,11 +600,9 @@ class Binding:
                 f" args, kwargs), or None, got {when!r}"
             )
 
-        if slot:
-            mode = "value"
-        elif mode is None:
+        if mode is None:
             mode = _detect_mode(target, name, missing_ok=missing_ok)
-        elif mode not in ("callable", "attribute", "wsgi", "asgi"):
+        elif mode not in ("callable", "attribute", "wsgi", "asgi", "value"):
             raise ValueError(
                 f"mode must be 'callable', 'attribute', 'wsgi' or 'asgi', got {mode!r}"
             )
@@ -711,13 +708,13 @@ class Binding:
         item: Any,
         mode: str | None,
         *recording: Any,
-    ) -> None:
-        # A slot is value mode. attr= accepts no mode, since wrapping
-        # what an attribute holds is already the positional spelling;
-        # item= accepts the modes that have no other way to reach a
-        # mapping entry, which are not implemented yet. A value binding
-        # records nothing, so the recording options are refused rather
-        # than silently ignored.
+    ) -> str:
+        # A slot is value mode unless item= says otherwise. attr= accepts
+        # no mode, since wrapping what an attribute holds is already the
+        # positional spelling; item= accepts the modes that have no other
+        # way to reach a mapping entry: a callable or an application held
+        # in it. A value binding records nothing, so for it the recording
+        # options are refused rather than silently ignored.
 
         if attr is not None and mode is not None:
             raise TypeError(
@@ -726,26 +723,32 @@ class Binding:
                 f" binding(owner, {attr!r})"
             )
 
-        if item is not MISSING and mode not in (None, "value"):
+        if item is not MISSING and mode not in (
+            None,
+            "value",
+            "callable",
+            "wsgi",
+            "asgi",
+        ):
             if mode == "attribute":
                 raise TypeError(
                     "a mapping entry is not a descriptor slot, so item= cannot"
                     " take mode='attribute'; bind the attribute on its class"
-                )
-            if mode in ("callable", "wsgi", "asgi"):
-                raise NotImplementedYetError(
-                    f"mode={mode!r} on a mapping entry is not implemented yet"
                 )
             raise ValueError(
                 f"mode must be 'value', 'callable', 'wsgi' or 'asgi' for item=,"
                 f" got {mode!r}"
             )
 
-        if any(option is not None for option in recording):
-            raise ValueError(
-                "a value binding records nothing, so capture=, capture_args=,"
-                " capture_result=, stack= and when= do not apply to it"
-            )
+        if mode is None or mode == "value":
+            if any(option is not None for option in recording):
+                raise ValueError(
+                    "a value binding records nothing, so capture=, capture_args=,"
+                    " capture_result=, stack= and when= do not apply to it"
+                )
+            return "value"
+
+        return mode
 
     def _slot_label(self, target: Any, name: str) -> str:
         # An owner given as an object with no name of its own (an
@@ -942,12 +945,16 @@ class Binding:
             return False
 
         # Resolve what is at the target right now; if the path no longer
-        # resolves at all, the wrapper is certainly not installed.
+        # resolves at all, the wrapper is certainly not installed. A
+        # mapping entry is read directly.
 
-        try:
-            current = wrapt.resolve_path(self._target, self._name)[2]
-        except Exception:
-            return False
+        if self._slot_kind == "item" and self._owner is not None:
+            current = slot_read(self._owner, "item", self._slot)
+        else:
+            try:
+                current = wrapt.resolve_path(self._target, self._name)[2]
+            except Exception:
+                return False
 
         return bool(is_wrapped_by(current, self._wrapper))
 
@@ -1011,7 +1018,7 @@ class Binding:
             def middleware(wrapped: WrappedFunction, *args: Any, **kwargs: Any) -> Any:
                 return WSGIMiddleware(wrapped, binding=self)
 
-            self._wrapper = wrapt.wrap_object(self._target, self._name, middleware)
+            self._wrapper = self._install(middleware)
             self._suspended = suspended
             self._apply_count += 1
             _applied_bindings.add(self)
@@ -1025,7 +1032,7 @@ class Binding:
             ) -> Any:
                 return ASGIMiddleware(wrapped, binding=self)
 
-            self._wrapper = wrapt.wrap_object(self._target, self._name, asgi_middleware)
+            self._wrapper = self._install(asgi_middleware)
             self._suspended = suspended
             self._apply_count += 1
             _applied_bindings.add(self)
@@ -1038,11 +1045,52 @@ class Binding:
         def factory(wrapped: WrappedFunction, *args: Any, **kwargs: Any) -> Any:
             return wrapt.FunctionWrapper(wrapped, self._make_wrapper(), self._enabled)
 
-        self._wrapper = wrapt.wrap_object(self._target, self._name, factory)
+        self._wrapper = self._install(factory)
         self._suspended = suspended
         self._apply_count += 1
         _applied_bindings.add(self)
         return self
+
+    def _install(self, factory: Callable[..., Any]) -> Any:
+        """Wrap what the location holds and store the wrapper back there.
+
+        An attribute location goes through wrapt.wrap_object(); a mapping
+        entry (item=) is read, wrapped and written back directly, with
+        the original kept for remove().
+        """
+
+        if self._slot_kind != "item" or self._owner is None:
+            return wrapt.wrap_object(self._target, self._name, factory)
+
+        original = slot_read(self._owner, "item", self._slot)
+        if original is MISSING:
+            raise KeyError(
+                f"{self._label}: the mapping has no entry {self._slot!r} to wrap"
+            )
+
+        wrapper = factory(original)
+        slot_write(self._owner, "item", self._slot, wrapper)
+        self._prior = original
+        return wrapper
+
+    def _uninstall(self, *, missing_ok: bool) -> None:
+        """Put the original back where the wrapper was."""
+
+        if self._slot_kind != "item" or self._owner is None:
+            unwrap_object(
+                self._target, self._name, self._wrapper, missing_ok=missing_ok
+            )
+            return
+
+        current = slot_read(self._owner, "item", self._slot)
+        if current is self._wrapper:
+            slot_write(self._owner, "item", self._slot, self._prior)
+        elif not missing_ok:
+            raise ValueError(
+                f"{self._label}: the mapping entry no longer holds the wrapper"
+            )
+
+        self._prior = MISSING
 
     def _enabled(self) -> bool:
         """Read by wrapt on every call; False bypasses the wrapper."""
@@ -1178,7 +1226,7 @@ class Binding:
         if self._wrapper is None:
             return self
 
-        unwrap_object(self._target, self._name, self._wrapper, missing_ok=missing_ok)
+        self._uninstall(missing_ok=missing_ok)
 
         self._wrapper = None
         self._suspended = False
@@ -2056,8 +2104,11 @@ def binding(
     a binding records nothing and has no behaviour namespaces; the
     recording options below do not apply and are refused. `attr=`
     takes no mode= (to wrap what an attribute holds, name it
-    positionally); `item=` will take mode= for wrapping a callable or
-    application held in a mapping.
+    positionally). `item=` also takes mode="callable", "wsgi" or
+    "asgi", since nothing else can reach a callable or an application
+    held in a mapping (a handler in a dispatch table, an app in a
+    registry): the entry is wrapped in place, with the whole vocabulary
+    of that mode, and the original put back on remove().
 
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`

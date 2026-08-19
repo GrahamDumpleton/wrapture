@@ -1,10 +1,11 @@
 """Observation for callables that live nowhere a binding can point.
 
-A binding names an attribute: a location that can be resolved, patched
-and restored. Plenty of callables never sit at one: view functions
-captured into a framework's dispatch table, callbacks handed to a
-registry, closures, partials, work put on a queue. observed() wraps
-the value instead of the location: it returns a transparent proxy
+A binding names a location that can be resolved, patched and restored:
+an attribute, or a mapping entry named with item=. Plenty of callables
+never sit at one long enough to be named: closures, partials, work put
+on a queue, callbacks handed over and kept somewhere private, view
+functions on their way into a framework's registration. observed()
+wraps the value instead of the location: it returns a transparent proxy
 that records a "call" event per invocation, and the caller places it
 wherever the original was going.
 
@@ -339,8 +340,11 @@ def observed(
     """Wrap a bare callable so its calls record, wherever it ends up.
 
     For callables no binding can reach because they live at no
-    attribute: view functions in a dispatch table, callbacks in a
-    registry, closures, partials, thread targets. The returned proxy
+    nameable location: closures, partials, thread targets, callbacks
+    handed over and kept somewhere private, a value on its way into a
+    registration call. (A callable that does sit in a mapping, a
+    handler in a dispatch table, is reachable by a binding with item=
+    and mode="callable", which also removes itself.) The returned proxy
     is transparent (name, signature, equality and introspection all
     delegate), records one "call" event per invocation inside a
     recording scope, and costs almost nothing when nothing listens.
