@@ -31,8 +31,8 @@ body raises. Groups scope the same way:
 
 ```python
 def test_gateway_offline():
-    group = wrapture.bindings(charge=(Gateway, "charge"),
-                              refund=(Gateway, "refund"))
+    group = wrapture.bindings(charge=wrapture.binding(Gateway, "charge"),
+                              refund=wrapture.binding(Gateway, "refund"))
     group.charge.on_call.raises(TimeoutError("down"))
     group.refund.on_call.raises(TimeoutError("down"))
 

@@ -148,9 +148,9 @@ beneath whichever request is in flight:
 
 ```python
 >>> layers = wrapture.bindings(
-...     quote=(QuoteService, "quote"),
-...     fetch=(Repository, "fetch"),
-...     render=(Template, "render"),
+...     quote=wrapture.binding(QuoteService, "quote"),
+...     fetch=wrapture.binding(Repository, "fetch"),
+...     render=wrapture.binding(Template, "render"),
 ... )
 >>> _ = layers.apply()
 >>> shop.routes["quote"] = wrapture.observed(quote_view)
@@ -160,9 +160,9 @@ beneath whichever request is in flight:
 ...     print(tape.tree())
 GET /quote/widget (shop)  -> '200 OK'
   __main__.quote_view(item='widget')  -> b'widget: 25\n'
-    quote(item='widget')  -> {'item': 'widget', 'price': 25}
-      fetch(item='widget')  -> 25
-    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'
+    QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}
+      Repository.fetch(item='widget')  -> 25
+    Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'
 
 ```
 
@@ -183,12 +183,12 @@ default:
 >>> _ = get(application, "/quote/gadget")
 GET /quote/gadget (shop)
   __main__.quote_view(item='gadget')
-    quote(item='gadget')
-      fetch(item='gadget')
-      fetch -> 120 [...]
-    quote -> {'item': 'gadget', 'price': 120} [...]
-    render(quote={'item': 'gadget', 'price': 120})
-    render -> b'gadget: 120\n' [...]
+    QuoteService.quote(item='gadget')
+      Repository.fetch(item='gadget')
+      Repository.fetch -> 120 [...]
+    QuoteService.quote -> {'item': 'gadget', 'price': 120} [...]
+    Template.render(quote={'item': 'gadget', 'price': 120})
+    Template.render -> b'gadget: 120\n' [...]
   __main__.quote_view -> b'gadget: 120\n' [...]
 shop -> '200 OK' [..., body ... over 1 chunk]
 
@@ -200,9 +200,9 @@ The timings are elided above because they differ from run to run; the
 closing lines from one run read:
 
 ```text
-      fetch -> 120 [5.9ms]
-    quote -> {'item': 'gadget', 'price': 120} [6.0ms]
-    render -> b'gadget: 120\n' [11us]
+      Repository.fetch -> 120 [5.9ms]
+    QuoteService.quote -> {'item': 'gadget', 'price': 120} [6.0ms]
+    Template.render -> b'gadget: 120\n' [11us]
   __main__.quote_view -> b'gadget: 120\n' [6.3ms]
 shop -> '200 OK' [6.4ms, body 2us over 1 chunk]
 ```
@@ -245,8 +245,8 @@ and drops the rest:
 
 >>> _ = get(application, "/quote/gadget")
 GET /quote/gadget (shop)
-      fetch(item='gadget')
-      fetch -> 120
+      Repository.fetch(item='gadget')
+      Repository.fetch -> 120
 shop -> '200 OK'
 
 >>> wrapture.remove_sink(printer)
@@ -289,9 +289,9 @@ that of its observed children. `tape.tree(times=True)` shows both, and
 ...     print(tape.tree(times=True))
 GET /quote/widget (shop)  -> '200 OK'  [..., self ...]
   __main__.quote_view(item='widget')  -> b'widget: 25\n'  [..., self ...]
-    quote(item='widget')  -> {'item': 'widget', 'price': 25}  [..., self ...]
-      fetch(item='widget')  -> 25  [...]
-    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...]
+    QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}  [..., self ...]
+      Repository.fetch(item='widget')  -> 25  [...]
+    Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...]
 
 >>> request, view, quote, fetch, render = tape.all
 >>> tape.self_time(fetch) > 0.5 * view.duration
@@ -306,9 +306,9 @@ With the numbers in, one run of that tree looked like this:
 ```text
 GET /quote/widget (shop)  -> '200 OK'  [5.3ms, self 40us]
   __main__.quote_view(item='widget')  -> b'widget: 25\n'  [5.3ms, self 154us]
-    quote(item='widget')  -> {'item': 'widget', 'price': 25}  [5.1ms, self 59us]
-      fetch(item='widget')  -> 25  [5.1ms]
-    render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [6us]
+    QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}  [5.1ms, self 59us]
+      Repository.fetch(item='widget')  -> 25  [5.1ms]
+    Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [6us]
 ```
 
 `quote` and the view are slow only because of what they call; `fetch`

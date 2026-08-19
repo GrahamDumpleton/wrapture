@@ -900,8 +900,8 @@ def test_a_group_advances_every_member() -> None:
     from wrapture import bindings
 
     group = bindings(
-        charge=(Gateway, "charge"),
-        flag=(Settings, "beta_enabled"),
+        charge=binding(Gateway, "charge"),
+        flag=binding(Settings, "beta_enabled"),
     )
     group.charge.on_call.returns("down")
     group.charge.on_call.then().returns("up")

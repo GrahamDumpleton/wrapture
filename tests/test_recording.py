@@ -271,16 +271,18 @@ def test_the_recorder_guard_skips_recording_but_not_behaviour() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_group_members_record_with_their_group_names() -> None:
-    group = bindings(charge=(Gateway, "charge"), record=(Ledger, "record"))
+def test_group_members_record_with_their_own_labels() -> None:
+    group = bindings(
+        charge=binding(Gateway, "charge"), record=binding(Ledger, "record")
+    )
 
     with timeline(group) as tape:
         Gateway().charge(500)
 
-    # The group's keyword names become the labels; the paths keep the
-    # real locations regardless.
+    # A group never relabels its members: the keyword is only the name
+    # a member is reached by, the label stays the binding's own.
 
-    assert [e.label for e in tape.all] == ["charge", "record"]
+    assert [e.label for e in tape.all] == ["Gateway.charge", "Ledger.record"]
     assert [e.path for e in tape.all] == [
         f"{Gateway.__module__}:Gateway.charge",
         f"{Ledger.__module__}:Ledger.record",

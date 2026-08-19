@@ -15,21 +15,27 @@ import wrapture
 charge = wrapture.binding(Gateway, "charge")
 ```
 
-`target` is a module, class, instance, or a string. A string target uses
-the colon convention that event paths, config observe targets and
-`discover()` share: `"module"` or `"module:path"`. `name` is the path
-from the target to the attribute, so these three are the same binding:
+The positional arguments name a location. The first is a module, class,
+instance, or a string using the colon convention that event paths,
+config observe targets and `discover()` share: `"module"` or
+`"module:path"`. Each further positional string is an attribute step
+from there, itself possibly dotted, so these are all the same binding:
 
 ```python
 wrapture.binding(myapp.gateway, "Gateway.charge")
+wrapture.binding(myapp.gateway, "Gateway", "charge")
 wrapture.binding("myapp.gateway:Gateway", "charge")
 wrapture.binding("myapp.gateway", "Gateway.charge")
+wrapture.binding("myapp.gateway:Gateway.charge")
 ```
 
-When the member has an owning class, prefer the colon form: point
-`target` at the owner and keep `name` the bare member name. That reads
-consistently with `discover()` and config observe entries, where the
-target is always the owner whose members are being selected.
+In a string the colon is the boundary between the module and the
+attribute path; module names contain dots too, so
+`binding("myapp.gateway.Gateway.charge")` cannot be resolved and says
+so. When the member has an owning class, prefer the colon form: point
+the string at the owner and keep the last step the bare member name.
+That reads consistently with `discover()` and config observe entries,
+where the target is always the owner whose members are being selected.
 
 Creating a binding does not patch anything. Declaring bindings at class or
 module scope is safe; the patch is only installed when you ask for it.
@@ -439,14 +445,16 @@ arrive while suspended run the original callable and are counted on
 
 ## Binding groups
 
-`bindings()` creates several bindings at once, named by keyword, that apply
-and remove as a unit. Like `binding()`, it only declares: the members are
-reachable by attribute or item access for configuring behaviour, and
-nothing is applied until the group is:
+`bindings()` groups bindings under names, to apply and remove as a
+unit. Each member is an ordinary `binding()`, so it carries its own
+mode and options; the keyword is the name it is reached by on the
+group, by attribute or item access, and its label stays its own. Like
+`binding()`, a group only declares: nothing is applied until the group
+is:
 
 ```python
-group = wrapture.bindings(charge=(Gateway, "charge"),
-                          ledger=(Ledger, "record"))
+group = wrapture.bindings(charge=wrapture.binding(Gateway, "charge"),
+                          ledger=wrapture.binding(Ledger, "record"))
 group.charge.on_call.returns({"id": "stub"})
 group["ledger"].on_call.raises(TimeoutError("down"))
 
@@ -460,8 +468,11 @@ Members can still be reconfigured while the group is applied, as with
 any binding.
 
 If applying any member fails, the members already applied are removed
-again, so a group never half-applies. `suspend()`, `resume()` and
-`apply(suspended=True)` work across the whole group.
+again, so a group never half-applies; `remove()` runs in reverse order
+of application. `suspend()`, `resume()`, `advance()` and
+`apply(suspended=True)` work across the whole group. That is what a
+group gives over a nested `with` of separate bindings: one lifecycle
+with rollback, and one object to hand to a fixture or `timeline()`.
 
 ## Binding modes: call versus attribute
 
