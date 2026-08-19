@@ -322,15 +322,11 @@ class _Behaviour[R]:
         return self._terminal(boom, injected=True)
 
     def passes_through(self) -> R:
-        """Perform the real operation: drop this phase's stages and
-        terminal. On a base namespace this drops the whole chain of
-        phases for the operation."""
+        """Perform the real operation in this phase: drop the phase's
+        stages and terminal. Other phases are untouched; to drop the
+        whole chain, use reset() on the base namespace."""
 
-        if self._phase is None:
-            self._binding._clear_behaviour(self._operation)
-        else:
-            self._phase.clear()
-
+        self._current().clear()
         return self._done()
 
 
@@ -727,7 +723,23 @@ class _DeleteVerbs[R](_Behaviour[R]):
 # phase then() created and returns itself.
 
 
-class CallBehaviour(_CallVerbs["Binding"]):
+class _BaseNamespace:
+    """What only a base namespace offers: dropping the whole chain."""
+
+    __slots__ = ()
+
+    _binding: Binding
+    _operation: ClassVar[str]
+
+    def reset(self) -> Binding:
+        """Drop all behaviour for this operation, every phase included,
+        leaving a bare phase 0 that performs the real operation."""
+
+        self._binding._clear_behaviour(self._operation)
+        return self._binding
+
+
+class CallBehaviour(_BaseNamespace, _CallVerbs["Binding"]):
     """`binding.on_call`: behaviour for calls to a wrapped callable."""
 
     __slots__ = ()
@@ -745,7 +757,7 @@ class CallPhase(_CallVerbs["CallPhase"]):
         return self
 
 
-class GetBehaviour(_GetVerbs["Binding"]):
+class GetBehaviour(_BaseNamespace, _GetVerbs["Binding"]):
     """`binding.on_get`: behaviour for attribute reads."""
 
     __slots__ = ()
@@ -763,7 +775,7 @@ class GetPhase(_GetVerbs["GetPhase"]):
         return self
 
 
-class SetBehaviour(_SetVerbs["Binding"]):
+class SetBehaviour(_BaseNamespace, _SetVerbs["Binding"]):
     """`binding.on_set`: behaviour for attribute writes."""
 
     __slots__ = ()
@@ -781,7 +793,7 @@ class SetPhase(_SetVerbs["SetPhase"]):
         return self
 
 
-class DeleteBehaviour(_DeleteVerbs["Binding"]):
+class DeleteBehaviour(_BaseNamespace, _DeleteVerbs["Binding"]):
     """`binding.on_delete`: behaviour for attribute deletes."""
 
     __slots__ = ()

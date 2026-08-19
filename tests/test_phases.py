@@ -255,21 +255,6 @@ def test_behaviour_only_and_filtered_calls_still_count() -> None:
     assert len(tape.all) == 0
 
 
-def test_passes_through_on_the_base_namespace_drops_the_chain() -> None:
-    charge = binding(Gateway, "charge")
-    charge.on_call.returns("a")
-    charge.on_call.then(after=1).returns("b")
-
-    charge.on_call.passes_through()
-
-    with charge:
-        gateway = Gateway()
-        assert gateway.charge(1)["id"] == "ch_1"
-        assert gateway.charge(1)["id"] == "ch_1"
-
-    assert charge.phase == 0
-
-
 def test_passes_through_on_a_phase_clears_only_that_phase() -> None:
     charge = binding(Gateway, "charge")
     charge.on_call.returns("a")
@@ -831,3 +816,103 @@ def test_a_raising_predicate_reaches_the_caller() -> None:
     with fetch:
         with pytest.raises(KeyError, match="oops"):
             Fetcher().fetch(1)
+
+
+# ---------------------------------------------------------------------------
+# reset(), in_phase() and groups
+# ---------------------------------------------------------------------------
+
+
+def test_passes_through_on_the_base_clears_only_phase_zero() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=1).returns("b")
+
+    charge.on_call.passes_through()
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1)["id"] == "ch_1"
+        assert gateway.charge(1) == "b"
+
+
+def test_reset_drops_the_whole_chain() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+    charge.on_call.then(after=1).returns("b")
+
+    assert charge.on_call.reset() is charge
+
+    with charge:
+        gateway = Gateway()
+        assert gateway.charge(1)["id"] == "ch_1"
+        assert gateway.charge(1)["id"] == "ch_1"
+
+    assert charge.phase == 0
+    assert not hasattr(charge.on_call.then(), "reset")
+
+
+def test_reset_on_an_attribute_operation() -> None:
+    flag = binding(Settings, "beta_enabled")
+    flag.on_get.returns(True)
+    flag.on_get.then(after=1).returns(False)
+    flag.on_get.reset()
+
+    with flag:
+        assert Settings().beta_enabled is False
+
+    assert flag.phase == 0
+
+
+def test_in_phase_filters_events_by_handling_phase() -> None:
+    from wrapture import ExpectationNotMetError
+
+    charge = binding(Gateway, "charge")
+    charge.on_call.raises(TimeoutError("down"))
+    charge.on_call.then(after=2).passes_through()
+
+    with charge, timeline() as tape:
+        gateway = Gateway()
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                gateway.charge(1)
+        gateway.charge(1)
+
+    tape.for_binding(charge).in_phase(0).assert_times(2)
+    tape.for_binding(charge).in_phase(1).assert_once()
+    tape.for_binding(charge).in_phase(2).assert_never()
+
+    with pytest.raises((AssertionError, ExpectationNotMetError), match=r"in_phase=1"):
+        tape.for_binding(charge).in_phase(1).assert_times(2)
+
+
+def test_in_phase_never_matches_events_of_an_unphased_binding() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns("a")
+
+    with charge, timeline() as tape:
+        Gateway().charge(1)
+
+    tape.for_binding(charge).in_phase(0).assert_never()
+
+
+def test_a_group_advances_every_member() -> None:
+    from wrapture import bindings
+
+    group = bindings(
+        charge=(Gateway, "charge"),
+        flag=(Settings, "beta_enabled"),
+    )
+    group.charge.on_call.returns("down")
+    group.charge.on_call.then().returns("up")
+    group.flag.on_get.returns(False)
+    group.flag.on_get.then().returns(True)
+
+    with group:
+        assert Gateway().charge(1) == "down"
+        assert Settings().beta_enabled is False
+
+        assert group.advance() is group
+
+        assert Gateway().charge(1) == "up"
+        assert Settings().beta_enabled is True

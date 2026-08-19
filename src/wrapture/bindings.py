@@ -1644,6 +1644,14 @@ class BindingGroup:
             bnd.resume()
         return self
 
+    def advance(self) -> Self:
+        """Advance every binding in the group to its next phase, so a set
+        of stand-ins changes regime together. Returns self."""
+
+        for bnd in self._bindings.values():
+            bnd.advance()
+        return self
+
     def remove(self) -> Self:
         """Remove every binding, in reverse order of application. Returns
         self. Idempotent, like Binding.remove()."""
