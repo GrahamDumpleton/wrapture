@@ -429,13 +429,16 @@ def install(binding: Binding, target: Any, name: str) -> AttributeDescriptor:
         raise NotImplementedYetError(
             f"{binding._label}: attribute bindings on a module are not"
             f" supported; module attribute access does not go through"
-            f" class descriptors"
+            f" class descriptors. To hold a value in the attribute while"
+            f" applied, use attr={attribute!r} on the module instead"
         )
 
     if not inspect.isclass(parent):
         raise TypeError(
             f"{binding._label}: an attribute binding installs a descriptor"
-            f" on the class, so the target must be a class, not an instance"
+            f" on the class, so the target must be a class, not an instance."
+            f" To observe reads on every instance, bind the class; to set"
+            f" the value on this one object, use attr={attribute!r}"
         )
 
     prior: Any = MISSING

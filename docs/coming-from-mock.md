@@ -19,6 +19,10 @@ The quick translation, expanded below:
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
+| `patch.dict(os.environ, {"K": "v"})`, `monkeypatch.setenv("K", "v")` | `binding(os.environ, item="K").overrides("v")` |
+| `monkeypatch.delenv("K")`, `monkeypatch.delitem(d, "k")` | `binding(os.environ, item="K").hides()`, `binding(d, item="k").hides()` |
+| `patch.dict(d, {"k": v})`, `monkeypatch.setitem(d, "k", v)` | `binding(d, item="k").overrides(v)` |
+| `monkeypatch.setattr(mod, "CONST", v)`, `patch("mod.CONST", v)` | `binding("mod", attr="CONST").overrides(v)` |
 
 ## Stubbing a return value
 
@@ -165,6 +169,43 @@ midway unwinds only through the ordinary context manager machinery.
 Because bindings wrap rather than replace, several bindings can also
 stack on the *same* method, composing with wrappers other parties
 installed.
+
+## Setting a value rather than replacing a call
+
+Not every patch is a call. `patch.dict(os.environ, {...})`,
+`monkeypatch.setenv`, `monkeypatch.setitem` and
+`monkeypatch.setattr(mod, "CONST", v)` put a value somewhere for the
+duration of a test. wrapture spells all of these as a *value binding*:
+name the owner, name the slot with `attr=` or `item=`, and say what
+it holds:
+
+```python
+# unittest.mock / pytest
+with patch.dict(os.environ, {"API_KEY": "sk_test"}):
+    ...
+monkeypatch.setattr(config, "TIMEOUT", 0.5)
+monkeypatch.delenv("DEBUG", raising=False)
+```
+
+```python
+# wrapture
+with wrapture.binding(os.environ, item="API_KEY").overrides("sk_test"):
+    ...
+wrapture.binding("config", attr="TIMEOUT").overrides(0.5)
+wrapture.binding(os.environ, item="DEBUG").hides()
+```
+
+The mechanics are the same as `patch.dict`: the owner is changed in
+place and restored on exit, so a settings dict imported elsewhere sees
+the change. What a value binding adds is the binding lifecycle: it is
+a context manager, it can be suspended and resumed, it goes in a
+`bindings()` group with everything else the test patches, and the
+pytest plugin's leak sweep reports one left applied. It records
+nothing, and says so, since there is no call to observe.
+`patch.dict(d, {...}, clear=True)`, replacing a whole mapping's content
+in place, has no equivalent yet: use one binding per key, or
+`patch.dict` for that case. See
+[Value bindings](monkey-patching.md#value-bindings-holding-a-value-in-place).
 
 ## Running the real code while modifying the call
 

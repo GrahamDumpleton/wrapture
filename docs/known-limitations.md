@@ -30,17 +30,22 @@ metaclass, binding the attribute name on the metaclass does work as a
 recipe, but almost every class's metaclass is `type`, which cannot be
 patched.
 
-## Module attributes cannot be bound in attribute mode
+## Module attributes cannot be intercepted
 
-Binding an attribute of a module is refused with
-`NotImplementedYetError`. A module is an instance of `ModuleType`, so
-intercepting `module.attr` access needs a descriptor on the module's
-type, which plain descriptor installation cannot provide. (CPython
-allows assigning a `ModuleType` subclass to a module's `__class__`,
-which is the known route should this ever be supported.)
+Binding an attribute of a module for interception (positional
+`binding(module, "NAME")`) is refused with `NotImplementedYetError`. A
+module is an instance of `ModuleType`, so intercepting `module.attr`
+access needs a descriptor on the module's type, which plain descriptor
+installation cannot provide. (CPython allows assigning a `ModuleType`
+subclass to a module's `__class__`, which is the known route should
+this ever be supported.)
 
-Module-level *functions* are unaffected: callable-mode bindings on
-module functions work normally.
+Holding a value in the attribute is a different thing and is
+supported: `binding(module, attr="NAME").overrides(v)` is a
+[value binding](monkey-patching.md#value-bindings-holding-a-value-in-place),
+which sets the attribute while applied and restores it afterwards,
+without observing reads. Module-level *functions* are unaffected:
+callable-mode bindings on module functions work normally.
 
 ## Attribute bindings install on the class, never one instance
 
@@ -48,7 +53,10 @@ An attribute binding with an instance as target is refused with
 `TypeError`. The descriptor must be installed on the class, so it would
 affect every instance, which is unlikely to be what a binding on one
 instance was meant to do. Callable-mode bindings on a single instance
-are supported and affect only that instance.
+are supported and affect only that instance, and setting an attribute
+on one instance for the duration of a test is
+`binding(instance, attr="name").overrides(v)`, a value binding, which
+does not observe reads.
 
 ## Dynamically served attributes have no place to patch
 
