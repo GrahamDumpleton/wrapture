@@ -876,6 +876,36 @@ recorded that many times in that order. On failure the message names
 which binding the expectation stalled waiting for and prints the actual
 timeline, which reads far better than a list diff.
 
+A step can also be a filtered event log, which is how to say *which*
+call: the log is the set of events that count as that step, and the
+walk over the tape supplies the order. Bindings and logs mix, and
+every filter serves, `with_args()`, `returning()`, `raising()`,
+`matching()`:
+
+```python
+charge_500 = charge.events.with_args(amount=500)
+
+tape.assert_order(charge_500, charge_500, record.events.with_args(status="failed"))
+tape.assert_order(charge.events.raising(TimeoutError), record)
+```
+
+Inside the timeline block the logs come from `binding.events`; after
+it, `tape.for_binding(charge).with_args(amount=500)` is the same
+thing. Two flags tighten the match, each concerned only with the
+bindings the steps name (events of any other binding are invisible to
+the assertion): `consecutive=True` requires the steps to match a
+consecutive run of those bindings' events, nothing of theirs in
+between; `exact=True` requires those bindings' events to be exactly
+the steps, nothing before or after either, and implies consecutive.
+A log step makes its binding's other events visible, so
+`assert_order(charge_500, charge_500, exact=True)` also says there
+was no charge with any other amount:
+
+```python
+tape.assert_order(charge_500, charge_500, record, consecutive=True)
+tape.assert_order(charge_500, charge_500, record, exact=True)
+```
+
 For the whole-tree counterpart, `wrapture.canonical(tape)` renders a
 deterministic fingerprint of the call tree (kinds, paths, nesting and
 outcomes, with everything unstable between runs left out) made for

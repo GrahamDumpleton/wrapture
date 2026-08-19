@@ -275,15 +275,20 @@ Assertions go through each binding's `events`, a filtered view of the
 tape for that one call site, and work inside the block once the code
 under test has run. `with_args()` matches on the normalized arguments,
 so it does not matter whether the service passed the amount
-positionally or by name:
+positionally or by name. The same filtered logs serve as the steps of
+`tape.assert_order()`, here saying the refund came after the charge
+it refers to:
 
 ```python
->>> with wrapture.timeline(charge, refund, post):
+>>> with wrapture.timeline(charge, refund, post) as tape:
 ...     _ = service.place("o-6", 700)
 ...     _ = service.cancel("o-6")
-...     _ = charge.events.with_args(amount=700).assert_once()
-...     _ = refund.events.with_args(charge_id="ch_LIVE_9f2").assert_once()
+...     charged = charge.events.with_args(amount=700)
+...     refunded = refund.events.with_args(charge_id="ch_LIVE_9f2")
+...     _ = charged.assert_once()
+...     _ = refunded.assert_once()
 ...     _ = post.events.assert_times(2)
+...     _ = tape.assert_order(charged, refunded)
 
 ```
 

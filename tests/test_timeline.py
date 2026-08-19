@@ -419,6 +419,194 @@ def test_assert_order_failure_on_a_binding_that_never_recorded() -> None:
         tape.assert_order(record)
 
 
+def test_assert_order_accepts_filtered_logs_as_steps() -> None:
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(charge, record) as tape:
+        gateway = Gateway()
+        gateway.charge(500)
+        gateway.charge(1)
+        gateway.charge(500)
+        Ledger().record({"status": "failed"})
+
+        # Inside the block, logs come from binding.events; each log
+        # holds every matching event, and repeating one means "another
+        # such event, later".
+
+        tape.assert_order(
+            charge.events.with_args(amount=500),
+            charge.events.with_args(amount=500),
+            record.events.with_args(entry={"status": "failed"}),
+        )
+
+        # Bindings and logs mix.
+
+        tape.assert_order(charge.events.with_args(amount=1), charge, record)
+
+    # After the block, the same through the tape, and outcome filters
+    # serve as literals too.
+
+    charge_500 = tape.for_binding(charge).with_args(amount=500)
+    assert tape.assert_order(charge_500, charge_500, tape.for_binding(record)) is tape
+    returned_one = tape.for_binding(charge).returning({"id": "ch_1", "amount": 1})
+    tape.assert_order(returned_one, record)
+
+
+def test_assert_order_log_step_stalls_when_not_enough_match() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge) as tape:
+        Gateway().charge(500)
+        Gateway().charge(1)
+
+    charge_500 = tape.for_binding(charge).with_args(amount=500)
+
+    with pytest.raises(AssertionError) as failure:
+        tape.assert_order(charge_500, charge_500)
+
+    assert "stalled waiting for Gateway.charge[amount=500] (position 2 of 2)" in str(
+        failure.value
+    )
+
+
+def test_assert_order_log_from_another_tape_never_matches() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge) as first:
+        Gateway().charge(500)
+
+    with timeline(charge) as second:
+        Gateway().charge(500)
+
+    with pytest.raises(AssertionError, match="position 1 of 1"):
+        second.assert_order(first.for_binding(charge))
+
+
+def test_assert_order_rejects_other_steps() -> None:
+    with timeline() as tape:
+        pass
+
+    with pytest.raises(TypeError, match="bindings or event logs"):
+        tape.assert_order("charge")
+
+
+def test_assert_order_consecutive_ignores_unnamed_bindings() -> None:
+    process = binding(Processor, "process")
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(process, charge, record) as tape:
+        Processor().process("widget")
+
+    # process wraps the other two, so charge and record are consecutive
+    # among the named bindings' events even though process sits around
+    # them in the tape.
+
+    tape.assert_order(charge, record, consecutive=True)
+    tape.assert_order(charge, record, exact=True)
+
+    # Naming process as well makes its events count again.
+
+    tape.assert_order(process, charge, record, consecutive=True)
+
+
+def test_assert_order_consecutive_fails_on_a_named_event_between() -> None:
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(charge, record) as tape:
+        gateway = Gateway()
+        gateway.charge(500)
+        gateway.charge(1)
+        Ledger().record({"status": "ok"})
+
+    charge_500 = tape.for_binding(charge).with_args(amount=500)
+
+    tape.assert_order(charge_500, record)
+
+    with pytest.raises(AssertionError) as failure:
+        tape.assert_order(charge_500, record, consecutive=True)
+
+    message = str(failure.value)
+    assert "expected consecutive events" in message
+    assert "after Gateway.charge[amount=500] (position 1 of 2)" in message
+    assert "saw Gateway.charge(amount=1) where Ledger.record" in message
+    assert "(position 2 of 2) was expected" in message
+    assert "actual timeline:" in message
+
+    # Events before the first step and after the last are free.
+
+    charge_1 = tape.for_binding(charge).with_args(amount=1)
+    tape.assert_order(charge_1, record, consecutive=True)
+    tape.assert_order(charge, consecutive=True)
+
+
+def test_assert_order_exact_requires_nothing_before_or_after() -> None:
+    charge = binding(Gateway, "charge")
+    record = binding(Ledger, "record")
+
+    with timeline(charge, record) as tape:
+        gateway = Gateway()
+        gateway.charge(500)
+        gateway.charge(500)
+        Ledger().record({"status": "failed"})
+
+    charge_500 = tape.for_binding(charge).with_args(amount=500)
+    failed = tape.for_binding(record).with_args(entry={"status": "failed"})
+
+    tape.assert_order(charge_500, charge_500, failed, exact=True)
+    tape.assert_order(charge, charge, record, exact=True)
+
+    with pytest.raises(AssertionError) as before:
+        tape.assert_order(charge_500, failed, exact=True)
+    assert "expected consecutive events" in str(before.value)
+
+    # The record event is invisible when no step names its binding, so
+    # this is exact for charge alone.
+
+    tape.assert_order(charge_500, charge_500, exact=True)
+
+    # A named binding's event before the first step fails exact.
+
+    second = tape.all[1]
+
+    def second_charge(event: Event) -> bool:
+        return event is second
+
+    with pytest.raises(AssertionError) as leading:
+        tape.assert_order(
+            tape.for_binding(charge).matching(second_charge), record, exact=True
+        )
+    assert "saw Gateway.charge(amount=500) before" in str(leading.value)
+    assert "Gateway.charge[matching=second_charge] (position 1 of 2)" in str(
+        leading.value
+    )
+
+    # A filtered log makes the binding's other events visible.
+
+    with timeline(charge) as tape:
+        Gateway().charge(500)
+        Gateway().charge(1)
+
+    with pytest.raises(AssertionError, match="saw Gateway.charge\\(amount=1\\) after"):
+        tape.assert_order(tape.for_binding(charge).with_args(amount=500), exact=True)
+
+
+def test_assert_order_exact_implies_consecutive() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge) as tape:
+        Gateway().charge(500)
+        Gateway().charge(1)
+        Gateway().charge(500)
+
+    charge_500 = tape.for_binding(charge).with_args(amount=500)
+
+    with pytest.raises(AssertionError, match="expected consecutive events"):
+        tape.assert_order(charge_500, charge_500, consecutive=False, exact=True)
+
+
 # ---------------------------------------------------------------------------
 # declared expectations
 # ---------------------------------------------------------------------------
