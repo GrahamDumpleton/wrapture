@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 import wrapt
 from wrapt import MISSING, BaseObjectProxy, apply_patch
 
-from .capture import _capture_value, _level_of
+from .capture import REFERENCE, CapturePolicy, _capture_value, _level_of
 from .events import Event, EventKind
 from .exceptions import NotImplementedYetError
 from .sinks import (
@@ -113,60 +113,17 @@ def _delete(prior: Any, attribute: str, instance: Any) -> None:
         ) from None
 
 
-def _record(
+def _build_event(
     binding: Binding,
     kind: EventKind,
     instance: Any,
     attribute: str,
-    operate: Callable[[Event | None], Any],
-    value: Any = MISSING,
-    phase: Phase | None = None,
-) -> Any:
-    """Run one attribute operation, recording it onto the ambient tape.
-
-    Mirrors the callable-mode recording path: no ambient tape (or the
-    recorder's own reentrancy guard) means the operation just runs, and
-    otherwise an event is recorded around it, with the operation pushed
-    on the in-progress stack so anything it triggers nests under it.
-    """
-
-    # when=False is a behaviour-only binding: it never records, counts
-    # nothing, and takes no part in gap detection.
-
-    if binding._when is False:
-        return operate(None)
-
-    active = _active_sinks()
-    if not active or _in_recorder.get():
-        if not active and not _in_recorder.get() and _timelines_active():
-            binding._note_missed_call()
-
-        return operate(None)
-
-    # The per-access predicate, mapped onto call shape the same way
-    # behaviour stages are: a set passes the written value as the one
-    # positional argument, a get or delete passes empty args.
-
-    if binding._when is not None:
-        call_args = (value,) if value is not MISSING else ()
-
-        guard = _in_recorder.set(True)
-        try:
-            wanted = binding._when(instance, call_args, {})
-        finally:
-            _in_recorder.reset(guard)
-
-        if not wanted:
-            binding._filtered_calls += 1
-            return operate(None)
-
-    # The written value and the prior value are inbound data, so they
-    # capture on the arguments axis, under the attribute's name so a
-    # by-name policy such as redact() applies to writes too.
-
-    policy = binding._capture_args
-    if policy is None:
-        policy = _required_policy(active, "capture_args")
+    policy: CapturePolicy,
+    value: Any,
+    phase: Phase | None,
+) -> Event:
+    """Construct the event for one attribute operation, under the
+    recorder guard so capture that runs user code does not record."""
 
     guard = _in_recorder.set(True)
     try:
@@ -199,6 +156,117 @@ def _record(
     finally:
         _in_recorder.reset(guard)
 
+    return event
+
+
+def _quiet(
+    binding: Binding,
+    kind: EventKind,
+    instance: Any,
+    attribute: str,
+    operate: Callable[[Event | None], Any],
+    value: Any,
+    slot: list[Phase | None],
+) -> Any:
+    """Run an unrecorded attribute operation, still showing it to a
+    phase with an until= exit through a private event, as the callable
+    path does."""
+
+    try:
+        outcome = operate(None)
+    except BaseException as exc:
+        phase = slot[0]
+
+        if phase is not None and phase.watches:
+            event = _build_event(
+                binding, kind, instance, attribute, REFERENCE, value, phase
+            )
+            event.exception = exc
+            binding._completed(kind, phase, event)
+
+        raise
+
+    phase = slot[0]
+
+    if phase is not None and phase.watches:
+        event = _build_event(
+            binding, kind, instance, attribute, REFERENCE, value, phase
+        )
+        if kind == "get":
+            event.result = outcome
+        binding._completed(kind, phase, event)
+
+    return outcome
+
+
+def _record(
+    binding: Binding,
+    kind: EventKind,
+    instance: Any,
+    attribute: str,
+    operate: Callable[[Event | None], Any],
+    value: Any = MISSING,
+    slot: list[Phase | None] | None = None,
+) -> Any:
+    """Run one attribute operation, recording it onto the ambient tape.
+
+    Mirrors the callable-mode recording path: no ambient tape (or the
+    recorder's own reentrancy guard) means the operation just runs, and
+    otherwise an event is recorded around it, with the operation pushed
+    on the in-progress stack so anything it triggers nests under it.
+    `slot` holds the phase handling the operation, updated by dispatch
+    if a sequence hands over mid-operation.
+    """
+
+    if slot is None:
+        slot = [None]
+
+    # when=False is a behaviour-only binding: it never records, counts
+    # nothing, and takes no part in gap detection.
+
+    if binding._when is False:
+        return _quiet(binding, kind, instance, attribute, operate, value, slot)
+
+    active = _active_sinks()
+    if not active or _in_recorder.get():
+        if not active and not _in_recorder.get() and _timelines_active():
+            binding._note_missed_call()
+
+        return _quiet(binding, kind, instance, attribute, operate, value, slot)
+
+    # The per-access predicate, mapped onto call shape the same way
+    # behaviour stages are: a set passes the written value as the one
+    # positional argument, a get or delete passes empty args.
+
+    if binding._when is not None:
+        call_args = (value,) if value is not MISSING else ()
+
+        guard = _in_recorder.set(True)
+        try:
+            wanted = binding._when(instance, call_args, {})
+        finally:
+            _in_recorder.reset(guard)
+
+        if not wanted:
+            binding._filtered_calls += 1
+            return _quiet(binding, kind, instance, attribute, operate, value, slot)
+
+    # The written value and the prior value are inbound data, so they
+    # capture on the arguments axis, under the attribute's name so a
+    # by-name policy such as redact() applies to writes too. An until=
+    # predicate needs the value whatever the sinks asked for.
+
+    phase = slot[0]
+    watching = phase is not None and phase.watches
+
+    policy = binding._capture_args
+    if policy is None:
+        policy = _required_policy(active, "capture_args")
+    if watching and _level_of(policy) < REFERENCE:
+        policy = REFERENCE
+
+    event = _build_event(binding, kind, instance, attribute, policy, value, phase)
+
     # Position before delivery: pushed first, so sinks hearing
     # on_enter see the event's final depth and parent link. Timing
     # starts after the bookkeeping, so its overhead is not charged to
@@ -216,6 +284,7 @@ def _record(
         event.duration = time.perf_counter() - started
         event.exception = exc
         _notify_error(event, active)
+        binding._completed(kind, slot[0], event)
         raise
     finally:
         _pop(token)
@@ -229,9 +298,12 @@ def _record(
         result_policy = binding._capture_result
         if result_policy is None:
             result_policy = _required_policy(active, "capture_result")
+        if watching and _level_of(result_policy) < REFERENCE:
+            result_policy = REFERENCE
         _capture_result(event, outcome, result_policy)
 
     _notify_exit(event, active)
+    binding._completed(kind, slot[0], event)
     return outcome
 
 
@@ -266,14 +338,17 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return _read(prior, attribute, instance, owner)
 
         phase = binding._select("get")
+        slot: list[Phase | None] = [phase]
 
         def read() -> Any:
             return _read(prior, attribute, instance, owner)
 
         def operate(event: Event | None) -> Any:
-            return binding._invoke("get", phase, read, instance, (), {}, event)
+            return binding._invoke(
+                "get", phase, read, instance, (), {}, event, slot=slot
+            )
 
-        return _record(binding, "get", instance, attribute, operate, phase=phase)
+        return _record(binding, "get", instance, attribute, operate, slot=slot)
 
     def __set__(self, instance: Any, value: Any) -> None:
         binding = self._self_wrapture_binding
@@ -286,14 +361,17 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return
 
         phase = binding._select("set")
+        slot: list[Phase | None] = [phase]
 
         def write(new_value: Any) -> None:
             _write(prior, attribute, instance, new_value)
 
         def operate(event: Event | None) -> Any:
-            return binding._invoke("set", phase, write, instance, (value,), {}, event)
+            return binding._invoke(
+                "set", phase, write, instance, (value,), {}, event, slot=slot
+            )
 
-        _record(binding, "set", instance, attribute, operate, value=value, phase=phase)
+        _record(binding, "set", instance, attribute, operate, value=value, slot=slot)
 
     def __delete__(self, instance: Any) -> None:
         binding = self._self_wrapture_binding
@@ -306,14 +384,17 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return
 
         phase = binding._select("delete")
+        slot: list[Phase | None] = [phase]
 
         def erase() -> None:
             _delete(prior, attribute, instance)
 
         def operate(event: Event | None) -> Any:
-            return binding._invoke("delete", phase, erase, instance, (), {}, event)
+            return binding._invoke(
+                "delete", phase, erase, instance, (), {}, event, slot=slot
+            )
 
-        _record(binding, "delete", instance, attribute, operate, phase=phase)
+        _record(binding, "delete", instance, attribute, operate, slot=slot)
 
 
 def _resolve_parent(target: Any, name: str) -> tuple[Any, str]:

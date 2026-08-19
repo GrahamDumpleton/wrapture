@@ -160,6 +160,13 @@ class Phase:
 
         return bool(self.stages) or self.terminal is not None
 
+    @property
+    def watches(self) -> bool:
+        """Whether this phase ends on an until= predicate, so completed
+        operations must be shown to it."""
+
+        return self.exit is not None and self.exit[0] == "until"
+
     def set_terminal(self, fn: WrapperFunction, *, injected: bool = False) -> None:
         self.terminal = fn
         self.injected = injected

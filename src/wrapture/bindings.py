@@ -270,13 +270,15 @@ async def _record_awaited(
     stack: tuple[Event, ...],
     policy: CapturePolicy,
     active: tuple[Sink, ...],
+    on_complete: Callable[[Event], None] | None = None,
 ) -> Any:
     """Record around the await, so the event reflects the real outcome.
 
     Re-establishes the in-progress stack for the duration, so calls made
     inside the coroutine body nest under this event. The stack is set
     raw rather than pushed, because the event was already linked to its
-    parent when the call was recorded.
+    parent when the call was recorded. `on_complete` sees the finished
+    event, outcome or exception, once the sinks have.
     """
 
     token = _stack.set(stack + (event,))
@@ -287,6 +289,8 @@ async def _record_awaited(
             event.duration = time.perf_counter() - event.started
         event.exception = exc
         _notify_error(event, active)
+        if on_complete is not None:
+            on_complete(event)
         raise
     finally:
         _stack.reset(token)
@@ -295,6 +299,8 @@ async def _record_awaited(
         event.duration = time.perf_counter() - event.started
     _capture_result(event, result, policy)
     _notify_exit(event, active)
+    if on_complete is not None:
+        on_complete(event)
     return result
 
 
@@ -1034,7 +1040,7 @@ class Binding:
             # counts nothing, and takes no part in gap detection.
 
             if bnd._when is False:
-                return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
+                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             active = _active_sinks()
 
@@ -1050,7 +1056,7 @@ class Binding:
                 if not active and not _in_recorder.get() and _timelines_active():
                     bnd._note_missed_call()
 
-                return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
+                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # The per-call predicate decides whether this operation is
             # recorded at all, before any event is constructed. It runs
@@ -1066,7 +1072,7 @@ class Binding:
 
                 if not wanted:
                     bnd._filtered_calls += 1
-                    return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
+                    return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # Create the event under the recorder guard, so anything
             # the bookkeeping calls that is itself observed passes
@@ -1094,6 +1100,8 @@ class Binding:
             started = time.perf_counter()
             event.started = started
 
+            slot: list[Phase | None] = [phase]
+
             try:
                 outcome = bnd._invoke(
                     "call",
@@ -1104,14 +1112,18 @@ class Binding:
                     kwargs,
                     event,
                     via=_forwarder(wrapped, event),
+                    slot=slot,
                 )
             except BaseException as exc:
                 event.duration = time.perf_counter() - started
                 event.exception = exc
                 _notify_error(event, active)
+                bnd._completed("call", slot[0], event)
                 raise
             finally:
                 _pop(token)
+
+            phase = slot[0]
 
             # A generator or coroutine outcome has not run yet: calling
             # the target only constructed it, and the body executes when
@@ -1124,20 +1136,40 @@ class Binding:
             if result_policy is None:
                 result_policy = _required_policy(active, "capture_result")
 
+            # An until= predicate needs the outcome whatever the sinks
+            # asked for, so capture at least by reference for it.
+
+            watching = phase is not None and phase.watches
+            if watching and _level_of(result_policy) < REFERENCE:
+                result_policy = REFERENCE
+
+            def completed(event: Event) -> None:
+                bnd._completed("call", phase, event)
+
             if inspect.isgenerator(outcome):
+                completed(event)
                 return _record_generator(outcome, event, base, result_policy, active)
 
             if inspect.isasyncgen(outcome):
+                completed(event)
                 return _record_async_generator(
                     outcome, event, base, result_policy, active
                 )
 
             if inspect.isawaitable(outcome):
-                return _record_awaited(outcome, event, base, result_policy, active)
+                return _record_awaited(
+                    outcome,
+                    event,
+                    base,
+                    result_policy,
+                    active,
+                    completed if watching else None,
+                )
 
             event.duration = time.perf_counter() - started
             _capture_result(event, outcome, result_policy)
             _notify_exit(event, active)
+            completed(event)
             return outcome
 
         return wrapper
@@ -1157,6 +1189,13 @@ class Binding:
         policy = self._capture_args
         if policy is None:
             policy = _required_policy(active, "capture_args")
+
+        # An until= predicate needs the arguments whatever the sinks
+        # asked for, so capture at least by reference for it.
+
+        if phase is not None and phase.watches and _level_of(policy) < REFERENCE:
+            policy = REFERENCE
+
         level = _level_of(policy)
 
         event = Event(
@@ -1297,6 +1336,7 @@ class Binding:
         kwargs: dict[str, Any],
         event: Event | None = None,
         via: WrappedFunction | None = None,
+        slot: list[Phase | None] | None = None,
     ) -> Any:
         """Run the operation under `phase`, or the real operation when
         there is none.
@@ -1305,8 +1345,9 @@ class Binding:
         recording path hands over a forwarder that notes what behaviour
         actually passed on. A returns_from() sequence that runs out ends
         its phase here: the operation is re-dispatched to the successor,
-        and the event, when one is being recorded, is restamped with the
-        phase that actually handled it.
+        the event, when one is being recorded, is restamped with the
+        phase that actually handled it, and `slot`, when given, is
+        updated so the caller learns which phase that was.
         """
 
         while True:
@@ -1323,6 +1364,102 @@ class Binding:
                 if event is not None:
                     event.injected = phase.injected
                     event.phase = self._phase_of(phase)
+                if slot is not None:
+                    slot[0] = phase
+
+    def _completed(self, operation: str, phase: Phase | None, event: Event) -> None:
+        """Show a completed operation to the phase's until= predicate,
+        handing over to the successor when it says so.
+
+        The predicate runs under the recorder guard, like when=, so
+        observed code it consults does not record; if it raises, the
+        caller of the operation sees the exception.
+        """
+
+        if phase is None or not phase.watches or phase.successor is None:
+            return
+
+        assert phase.exit is not None
+        predicate = phase.exit[1]
+
+        guard = _in_recorder.set(True)
+        try:
+            finished = predicate(event)
+        finally:
+            _in_recorder.reset(guard)
+
+        if not finished:
+            return
+
+        with self._phase_lock:
+            if self._active.get(operation) is phase:
+                self._active[operation] = phase.successor
+
+    def _quiet(
+        self,
+        operation: str,
+        phase: Phase | None,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Run an unrecorded call: nothing is listening, or the binding or
+        its when= excluded it.
+
+        A phase with an until= exit still needs to see the completed
+        call, so one is built for it privately, never delivered to a
+        sink, capturing by reference. The cost is paid only while such a
+        phase is active.
+        """
+
+        slot: list[Phase | None] = [phase]
+
+        try:
+            outcome = self._invoke(
+                operation, phase, wrapped, instance, args, kwargs, slot=slot
+            )
+        except BaseException as exc:
+            final = slot[0]
+
+            if final is not None and final.watches:
+                event = self._record_call((), wrapped, instance, args, kwargs, final)
+                event.exception = exc
+                self._completed(operation, final, event)
+
+            raise
+
+        final = slot[0]
+        if final is None or not final.watches:
+            return outcome
+
+        event = self._record_call((), wrapped, instance, args, kwargs, final)
+
+        # A coroutine has not run yet, so the predicate sees it once it
+        # resolves; a generator is shown at construction, with no result.
+
+        if inspect.isawaitable(outcome):
+            return self._quiet_awaited(operation, final, outcome, event)
+
+        if not inspect.isgenerator(outcome) and not inspect.isasyncgen(outcome):
+            event.result = outcome
+
+        self._completed(operation, final, event)
+        return outcome
+
+    async def _quiet_awaited(
+        self, operation: str, phase: Phase, awaitable: Any, event: Event
+    ) -> Any:
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            event.exception = exc
+            self._completed(operation, phase, event)
+            raise
+
+        event.result = result
+        self._completed(operation, phase, event)
+        return result
 
     def _exhausted(self, operation: str, phase: Phase) -> Phase:
         """Hand over from a phase whose sequence ran out, returning the

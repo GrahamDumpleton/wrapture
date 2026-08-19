@@ -607,3 +607,227 @@ def test_concurrent_callers_each_draw_one_value() -> None:
     numbers = sorted(item for item in results if item != "done")
     assert numbers == list(range(200))
     assert results.count("done") == 40
+
+
+# ---------------------------------------------------------------------------
+# then(until=...): predicate exits
+# ---------------------------------------------------------------------------
+
+
+class Fetcher:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    # Returns Any so tests can compare stubbed values of other types.
+
+    def fetch(self, page: int) -> Any:
+        self.calls += 1
+        if page == 3:
+            raise ConnectionError("upstream")
+        return {"page": page, "items": [page] * 2}
+
+    async def afetch(self, page: int) -> Any:
+        return self.fetch(page)
+
+    def stream(self, page: int) -> Any:
+        yield page
+
+
+def test_circuit_breaker_trips_once_a_call_raised() -> None:
+    fetch = binding(Fetcher, "fetch")
+    fetch.on_call.passes_through()
+
+    tripped = fetch.on_call.then(until=lambda e: e.exception is not None)
+    tripped.raises(RuntimeError("circuit open"))
+
+    fetcher = Fetcher()
+
+    with fetch, timeline() as tape:
+        assert fetcher.fetch(1)["page"] == 1
+        with pytest.raises(ConnectionError):
+            fetcher.fetch(3)
+        with pytest.raises(RuntimeError, match="circuit open"):
+            fetcher.fetch(1)
+        with pytest.raises(RuntimeError):
+            fetcher.fetch(2)
+
+    assert fetch.phase == 1
+    assert fetcher.calls == 2
+    assert [event.phase for event in tape.all] == [0, 0, 1, 1]
+
+
+def test_pagination_ends_once_the_last_page_was_asked_for() -> None:
+    pages = binding(Fetcher, "fetch")
+
+    exhausted = pages.on_call.then(until=lambda e: e.arguments["page"] >= 2)
+    exhausted.returns({"page": None, "items": []})
+
+    fetcher = Fetcher()
+
+    with pages:
+        assert fetcher.fetch(1)["items"] == [1, 1]
+        assert fetcher.fetch(2)["items"] == [2, 2]  # the last real page
+        assert fetcher.fetch(3)["items"] == []  # would have raised
+
+    assert pages.phase == 1
+
+
+def test_predicate_sees_the_result_as_the_caller_saw_it() -> None:
+    fetch = binding(Fetcher, "fetch")
+    fetch.on_call.transforms_result(lambda page: page["items"])
+
+    seen: list[Any] = []
+
+    def empty(event: Any) -> bool:
+        seen.append(event.result)
+        return bool(event.result == [])
+
+    fetch.on_call.then(until=empty).returns("after")
+
+    fetcher = Fetcher()
+
+    with fetch:
+        assert fetcher.fetch(1) == [1, 1]
+        assert seen == [[1, 1]]
+
+
+def test_predicate_sees_a_stage_failure_as_an_exception() -> None:
+    fetch = binding(Fetcher, "fetch")
+
+    def refuse(result: Any) -> None:
+        raise ValueError("bad page")
+
+    fetch.on_call.validates_result(refuse)
+    fetch.on_call.then(until=lambda e: isinstance(e.exception, ValueError)).returns(
+        "ok"
+    )
+
+    fetcher = Fetcher()
+
+    with fetch:
+        with pytest.raises(ValueError):
+            fetcher.fetch(1)
+        assert fetcher.fetch(1) == "ok"
+
+
+def test_predicate_is_evaluated_without_a_timeline_and_when_filtered() -> None:
+    fetch = binding(Fetcher, "fetch")
+    fetch.on_call.then(until=lambda e: e.arguments["page"] == 2).returns("done")
+
+    fetcher = Fetcher()
+
+    with fetch:  # no timeline running
+        fetcher.fetch(1)
+        fetcher.fetch(2)
+        assert fetcher.fetch(1) == "done"
+
+    quiet = binding(Fetcher, "fetch", when=False)
+    quiet.on_call.then(until=lambda e: e.exception is not None).returns("done")
+
+    with quiet:
+        with pytest.raises(ConnectionError):
+            fetcher.fetch(3)
+        assert fetcher.fetch(1) == "done"
+
+    filtered = binding(Fetcher, "fetch", when=lambda i, a, k: False)
+    filtered.on_call.then(until=lambda e: e.arguments["page"] == 1).returns("done")
+
+    with filtered, timeline() as tape:
+        fetcher.fetch(1)
+        assert fetcher.fetch(1) == "done"
+
+    assert len(tape.all) == 0
+
+
+def test_predicate_gets_arguments_and_result_even_when_sinks_capture_nothing() -> None:
+    from wrapture import Counter, window
+
+    fetch = binding(Fetcher, "fetch")
+    fetch.on_call.then(until=lambda e: e.arguments["page"] == 1 and e.result).returns(
+        "done"
+    )
+
+    fetcher = Fetcher()
+
+    with fetch, window(collect=[Counter()]):
+        fetcher.fetch(1)
+        assert fetcher.fetch(1) == "done"
+
+
+def test_predicate_on_an_async_target_sees_the_awaited_outcome() -> None:
+    import asyncio
+
+    afetch = binding(Fetcher, "afetch")
+    afetch.on_call.then(until=lambda e: e.result["page"] == 2).returns("done")
+
+    fetcher = Fetcher()
+
+    async def run() -> list[Any]:
+        first = await fetcher.afetch(1)
+        second = await fetcher.afetch(2)
+        third = fetcher.afetch(3)
+        return [first, second, third]
+
+    with afetch:
+        first, second, third = asyncio.run(run())
+
+    assert first["page"] == 1
+    assert second["page"] == 2
+    assert third == "done"
+
+
+def test_predicate_on_a_generator_target_sees_the_call_at_construction() -> None:
+    stream = binding(Fetcher, "stream")
+    stream.on_call.then(until=lambda e: e.arguments["page"] == 1).returns(iter([]))
+
+    fetcher = Fetcher()
+
+    with stream:
+        assert list(fetcher.stream(1)) == [1]
+        assert list(fetcher.stream(2)) == []
+
+
+def test_predicate_exit_on_an_attribute_read() -> None:
+    retries = binding(Settings, "retries")
+    retries.on_get.returns(1)
+
+    steady = retries.on_get.then(until=lambda e: e.result == 1)
+    steady.returns(9)
+
+    with retries:
+        settings = Settings()
+        assert settings.retries == 1
+        assert settings.retries == 9
+
+    with retries, timeline():
+        assert settings.retries == 1
+        assert settings.retries == 9
+
+
+def test_predicate_exit_on_an_attribute_write_sees_the_value() -> None:
+    limit = binding(Settings, "retries")
+
+    frozen = limit.on_set.then(until=lambda e: e.value >= 5)
+    frozen.rejects()
+
+    with limit:
+        settings = Settings()
+        settings.retries = 2
+        settings.retries = 5
+        with pytest.raises(AttributeError):
+            settings.retries = 6
+
+    assert limit.on_set.phase == 1
+
+
+def test_a_raising_predicate_reaches_the_caller() -> None:
+    fetch = binding(Fetcher, "fetch")
+
+    def broken(event: Any) -> bool:
+        raise KeyError("oops")
+
+    fetch.on_call.then(until=broken).returns("done")
+
+    with fetch:
+        with pytest.raises(KeyError, match="oops"):
+            Fetcher().fetch(1)
