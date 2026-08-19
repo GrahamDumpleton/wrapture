@@ -827,6 +827,82 @@ def test_a_touched_file_opens_a_run_and_is_consumed(
     assert span.kicks == 1
 
 
+def test_a_trigger_file_held_briefly_is_retried_on_the_next_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import wrapture.windows as windows
+
+    monkeypatch.setattr(windows, "_POLL_INTERVAL", 0.02)
+
+    # The first two removals fail as they would while a scanner holds a
+    # new file open on Windows; the third succeeds.
+
+    real_remove = os.remove
+    attempts = {"count": 0}
+
+    def flaky_remove(path: Any) -> None:
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            raise PermissionError(32, "The process cannot access the file")
+        real_remove(path)
+
+    monkeypatch.setattr(os, "remove", flaky_remove)
+
+    trigger = tmp_path / "profile-now"
+    span = Window(name="touch", on_file=trigger, duration="1h", collect=[Counting()])
+
+    span.start()
+    try:
+        trigger.write_text("")
+        wait_for(lambda: span.run is not None)
+        assert not trigger.exists()
+    finally:
+        span.stop()
+
+    assert attempts["count"] == 3
+    assert span.kicks == 1
+
+
+def test_a_trigger_file_that_never_removes_disables_the_trigger_after_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import wrapture.windows as windows
+
+    monkeypatch.setattr(windows, "_POLL_INTERVAL", 0.02)
+
+    def held(path: Any) -> None:
+        raise PermissionError(13, "held")
+
+    monkeypatch.setattr(os, "remove", held)
+
+    # The warning is issued on the scheduler thread. pytest.warns relies
+    # on catch_warnings, which is context-local rather than global when
+    # Python's context_aware_warnings flag is on (the default on
+    # free-threaded builds from 3.14), so a thread started before the
+    # block is invisible to it. Recording at the source works everywhere.
+
+    warned: list[str] = []
+    monkeypatch.setattr(
+        warnings, "warn", lambda message, *args, **kwargs: warned.append(str(message))
+    )
+
+    trigger = tmp_path / "profile-now"
+    span = Window(name="stuck", on_file=trigger, duration="1h", collect=[Counting()])
+
+    span.start()
+    try:
+        trigger.write_text("")
+        wait_for(lambda: span._poll is None)
+    finally:
+        span.stop()
+
+    assert span.run is None
+    assert span.kicks == 0
+    assert len(warned) == 1
+    assert "cannot remove its trigger file" in warned[0]
+    assert "after 5 attempts" in warned[0]
+
+
 def test_config_takes_on_signal_and_on_file(tmp_path: Path) -> None:
     source = tmp_path / "trace.toml"
     source.write_text(

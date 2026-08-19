@@ -69,6 +69,13 @@ __all__ = ["Collector", "Report", "Run", "Window", "window"]
 
 _POLL_INTERVAL = 2.0
 
+# How many consecutive polls may fail to remove the trigger file before
+# the file trigger is given up on. A freshly created file can be held
+# briefly by another process (an indexer or virus scanner, commonly on
+# Windows), so one failure is retried on the next poll rather than
+# treated as permanent.
+_REMOVE_ATTEMPTS = 5
+
 
 @dataclass(frozen=True)
 class Report:
@@ -324,6 +331,7 @@ class Window:
         self._open_schedule: Schedule | None = None
         self._close_schedule: Schedule | None = None
         self._poll: Schedule | None = None
+        self._remove_failures = 0
         self._kicks = 0
         self.errors = 0
 
@@ -709,7 +717,9 @@ class Window:
     def _poll_file(self) -> None:
         # The file trigger: when the file is there, consume it and open
         # a run. A file that cannot be removed would fire on every poll,
-        # so that is warned about once and the poll stops.
+        # so removal is retried for a few polls (a new file can be held
+        # briefly by a scanner or indexer) and then, still failing, is
+        # warned about once and the poll stops.
 
         assert self._file is not None
 
@@ -718,10 +728,21 @@ class Window:
 
         try:
             os.remove(self._file)
+        except FileNotFoundError:
+            # Consumed by another poll, or removed by hand, between the
+            # existence check and the removal: nothing to open for.
+
+            return
         except OSError as exc:
+            self._remove_failures += 1
+
+            if self._remove_failures < _REMOVE_ATTEMPTS:
+                return
+
             warnings.warn(
                 f"window {self._name!r} cannot remove its trigger file"
-                f" {self._file!r} ({exc}); the file trigger is disabled",
+                f" {self._file!r} ({exc}) after {self._remove_failures}"
+                f" attempts; the file trigger is disabled",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -731,6 +752,7 @@ class Window:
                     self._poll = None
             return
 
+        self._remove_failures = 0
         self.kick()
 
     def _deliver(self, report: Report, run: Run, *, several: bool) -> None:
