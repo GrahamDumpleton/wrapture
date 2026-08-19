@@ -19,6 +19,9 @@ The quick translation, expanded below:
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
+| `AsyncMock(return_value=v)` / `side_effect=exc` | `on_call.returns(v)` / `raises(exc)` on the `async def`: delivered on await, as the real method would |
+| `m.assert_awaited_once()`, `m.await_count` | `events.finished().assert_once()`, `events.finished().count` |
+| `m.assert_not_awaited()` | `events.finished().assert_never()`; `events.pending()` is what was called and never awaited |
 | `m.reset_mock()` | no equivalent by design; open `timeline()` around the step to assert on (tapes are not cleared) |
 | `m.assert_has_calls([call(a), call(b)])` | `tape.assert_order(m.events.with_args(...), m.events.with_args(...), consecutive=True)` |
 | `m.mock_calls == [call(a), call(b)]` | `tape.assert_order(..., exact=True)` |
@@ -315,6 +318,37 @@ the bindings the steps name.
 
 The unit testing page covers the workflow: filters, assertions,
 declared expectations, the call tree, and the pytest plugin.
+
+## Async code
+
+`AsyncMock` exists for two reasons: a plain `Mock` in place of an
+`async def` returns a value that cannot be awaited, and the bug async
+tests most need to catch is a call that was never awaited, which
+`assert_awaited_once()` and `assert_not_awaited()` name separately
+from `assert_called_once()`. wrapture covers both without a separate
+kind of binding. A stub on an `async def` target follows the target's
+convention, `returns()` and `raises()` arriving on await, and an
+event has a completion separate from its call, so `events.finished()`
+is the awaited subset and `events.pending()` what was created and
+forgotten:
+
+```python
+# unittest.mock
+with patch.object(Notifier, "send", new_callable=AsyncMock) as send:
+    await service.notify("hello")
+    send.assert_awaited_once_with("hello")
+```
+
+```python
+# wrapture
+with wrapture.timeline(send):
+    await service.notify("hello")
+    send.events.with_args(message="hello").finished().assert_once()
+    send.events.pending().assert_never()
+```
+
+And with wrapture the real `send` ran, or was stubbed in place with
+the rest of the code still real, per everything above.
 
 ## When to just use unittest.mock
 

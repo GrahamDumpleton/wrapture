@@ -173,8 +173,14 @@ def test_async_targets_are_checked_at_call_time() -> None:
     acharge = binding(Gateway, "acharge")
     acharge.on_call.returns("stub")
 
+    # The check runs at call time, where a coroutine function reports a
+    # bad call shape too; the stub itself arrives on await.
+
+    async def stubbed() -> Any:
+        return await make().acharge(1)
+
     with acharge:
-        assert make().acharge(1) == "stub"
+        assert asyncio.run(stubbed()) == "stub"
 
         with pytest.raises(TypeError, match="stubbed"):
             make().acharge(1, bogus=4)

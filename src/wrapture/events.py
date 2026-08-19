@@ -123,6 +123,15 @@ class Event:
     stack: int | None = None
     data: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def finished(self) -> bool:
+        """Whether the operation has ended, however it ended: returned,
+        raised, or, for a generator, closed. False while a call is in
+        flight, a generator is still being consumed, or a coroutine has
+        been created but not yet awaited."""
+
+        return self.duration is not None
+
     def __str__(self) -> str:
         # Display favours the friendly label; the path is there when no
         # label was recorded, and for anything that needs the location

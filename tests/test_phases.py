@@ -750,7 +750,7 @@ def test_predicate_on_an_async_target_sees_the_awaited_outcome() -> None:
     async def run() -> list[Any]:
         first = await fetcher.afetch(1)
         second = await fetcher.afetch(2)
-        third = fetcher.afetch(3)
+        third = await fetcher.afetch(3)  # the stub arrives on await too
         return [first, second, third]
 
     with afetch:

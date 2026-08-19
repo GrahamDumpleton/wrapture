@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import inspect
 import threading
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 if TYPE_CHECKING:
@@ -98,6 +98,77 @@ def _stage_wrapper(stage: StageFunction, nxt: WrapperFunction) -> WrapperFunctio
     return call
 
 
+def _deliver_async(terminal: WrapperFunction, kind: str) -> WrapperFunction:
+    """Wrap an injecting terminal so its outcome arrives as the target's
+    calling protocol delivers it: a value or exception on await for a
+    coroutine function, items or the exception on iteration for an
+    async generator function. An outcome that already fits (an
+    awaitable, an async iterable) passes through. Exhaustion of a
+    returns_from() sequence still surfaces at call time, where the
+    dispatch loop hands over to the next phase."""
+
+    def delivered(
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        try:
+            outcome = terminal(wrapped, instance, args, kwargs)
+        except _Exhausted:
+            raise
+        except BaseException as exc:
+            if kind == "asyncgen":
+                return _named_after(_fail_iteration(exc), wrapped)
+            return _named_after(_raise_later(exc), wrapped)
+
+        if kind == "asyncgen":
+            if hasattr(outcome, "__aiter__"):
+                return outcome
+            return _named_after(_iterate_later(outcome), wrapped)
+
+        if inspect.isawaitable(outcome):
+            return outcome
+        return _named_after(_resolve_later(outcome), wrapped)
+
+    return delivered
+
+
+def _named_after(delivery: Any, source: Any) -> Any:
+    """Name a coroutine or async generator after `source` (a target, or
+    the coroutine it wraps), so the interpreter's "coroutine 'X' was
+    never awaited" warning and any repr name the call being made rather
+    than the wrapture helper that produced the object."""
+
+    for attribute in ("__name__", "__qualname__"):
+        name = getattr(source, attribute, None)
+        if isinstance(name, str):
+            try:
+                setattr(delivery, attribute, name)
+            except (AttributeError, TypeError):
+                pass
+
+    return delivery
+
+
+async def _resolve_later(value: Any) -> Any:
+    return value
+
+
+async def _raise_later(exc: BaseException) -> NoReturn:
+    raise exc
+
+
+async def _iterate_later(iterable: Iterable[Any]) -> AsyncIterator[Any]:
+    for item in iterable:
+        yield item
+
+
+async def _fail_iteration(exc: BaseException) -> AsyncIterator[Any]:
+    raise exc
+    yield  # makes this an async generator; never reached
+
+
 class _Exhausted(BaseException):
     """Raised by a returns_from() terminal when its sequence runs out.
 
@@ -136,7 +207,7 @@ class Phase:
         self.stages: list[StageFunction] = []
         self.terminal: WrapperFunction | None = None
         self.injected = False
-        self._composed: WrapperFunction | None = None
+        self._composed: dict[str | None, WrapperFunction] = {}
 
         # Chain bookkeeping: the phase that takes over, the condition
         # under which it does, and how many operations this phase has
@@ -170,7 +241,7 @@ class Phase:
     def set_terminal(self, fn: WrapperFunction, *, injected: bool = False) -> None:
         self.terminal = fn
         self.injected = injected
-        self._composed = None
+        self._composed.clear()
         self.source = None
         self.iterator = None
         self.draw_lock = None
@@ -210,7 +281,7 @@ class Phase:
 
     def add_stage(self, fn: StageFunction) -> None:
         self.stages.append(fn)
-        self._composed = None
+        self._composed.clear()
 
     def clear(self) -> None:
         """Drop stages and terminal, so the phase performs the real operation."""
@@ -218,21 +289,34 @@ class Phase:
         self.stages = []
         self.terminal = None
         self.injected = False
-        self._composed = None
+        self._composed.clear()
         self.source = None
         self.iterator = None
         self.draw_lock = None
 
-    def behaviour(self) -> WrapperFunction | None:
-        """The composed pipeline, or None when nothing is configured."""
+    def behaviour(self, async_kind: str | None = None) -> WrapperFunction | None:
+        """The composed pipeline, or None when nothing is configured.
+
+        `async_kind` names the calling protocol of the target when it is
+        a coroutine function ("coroutine") or an async generator
+        function ("asyncgen"): an injecting terminal then delivers its
+        outcome the way the real target would, on await or on iteration,
+        so the stages around it and the caller see what they would see
+        from the real thing. Composed forms are cached per kind.
+        """
 
         if not self.configured:
             return None
 
-        if self._composed is None:
-            self._composed = _compose(self.stages, self.terminal)
+        composed = self._composed.get(async_kind)
+        if composed is None:
+            terminal = self.terminal
+            if async_kind is not None and self.injected and terminal is not None:
+                terminal = _deliver_async(terminal, async_kind)
+            composed = _compose(self.stages, terminal)
+            self._composed[async_kind] = composed
 
-        return self._composed
+        return composed
 
 
 class _Behaviour[R]:

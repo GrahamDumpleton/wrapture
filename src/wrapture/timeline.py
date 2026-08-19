@@ -107,6 +107,19 @@ class Tape(Sink):
         with self._lock:
             return self._discarded
 
+    @property
+    def pending(self) -> int:
+        """Events on the tape whose operation has not ended: calls in
+        flight, generators not yet closed, coroutines never awaited.
+        Live, so a coroutine awaited after the scope exits leaves the
+        count; while the count stays non-zero after the code under test
+        has finished, something was called and never awaited, or never
+        run to completion.
+        """
+
+        with self._lock:
+            return sum(1 for event in self._entries if not event.finished)
+
     def _open(self) -> None:
         with self._lock:
             self._closed = False
@@ -119,11 +132,17 @@ class Tape(Sink):
         with self._lock:
             count = len(self._entries)
             discarded = self._discarded
+            pending = sum(1 for event in self._entries if not event.finished)
 
         plural = "" if count == 1 else "s"
-
+        notes = []
+        if pending:
+            notes.append(f"{pending} pending")
         if discarded:
-            return f"<Tape: {count} event{plural}, {discarded} discarded after close>"
+            notes.append(f"{discarded} discarded after close")
+
+        if notes:
+            return f"<Tape: {count} event{plural}, {', '.join(notes)}>"
         return f"<Tape: {count} event{plural}>"
 
     def _snapshot(self) -> list[Event]:
