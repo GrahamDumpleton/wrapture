@@ -272,30 +272,105 @@ class Tape(Sink):
 
         return "\n".join(lines)
 
-    def assert_order(self, *bindings: Any) -> Tape:
-        """Assert the bindings recorded events in the given order.
+    def assert_order(
+        self, *steps: Any, consecutive: bool = False, exact: bool = False
+    ) -> Tape:
+        """Assert the tape recorded events matching the steps, in order.
 
-        A subsequence check, not an exact match: other events may appear
-        before, between and after, and only the relative order of the
-        given bindings' events matters. Repeating a binding requires it
-        to have recorded that many times in order. Raises AssertionError
-        naming where the expectation stalled, with the actual timeline.
+        Each step is a binding, accepting any event of that binding, or
+        an EventLog, accepting exactly the events it holds, so a filtered
+        log is the way to say which call: `charge.events.with_args(
+        amount=500)`, `tape.for_binding(record).raising(TimeoutError)`.
+        The two kinds mix freely, and repeating a step requires that
+        many matching events in order.
+
+        By default this is a subsequence check: other events may appear
+        before, between and after, and only the relative order matters.
+        The flags tighten it, each about the bindings the steps name
+        (events of any other binding are invisible to the assertion):
+        `consecutive=True` requires the steps to match a consecutive run
+        of those bindings' events, nothing of theirs between;
+        `exact=True` requires those bindings' events to be exactly the
+        steps, nothing before or after either, and implies consecutive.
+        Raises AssertionError saying where the expectation stalled or
+        which event broke it, with the actual timeline. Returns the
+        tape, so it chains.
         """
 
+        matchers: list[Callable[[Event], bool]] = []
+        labels: list[str] = []
+        named: set[int] = set()
+
+        def accepts_log(log: EventLog) -> Callable[[Event], bool]:
+            wanted = {id(event) for event in log}
+            return lambda event: id(event) in wanted
+
+        def accepts_binding(wanted: Any) -> Callable[[Event], bool]:
+            return lambda event: event.binding is wanted
+
+        for step in steps:
+            if isinstance(step, EventLog):
+                matchers.append(accepts_log(step))
+                labels.append(step.label)
+                named.update(id(event.binding) for event in step)
+            elif hasattr(step, "apply"):
+                matchers.append(accepts_binding(step))
+                labels.append(getattr(step, "label", repr(step)))
+                named.add(id(step))
+            else:
+                raise TypeError(
+                    f"assert_order() steps are bindings or event logs, got {step!r}"
+                )
+
+        consecutive = consecutive or exact
         entries = self._snapshot()
+        total = len(steps)
+
+        def actual() -> str:
+            return "\n".join(f"    {event}" for event in entries) or "    (no events)"
+
+        def step_name(index: int) -> str:
+            return f"{labels[index]} (position {index + 1} of {total})"
+
+        # One pass in record order. An event the current step accepts
+        # advances the cursor; any other event is skipped, unless it
+        # belongs to a named binding and the flags make it count.
 
         position = 0
-        for event in entries:
-            if position < len(bindings) and event.binding is bindings[position]:
-                position += 1
+        started = False
 
-        if position != len(bindings):
-            stalled = getattr(bindings[position], "label", repr(bindings[position]))
-            actual = "\n".join(f"    {event}" for event in entries) or "    (no events)"
+        for event in entries:
+            if position < total and matchers[position](event):
+                position += 1
+                started = True
+                continue
+
+            if id(event.binding) not in named:
+                continue
+
+            if exact and not started:
+                raise AssertionError(
+                    f"expected exactly the given events; saw {event} before"
+                    f" {step_name(0)}\n  actual timeline:\n{actual()}"
+                )
+
+            if consecutive and started and position < total:
+                raise AssertionError(
+                    f"expected consecutive events; after {step_name(position - 1)}"
+                    f" saw {event} where {step_name(position)} was expected\n"
+                    f"  actual timeline:\n{actual()}"
+                )
+
+            if exact and position == total:
+                raise AssertionError(
+                    f"expected exactly the given events; saw {event} after"
+                    f" {step_name(total - 1)}\n  actual timeline:\n{actual()}"
+                )
+
+        if position != total:
             raise AssertionError(
                 f"expected order not satisfied; stalled waiting for"
-                f" {stalled} (position {position + 1} of {len(bindings)})\n"
-                f"  actual timeline:\n{actual}"
+                f" {step_name(position)}\n  actual timeline:\n{actual()}"
             )
 
         return self

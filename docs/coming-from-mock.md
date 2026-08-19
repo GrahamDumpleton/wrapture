@@ -19,6 +19,9 @@ The quick translation, expanded below:
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
+| `m.assert_has_calls([call(a), call(b)])` | `tape.assert_order(m.events.with_args(...), m.events.with_args(...), consecutive=True)` |
+| `m.mock_calls == [call(a), call(b)]` | `tape.assert_order(..., exact=True)` |
+| `manager.attach_mock(...)` then `manager.mock_calls` for cross-mock order | `tape.assert_order(charge, record)`, any bindings, arguments optional |
 | `patch.dict(os.environ, {"K": "v"})`, `monkeypatch.setenv("K", "v")` | `binding(os.environ, item="K").overrides("v")` |
 | `monkeypatch.delenv("K")`, `monkeypatch.delitem(d, "k")` | `binding(os.environ, item="K").hides()`, `binding(d, item="k").hides()` |
 | `patch.dict(d, {"k": v})`, `monkeypatch.setitem(d, "k", v)` | `binding(d, item="k").overrides(v)`, or `binding(d, mode="mapping").updates({"k": v})` for several at once |
@@ -283,6 +286,31 @@ matching is by parameter name against the normalized call, so
 `with_args(amount=500)` matches however the caller spelled it; and where
 mock's misspelled `assert_calld_once` famously passed silently for
 years, a misspelled wrapture assertion is an `AttributeError`.
+
+Order is the other habit. mock's `assert_has_calls([call(500),
+call(500)])` checks a contiguous run of calls on one mock, and
+`mock_calls == [...]` the exact list; across several mocks, ordering
+needs them attached to a parent mock whose `mock_calls` is then
+compared by hand. wrapture asserts order on the tape, across any
+bindings, with filtered logs saying which calls:
+
+```python
+# unittest.mock
+charge.assert_has_calls([call(500), call(500)])
+assert manager.mock_calls == [call.charge(500), call.charge(500), call.record("failed")]
+```
+
+```python
+# wrapture
+charge_500 = charge.events.with_args(amount=500)
+tape.assert_order(charge_500, charge_500, consecutive=True)
+tape.assert_order(charge_500, charge_500, record.events.with_args(status="failed"), exact=True)
+```
+
+Without a flag `assert_order` is a subsequence check, other events
+allowed between; `consecutive=True` is `assert_has_calls`, and
+`exact=True` is the `mock_calls` comparison, each concerned only with
+the bindings the steps name.
 
 The unit testing page covers the workflow: filters, assertions,
 declared expectations, the call tree, and the pytest plugin.
