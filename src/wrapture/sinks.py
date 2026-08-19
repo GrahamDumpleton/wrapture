@@ -831,6 +831,8 @@ def _event_record(event: Event) -> dict[str, Any]:
 
     if event.arguments is not None:
         record["arguments"] = _jsonable(event.arguments)
+        if event.var_keyword is not None:
+            record["var_keyword"] = event.var_keyword
     if event.args is not None:
         record["args"] = _jsonable(list(event.args))
     if event.kwargs is not None:

@@ -104,6 +104,15 @@ class Event:
     arguments: dict[str, Any] | None = None
     forwarded: tuple[tuple[Any, ...], dict[str, Any]] | None = None
 
+    # The name of the signature's var-keyword parameter (**kwargs), when
+    # the target has one and the arguments were normalized: the entry in
+    # `arguments` under this name is the bundle of extra keywords the
+    # call passed, and with_args() falls through into it for names that
+    # are not parameters. None for attribute events and for calls with
+    # no readable signature.
+
+    var_keyword: str | None = None
+
     # kind == "set": the value written, and the prior value where it was
     # cheaply available.
 
@@ -268,3 +277,18 @@ def normalized_arguments(
 
     bound.apply_defaults()
     return dict(bound.arguments)
+
+
+def var_keyword_name(func: Any) -> str | None:
+    """The name of func's var-keyword parameter (**kwargs), or None
+    when func has no such parameter or no readable signature."""
+
+    signature = _signature(func)
+    if signature is None:
+        return None
+
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return parameter.name
+
+    return None

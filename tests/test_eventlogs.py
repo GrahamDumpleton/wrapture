@@ -112,6 +112,85 @@ def test_with_args_matches_normalized_arguments() -> None:
         assert events.with_args(unknown=1).count == 0
 
 
+class Dispatcher:
+    def submit(
+        self,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        route_name: str | None = None,
+        **options: Any,
+    ) -> None:
+        pass
+
+
+class Sink:
+    def write(self, **entries: Any) -> None:
+        pass
+
+
+def test_with_args_falls_through_into_the_var_keyword_bundle() -> None:
+    submit = binding(Dispatcher, "submit")
+
+    with timeline(submit):
+        Dispatcher().submit((4,), parent_id="id-1", root_id="root", priority=None)
+
+        events = submit.events
+
+        # Top-level partial match as always: unnamed parameters are free.
+        assert events.with_args(args=(4,)).count == 1
+
+        # Names that are not parameters resolve inside the bundle, other
+        # bundle keys free.
+        assert events.with_args(parent_id="id-1").count == 1
+        assert events.with_args(parent_id="id-1", root_id="root").count == 1
+        assert events.with_args(parent_id="other").count == 0
+        assert events.with_args(chain=[]).count == 0
+
+        # Parameters and bundle keys mix in one call.
+        assert events.with_args(args=(4,), parent_id="id-1", priority=None).count == 1
+
+        # The ordinary parameter that happens to be called kwargs is
+        # just a parameter.
+        assert events.with_args(kwargs=None).count == 1
+
+
+def test_with_args_on_the_bundle_parameter_itself_is_exact() -> None:
+    submit = binding(Dispatcher, "submit")
+
+    with timeline(submit):
+        Dispatcher().submit((4,), parent_id="id-1", root_id="root")
+
+        events = submit.events
+        assert (
+            events.with_args(options={"parent_id": "id-1", "root_id": "root"}).count
+            == 1
+        )
+        assert events.with_args(options={"parent_id": "id-1"}).count == 0
+
+
+def test_with_args_without_a_var_keyword_narrows_to_empty() -> None:
+    charge = binding(Gateway, "charge")
+
+    with timeline(charge):
+        Gateway().charge(500)
+
+        assert charge.events.with_args(parent_id="id-1").count == 0
+
+
+def test_with_args_name_colliding_with_the_bundle_compares_whole() -> None:
+    # A call passing a keyword named like the bundle parameter records
+    # {"entries": {"entries": 1}}; the name resolves as the parameter,
+    # compared whole, and the exact form still reaches the key.
+
+    write = binding(Sink, "write")
+
+    with timeline(write):
+        Sink().write(entries=1)
+
+        assert write.events.with_args(entries=1).count == 0
+        assert write.events.with_args(entries={"entries": 1}).count == 1
+
+
 def test_returning_matches_the_recorded_result() -> None:
     charge = binding(Gateway, "charge").on_call.returns({"id": "stub"})
     refund = binding(Gateway, "refund")

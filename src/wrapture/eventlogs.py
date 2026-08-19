@@ -10,7 +10,7 @@ show the events a filter discarded instead of a bare empty result.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from wrapt import MISSING
@@ -88,20 +88,46 @@ class EventLog:
 
         Matching is by parameter name against the signature-normalized
         arguments with defaults applied, so with_args(currency="USD")
-        matches a call that never spelled the default out. Events with
-        no normalized arguments, attribute events included, never match.
+        matches a call that never spelled the default out. A name that
+        is not a parameter falls through into the target's var-keyword
+        bundle when the signature has one: for a target declaring
+        **options, with_args(parent_id="root") matches a call that
+        passed parent_id through **options, other bundle keys free.
+        Naming the bundle parameter itself compares the whole mapping,
+        as for any other parameter, so with_args(options={...}) is the
+        exact form. Events with no normalized arguments, attribute
+        events included, never match.
         """
 
         suffix = "[" + ", ".join(f"{k}={v!r}" for k, v in arguments.items()) + "]"
+
+        def matches(event: Event, name: str, value: Any) -> bool:
+            recorded = event.arguments
+            assert recorded is not None
+
+            # A parameter name compares against its recorded value,
+            # the var-keyword bundle included.
+
+            if name in recorded:
+                return bool(recorded[name] == value)
+
+            # Anything else falls through into the bundle when the
+            # signature has one; a missing key is no match.
+
+            if event.var_keyword is None:
+                return False
+
+            bundle = recorded.get(event.var_keyword)
+            if not isinstance(bundle, Mapping) or name not in bundle:
+                return False
+
+            return bool(bundle[name] == value)
 
         def keep(event: Event) -> bool:
             if event.arguments is None:
                 return False
 
-            return all(
-                name in event.arguments and event.arguments[name] == value
-                for name, value in arguments.items()
-            )
+            return all(matches(event, name, value) for name, value in arguments.items())
 
         return self._narrow(suffix, keep)
 

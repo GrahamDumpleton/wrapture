@@ -54,7 +54,7 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, normalized_arguments
+from .events import Event, normalized_arguments, var_keyword_name
 from .exceptions import RecordingGapWarning
 from .sinks import (
     _active_sinks,
@@ -235,6 +235,8 @@ class ObservedCallable(CallableObjectProxy[Any]):
 
         if level > NONE:
             arguments = normalized_arguments(self.__wrapped__, args, kwargs)
+            if arguments is not None:
+                event.var_keyword = var_keyword_name(self.__wrapped__)
 
             if not callable(policy) and level == REFERENCE:
                 event.args = args

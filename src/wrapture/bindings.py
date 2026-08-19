@@ -54,7 +54,7 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, _signature, normalized_arguments
+from .events import Event, _signature, normalized_arguments, var_keyword_name
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
@@ -1789,6 +1789,8 @@ class Binding:
 
         if level > NONE:
             arguments = normalized_arguments(wrapped, args, kwargs)
+            if arguments is not None:
+                event.var_keyword = var_keyword_name(wrapped)
 
             if not callable(policy) and level == REFERENCE:
                 event.args = args
