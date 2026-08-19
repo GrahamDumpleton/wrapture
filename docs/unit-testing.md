@@ -125,7 +125,7 @@ Two things to know when sharing a binding this way:
   the target but keeps the configured behaviour, so a stub configured in
   one test is still configured when the next test applies the same
   binding. Either configure behaviour in every test that needs it, or
-  reset with `passes_through()`.
+  clear it with `reset()`.
 - **One application at a time.** A shared binding cannot be applied twice
   concurrently; the second `apply()` raises `AlreadyAppliedError`. This
   also means a shared binding is unsafe under parallel test runners such

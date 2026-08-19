@@ -150,6 +150,38 @@ raised, it is what the service does about it, and that code is real:
 Behaviour persists on the binding across applications, so one `charge`
 binding can be reconfigured from test to test rather than recreated.
 
+A gateway that is down and then comes back is the more interesting
+test, because it exercises both branches of `place()` in one run.
+`then(after=2)` adds a second phase that takes over once the first has
+handled two calls; the phase has the same verbs as `on_call`, and
+nothing carries over from the first, so it starts empty:
+
+```python
+>>> recovered = charge.on_call.then(after=2)
+>>> recovered.returns({"id": "ch_RETRY", "amount": 300, "currency": "USD"})
+<CallPhase 1 of 'PaymentClient.charge'>
+
+>>> with charge:
+...     [service.place(f"o-{n}", 300)["status"] for n in (5, 6, 7)]
+['pending', 'pending', 'paid']
+
+>>> charge.phase
+1
+
+```
+
+The first two orders were placed while the gateway timed out, the third
+after it recovered, and `charge.phase` confirms the hand-over
+happened. Phases restart on every application, so the same binding
+would replay the outage for the next test. This one is done with it:
+`reset()` drops every phase and leaves the binding bare.
+
+```python
+>>> charge.on_call.reset()
+<Binding 'PaymentClient.charge' callable unapplied>
+
+```
+
 ## Running the real client code, with one thing changed
 
 Sometimes the client's own logic is part of what the test needs to
@@ -184,8 +216,6 @@ gateway's id is pinned to a stable value on the way out, so assertions
 do not depend on what a live gateway happened to return:
 
 ```python
->>> charge.on_call.passes_through()
-<Binding 'PaymentClient.charge' callable unapplied>
 >>> charge.on_call.transforms_args(lambda args, kwargs: (args, {**kwargs, "currency": "EUR"}))
 <Binding 'PaymentClient.charge' callable unapplied>
 >>> charge.on_call.transforms_result(lambda receipt: {**receipt, "id": "ch_TEST"})
@@ -197,8 +227,8 @@ do not depend on what a live gateway happened to return:
 
 ```
 
-`passes_through()` first cleared the `raises()` left over from the
-previous step; the transforms then compose around the real call.
+The `reset()` earlier left the binding bare, so the transforms compose
+around the real call rather than around a leftover `raises()`.
 
 ## Recording what the service did to the gateway
 
