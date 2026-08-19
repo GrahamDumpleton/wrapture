@@ -230,6 +230,53 @@ def _select_members(
     return selected
 
 
+def _location(target: Any, attrs: tuple[Any, ...]) -> tuple[Any, str]:
+    """Collapse `binding(target, *attrs)` to wrapt's (owner, "dotted.name").
+
+    `target` is an object, a "module" string or a "module:path" string;
+    each further positional is an attribute step, itself possibly
+    dotted. The colon in a string target is the module/path boundary,
+    since module names contain dots too, and its path half becomes the
+    first step. Everything after the owner joins with dots, so
+    ("mod", "Class.member"), ("mod", "Class", "member"),
+    ("mod:Class", "member") and ("mod:Class.member",) name one location.
+    """
+
+    for step in attrs:
+        if not isinstance(step, str) or not step:
+            raise TypeError(
+                f"binding path steps must be non-empty attribute names, got {step!r}"
+            )
+
+    steps = list(attrs)
+
+    if isinstance(target, str) and ":" in target:
+        target, _, path = target.partition(":")
+        if path:
+            steps.insert(0, path)
+
+    if not steps:
+        if isinstance(target, str):
+            module, _, last = target.rpartition(".")
+            hint = (
+                f" Use ({module!r}, {last!r}) or {f'{module}:{last}'!r} if"
+                f" {last!r} is an attribute of module {module!r}."
+                if module
+                else ""
+            )
+            raise TypeError(
+                f"binding({target!r}) names a module and no attribute; the"
+                f" colon separates the module from the attribute path.{hint}"
+            )
+
+        raise TypeError(
+            f"binding({target!r}) names no attribute; give the attribute"
+            f" path as further arguments, e.g. binding(target, 'name')"
+        )
+
+    return target, ".".join(steps)
+
+
 def _derive_path(target: Any, name: str) -> str:
     """The fully qualified location of the bound attribute.
 
@@ -477,8 +524,7 @@ class Binding:
     def __init__(
         self,
         target: Any,
-        name: str,
-        *,
+        *attrs: str,
         label: str | None = None,
         mode: str | None = None,
         missing_ok: bool = False,
@@ -496,18 +542,11 @@ class Binding:
 
         _reject_deferred(target)
 
-        # A string target may spell the member's owner with the colon
-        # convention ("module:path"), as observe targets, discover()
-        # and event paths do. Fold the path half into the name, so the
-        # colon spelling and the dotted-name spelling of the same
-        # member are one binding from here on.
+        # Collapse the location to an owner and a dotted name, so the
+        # colon spelling, the multi-step spelling and the dotted-name
+        # spelling of the same member are one binding from here on.
 
-        if isinstance(target, str) and ":" in target:
-            module_name, _, path = target.partition(":")
-
-            target = module_name
-            if path:
-                name = f"{path}.{name}"
+        target, name = _location(target, attrs)
 
         stack = _resolve_depth(stack)
         if stack is not None and stack < 1:
@@ -1605,19 +1644,20 @@ class BindingGroup:
     removes in reverse order of application.
     """
 
-    def __init__(self, points: dict[str, tuple[Any, str] | Binding]) -> None:
-        # bindings() supplies (target, name) tuples to construct here,
-        # named by the caller; discover() supplies Binding objects it
-        # has already configured, keyed by the member name.
+    def __init__(self, members: dict[str, Binding]) -> None:
+        # bindings() supplies bindings named by the caller; discover()
+        # supplies the bindings it constructed, keyed by member name. A
+        # group never relabels what it is handed: the key is the name it
+        # is reached by, the label is the binding's own.
 
-        self._bindings: dict[str, Binding] = {}
+        for key, member in members.items():
+            if not isinstance(member, Binding):
+                raise TypeError(
+                    f"bindings() takes Binding instances, got {member!r} for"
+                    f" {key!r}; construct each member with binding()"
+                )
 
-        for key, point in points.items():
-            if isinstance(point, Binding):
-                self._bindings[key] = point
-            else:
-                target, name = point
-                self._bindings[key] = Binding(target, name, label=key)
+        self._bindings: dict[str, Binding] = dict(members)
 
     def __getitem__(self, key: str) -> Binding:
         return self._bindings[key]
@@ -1714,8 +1754,7 @@ class BindingGroup:
 
 def binding(
     target: Any,
-    name: str,
-    *,
+    *attrs: str,
     label: str | None = None,
     mode: str | None = None,
     missing_ok: bool = False,
@@ -1728,13 +1767,18 @@ def binding(
 ) -> Binding:
     """Create a binding for one target attribute.
 
-    `target` is a module, class, instance, or a string: "module" or
-    "module:path", the colon convention observe targets, discover()
-    and event paths use. `name` is the path from the target to the
-    attribute, so "module:Class" with "member" and "module" with
-    "Class.member" are the same binding. Prefer the colon form for a
-    member owned by a class: point `target` at the owner and keep
-    `name` the bare member name, as discover() spells it.
+    The positional arguments name a location. `target` is a module,
+    class, instance, or a string: "module" or "module:path", the colon
+    convention observe targets, discover() and event paths use. Each
+    further positional string is an attribute step from there, itself
+    possibly dotted, so binding("mod", "Class.member"),
+    binding("mod", "Class", "member"), binding("mod:Class", "member")
+    and binding("mod:Class.member") are the same binding. In a string
+    the colon is the module/path boundary, since module names contain
+    dots too; "os.path.join" alone names no attribute. Prefer the
+    colon form for a member owned by a class: point `target` at the
+    owner and keep the last step the bare member name, as discover()
+    spells it.
 
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
@@ -1792,7 +1836,7 @@ def binding(
 
     return Binding(
         target,
-        name,
+        *attrs,
         label=label,
         mode=mode,
         missing_ok=missing_ok,
@@ -1805,16 +1849,22 @@ def binding(
     )
 
 
-def bindings(**points: tuple[Any, str]) -> BindingGroup:
-    """Create several bindings at once, named by keyword.
+def bindings(**members: Binding) -> BindingGroup:
+    """Group bindings under names, to apply and remove as one unit.
 
-    with bindings(charge=(Gateway, "charge"),
-                  ledger=(Ledger, "record")) as group:
-        ...
-        group.charge.suspend()
+    Each member is a binding constructed with binding(), so it carries
+    its own mode and options; the keyword is the name it is reached by
+    on the group. The group applies in declaration order, rolling back
+    if a later member fails, removes in reverse, and suspends, resumes
+    and advances every member together:
+
+        with bindings(charge=binding(Gateway, "charge"),
+                      ledger=binding(Ledger, "record")) as group:
+            ...
+            group.charge.suspend()
     """
 
-    return BindingGroup(dict(points))
+    return BindingGroup(dict(members))
 
 
 def discover(

@@ -95,12 +95,14 @@ listening, they record nothing:
 ```python
 >>> shop = Shop()
 >>> service = wrapture.bindings(
-...     handle=(Shop, "handle"), quote=(Pricing, "quote"), lookup=(Catalog, "lookup")
+...     handle=wrapture.binding(Shop, "handle"),
+...     quote=wrapture.binding(Pricing, "quote"),
+...     lookup=wrapture.binding(Catalog, "lookup"),
 ... )
 >>> service.apply()
 <BindingGroup ['handle', 'quote', 'lookup']>
 >>> service.handle
-<Binding 'handle' callable active>
+<Binding 'Shop.handle' callable active>
 
 ```
 
@@ -353,7 +355,7 @@ Releasing everything the page applied:
 >>> service.remove()
 <BindingGroup ['handle', 'quote', 'lookup']>
 >>> service.handle
-<Binding 'handle' callable unapplied>
+<Binding 'Shop.handle' callable unapplied>
 >>> outputs.cleanup()
 
 ```

@@ -584,7 +584,9 @@ def test_group_mixes_callable_and_attribute_bindings() -> None:
         def record(self, entry: str) -> str:
             return f"led-{entry}"
 
-    group = wrapture.bindings(rate=(Ledger, "rate"), record=(Ledger, "record"))
+    group = wrapture.bindings(
+        rate=binding(Ledger, "rate"), record=binding(Ledger, "record")
+    )
     group.rate.on_get.returns(0.10)
     group.record.on_call.returns("led-stub")
 

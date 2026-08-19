@@ -15,7 +15,7 @@ The quick translation, expanded below:
 | `side_effect=fn` (fabricate per call) | `on_call.decorates(fn)` |
 | `side_effect=[a, b, exc]` (a sequence) | `on_call.returns_from([a, b])`, then `then().raises(exc)` |
 | `Mock(wraps=real)` | `on_call.transforms_args(fn)` / `transforms_result(fn)` / `decorates(fn)` |
-| `patch.multiple(C, a=..., b=...)` | `bindings(a=(C, "a"), b=(C, "b"))`, per-member behaviour |
+| `patch.multiple(C, a=..., b=...)` | `bindings(a=wrapture.binding(C, "a"), b=wrapture.binding(C, "b"))`, per-member behaviour |
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
@@ -145,9 +145,9 @@ on the same class:
 
 ```python
 # wrapture
-group = wrapture.bindings(charge=(Gateway, "charge"),
-                          refund=(Gateway, "refund"),
-                          record=(Ledger, "record"))
+group = wrapture.bindings(charge=wrapture.binding(Gateway, "charge"),
+                          refund=wrapture.binding(Gateway, "refund"),
+                          record=wrapture.binding(Ledger, "record"))
 group.charge.on_call.returns({"id": "stub"})
 group.refund.on_call.raises(TimeoutError("down"))
 

@@ -359,8 +359,8 @@ carrying its own behaviour, so a "gateway offline" scenario is one
 object a test enters:
 
 ```python
->>> offline = wrapture.bindings(charge=(PaymentClient, "charge"),
-...                             refund=(PaymentClient, "refund"))
+>>> offline = wrapture.bindings(charge=wrapture.binding(PaymentClient, "charge"),
+...                             refund=wrapture.binding(PaymentClient, "refund"))
 >>> _ = offline.charge.on_call.raises(TimeoutError("gateway timed out"))
 >>> _ = offline.refund.on_call.raises(TimeoutError("gateway timed out"))
 

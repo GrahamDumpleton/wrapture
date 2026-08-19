@@ -127,7 +127,9 @@ def test_timeline_applies_bindings_on_entry_and_removes_on_exit() -> None:
 
 
 def test_timeline_accepts_groups_and_iterables() -> None:
-    group = bindings(charge=(Gateway, "charge"), record=(Ledger, "record"))
+    group = bindings(
+        charge=binding(Gateway, "charge"), record=binding(Ledger, "record")
+    )
     extra = binding(Gateway, "refund")
 
     with timeline(group, [extra]):
@@ -470,7 +472,9 @@ def test_multiple_expectations_are_all_verified() -> None:
 
 
 def test_group_member_expectations_are_verified() -> None:
-    group = bindings(charge=(Gateway, "charge"), refund=(Gateway, "refund"))
+    group = bindings(
+        charge=binding(Gateway, "charge"), refund=binding(Gateway, "refund")
+    )
     group.refund.expect_never()
 
     with pytest.raises(ExpectationNotMetError, match="refund"):

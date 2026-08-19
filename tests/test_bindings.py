@@ -2,6 +2,7 @@
 rejection."""
 
 import gc
+import sys
 import textwrap
 import weakref
 from pathlib import Path
@@ -228,7 +229,7 @@ def test_deferred_target_syntax_is_rejected() -> None:
         binding("mymodule?", "handler")
 
     with pytest.raises(DeferredTargetError):
-        bindings(bad=("mymodule?", "handler"))
+        bindings(bad=binding("mymodule?", "handler"))
 
 
 def test_only_a_trailing_question_mark_on_a_string_target_is_rejected() -> None:
@@ -302,6 +303,46 @@ def test_a_string_target_may_spell_the_owner_with_a_colon() -> None:
         assert Gateway().charge(5) == {"id": "stub"}
 
 
+def test_every_spelling_of_a_location_is_one_binding() -> None:
+    forms = [
+        binding(f"{__name__}:Gateway.charge"),
+        binding(f"{__name__}:Gateway", "charge"),
+        binding(__name__, "Gateway.charge"),
+        binding(__name__, "Gateway", "charge"),
+        binding(sys.modules[__name__], "Gateway", "charge"),
+    ]
+
+    for bnd in forms:
+        assert bnd.name == "Gateway.charge"
+        assert bnd.path == f"{__name__}:Gateway.charge"
+        assert bnd.mode == "callable"
+
+    with binding("os", "path", "join").on_call.returns("joined"):
+        import os
+
+        assert os.path.join("a", "b") == "joined"
+
+
+def test_a_dotted_string_alone_names_no_attribute() -> None:
+    # Module names contain dots, so the colon is the only way to say
+    # where the module ends; the error suggests both spellings.
+
+    with pytest.raises(TypeError, match=r"'os.path:join'"):
+        binding("os.path.join")
+
+    with pytest.raises(TypeError, match=r"\('os.path', 'join'\)"):
+        binding("os.path.join")
+
+    with pytest.raises(TypeError, match="names no attribute"):
+        binding(Gateway)
+
+    with pytest.raises(TypeError, match="non-empty attribute names"):
+        binding(Gateway, "")
+
+    with pytest.raises(TypeError, match="non-empty attribute names"):
+        binding(Gateway, 3)  # type: ignore[arg-type]
+
+
 def test_a_trailing_question_mark_is_rejected_on_the_colon_form_too() -> None:
     with pytest.raises(DeferredTargetError):
         binding(f"{__name__}:Gateway?", "charge")
@@ -364,8 +405,24 @@ def test_repr_names_the_mode() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_a_group_takes_only_bindings_and_never_relabels_them() -> None:
+    with pytest.raises(TypeError, match="takes Binding instances"):
+        bindings(charge=(Gateway, "charge"))  # type: ignore[arg-type]
+
+    group = bindings(
+        charge=binding(Gateway, "charge"),
+        rate=binding(Ledger, "rate", mode="attribute", label="the rate"),
+    )
+
+    assert group.charge.label == "Gateway.charge"
+    assert group.rate.label == "the rate"
+    assert group.rate.mode == "attribute"
+
+
 def test_group_attribute_and_item_access() -> None:
-    group = bindings(charge=(Gateway, "charge"), record=(Ledger, "record"))
+    group = bindings(
+        charge=binding(Gateway, "charge"), record=binding(Ledger, "record")
+    )
     assert isinstance(group.charge, Binding)
     assert group["record"] is group.record
     assert len(group) == 2
@@ -375,7 +432,9 @@ def test_group_attribute_and_item_access() -> None:
 
 
 def test_group_applies_and_removes_as_a_unit() -> None:
-    group = bindings(charge=(Gateway, "charge"), record=(Ledger, "record"))
+    group = bindings(
+        charge=binding(Gateway, "charge"), record=binding(Ledger, "record")
+    )
     with group:
         assert group.active
     assert not group.charge.active
@@ -383,7 +442,7 @@ def test_group_applies_and_removes_as_a_unit() -> None:
 
 
 def test_group_rolls_back_on_partial_failure() -> None:
-    group = bindings(good=(Ledger, "record"), bad=(Gateway, "charge"))
+    group = bindings(good=binding(Ledger, "record"), bad=binding(Gateway, "charge"))
 
     # Pre-applying a member makes the group's own apply() of that member
     # fail partway through, which must roll back the members before it.
@@ -398,7 +457,9 @@ def test_group_rolls_back_on_partial_failure() -> None:
 
 
 def test_group_suspend_and_resume() -> None:
-    group = bindings(charge=(Gateway, "charge"), record=(Ledger, "record"))
+    group = bindings(
+        charge=binding(Gateway, "charge"), record=binding(Ledger, "record")
+    )
     with group:
         group.suspend()
         assert group.suspended
