@@ -175,12 +175,15 @@ charge.on_call.transforms_result(lambda r: {**r, "sandbox": True})
 charge.apply()
 ```
 
-`passes_through()` drops all configured behaviour, both the terminal and
-every composing stage, while leaving the patch installed:
+`passes_through()` drops both the terminal and every composing stage,
+so the real call runs untouched, while leaving the patch installed:
 
 ```python
 charge.on_call.passes_through()
 ```
+
+(`reset()` does the same and also discards any later phases; see
+[phased behaviour](#phased-behaviour-changing-what-a-call-does-over-time).)
 
 ### Reconfiguring a live binding
 
@@ -206,6 +209,185 @@ to the coroutine object:
 fetch = wrapture.binding(Service, "fetch")
 fetch.on_call.transforms_result(lambda rows: rows[:10])
 ```
+
+## Phased behaviour: changing what a call does over time
+
+Everything above configures one behaviour that holds until you change
+it. Tests often need the behaviour to change on its own as the code
+under test keeps calling: fail twice and then succeed, hand out a
+sequence of canned responses, run the real thing until it breaks and
+then fail fast. Rather than a list that mixes return values with
+exceptions, wrapture models this as **phases**: the behaviour you
+configure on `on_call` is phase 0, and `then()` adds the phase that
+takes over from it, with the argument saying when the hand-over
+happens.
+
+```python
+charge = wrapture.binding(Gateway, "charge")
+charge.on_call.raises(TimeoutError("down"))     # phase 0: the gateway is down
+
+recovered = charge.on_call.then(after=2)        # once phase 0 has handled two calls
+recovered.passes_through()                      # the real call runs
+```
+
+The first two calls raise, every call after that is real. Each phase
+is a complete behaviour of its own, with the same verbs as `on_call`,
+and nothing is inherited between phases: a phase with no terminal runs
+the real operation, a phase with no stages runs none. Stating
+`passes_through()` on a fresh phase is therefore optional, and worth
+writing when running the real thing is the point of the phase.
+
+`then()` is relative to the namespace it is called on:
+`charge.on_call.then(...)` is the phase after phase 0, and
+`recovered.then(...)` is the phase after `recovered`. Calling `then()` again on the same namespace
+returns the same successor rather than adding another, so setup code
+that runs twice does not grow the chain. The last phase, having no
+successor, stays active for good.
+
+The verbs on a phase return the phase, so a phase can be configured in
+one chain (`then(after=1).validates_args(check).returns(b)`); holding
+it in a variable named for what the phase is, and configuring it line
+by line as with `on_call`, usually reads better.
+
+### When a phase ends
+
+Three kinds of exit condition, one per `then()`:
+
+- `then(after=n)`: after this phase has handled `n` more calls.
+- `then(until=fn)`: once `fn(event)` is true for a call this phase
+  handled. The event is the same `Event` a timeline records, seen as
+  the caller saw it: `arguments` normalised, `result` after any
+  `transforms_result`, `exception` set if anything in the pipeline
+  raised. It is evaluated whether or not a timeline is running.
+- `then()`: no condition of its own. The phase ends when the test
+  calls `binding.advance()`, or, for a phase whose terminal is
+  `returns_from()`, when its sequence runs out (below).
+
+`advance()` works whatever the exit condition, so a test can force the
+next phase early, and past the last phase it does nothing. Exhaustion
+of a `returns_from()` sequence likewise ends its phase whatever the
+condition, whichever comes first. `binding.phase` is the index of the
+active phase, so a test can assert how far the chain got. Phases
+restart at 0 on every `apply()`; `suspend()`/`resume()` leave them
+alone.
+
+A circuit breaker: run the real call until one fails, then fail fast:
+
+```python
+def failed(event):
+    return event.exception is not None
+
+fetch = wrapture.binding(Client, "fetch")
+fetch.on_call.passes_through()
+
+tripped = fetch.on_call.then(until=failed)
+tripped.raises(CircuitOpen())
+```
+
+Stepping from the test, when the trigger is not in this binding's own
+calls. Here the remote stays down until a health check, itself a
+binding, reports it healthy:
+
+```python
+remote = wrapture.binding(Client, "request")
+remote.on_call.raises(ConnectionError("down"))
+
+online = remote.on_call.then()
+online.passes_through()
+
+health = wrapture.binding(Monitor, "check")
+
+def note_recovery(status):
+    if status == "healthy":
+        remote.advance()
+
+health.on_call.validates_result(note_recovery)
+```
+
+When the condition is visible in the call itself, `then(until=...)`
+says it more directly than a stage calling `advance()`.
+
+### Sequences: returns_from()
+
+For "return the next value on each call", a phase per value would be
+tiresome, so `returns_from(iterable)` is a terminal that draws
+successive values, one per call, lazily; a generator or
+`itertools.cycle()` works. When the sequence runs out the phase ends,
+and the call that found it empty is handled by the successor. A bare
+`then()` after a sequence therefore means "when it is exhausted"
+rather than "on advance() only":
+
+```python
+lookup.on_call.returns_from(numbers)     # phase 0: one value per call
+
+settled = lookup.on_call.then()          # once the sequence is exhausted
+settled.returns(default)                 # ...and this value from then on
+```
+
+With no successor, running out raises `SequenceExhaustedError` at the
+call site. `iter()` is called on the iterable afresh at each
+`apply()`, so a list restarts and a generator continues.
+
+A known sequence of "random" numbers makes code that samples or jitters
+deterministic without seeding tricks:
+
+```python
+with wrapture.binding(random, "random").on_call.returns_from([0.1, 0.9, 0.5]):
+    ...
+```
+
+`random.random` is a module attribute, so this catches
+`random.random()` callers; code holding its own `random.Random()`
+instance is covered by binding `random.Random` instead, and
+`from random import random` at import time escapes, as with mock.
+
+Stages compose around each drawn value as they do around any
+terminal, so `validates_result()` on the same phase can refuse a
+particular value when it comes through.
+
+### mock's side_effect list, spelled out
+
+`side_effect=[a, b, Err]` becomes one phase per regime, values and
+exceptions kept apart:
+
+```python
+lookup.on_call.returns_from([a, b])
+
+failing = lookup.on_call.then()
+failing.raises(Err)
+```
+
+### Phases and the timeline
+
+Events of a phased binding carry the index of the phase that handled
+them as `event.phase` (None for a binding with a single phase), so a
+recording can be filtered by regime with `in_phase(n)`:
+
+```python
+with wrapture.timeline(charge) as tape:
+    service.place_order(...)
+
+tape.for_binding(charge).in_phase(0).assert_times(2)
+tape.for_binding(charge).in_phase(1).assert_once()
+assert charge.phase == 1
+```
+
+`binding.phase` counts transitions, `in_phase()` counts calls; a phase
+can be entered and left without handling a call, so the two answer
+different questions.
+
+### Attribute bindings and groups
+
+`on_get`, `on_set` and `on_delete` have `then()` too, each operation
+with its own chain, and `on_get` has `returns_from()`. Reads are easy
+to trigger by accident (`repr`, `hasattr`, a debugger), so pair a read
+sequence with a successor or `itertools.cycle()`. `binding.phase`
+refers to the one operation that has phases; with phases on more than
+one, ask `binding.on_get.phase` (or `on_set.phase`, ...) instead. A
+binding group's `advance()` advances every member together.
+
+`passes_through()` on a base namespace clears phase 0 only; to drop the
+whole chain and start again, use `reset()`.
 
 ## Suspending and resuming
 

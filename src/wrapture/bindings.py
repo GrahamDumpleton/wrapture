@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import threading
 import time
 import types
 import warnings
@@ -26,12 +27,13 @@ from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
     GetBehaviour,
+    Phase,
     SetBehaviour,
     StageFunction,
     WrappedFunction,
     WrapperFunction,
     _Behaviour,
-    _compose,
+    _Exhausted,
 )
 from .capture import (
     NONE,
@@ -49,6 +51,7 @@ from .exceptions import (
     ExpectationNotMetError,
     NeverAppliedError,
     RecordingGapWarning,
+    SequenceExhaustedError,
     WrongModeError,
 )
 from .sinks import (
@@ -112,7 +115,7 @@ class RequestNamespace(Protocol):
     def passes_through(self) -> Binding: ...
 
 
-_BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour)
+_BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour[Any])
 
 # Every currently applied binding, so tooling such as the pytest plugin
 # can sweep for patches left behind. Weak references, so the registry
@@ -267,13 +270,15 @@ async def _record_awaited(
     stack: tuple[Event, ...],
     policy: CapturePolicy,
     active: tuple[Sink, ...],
+    on_complete: Callable[[Event], None] | None = None,
 ) -> Any:
     """Record around the await, so the event reflects the real outcome.
 
     Re-establishes the in-progress stack for the duration, so calls made
     inside the coroutine body nest under this event. The stack is set
     raw rather than pushed, because the event was already linked to its
-    parent when the call was recorded.
+    parent when the call was recorded. `on_complete` sees the finished
+    event, outcome or exception, once the sinks have.
     """
 
     token = _stack.set(stack + (event,))
@@ -284,6 +289,8 @@ async def _record_awaited(
             event.duration = time.perf_counter() - event.started
         event.exception = exc
         _notify_error(event, active)
+        if on_complete is not None:
+            on_complete(event)
         raise
     finally:
         _stack.reset(token)
@@ -292,6 +299,8 @@ async def _record_awaited(
         event.duration = time.perf_counter() - event.started
     _capture_result(event, result, policy)
     _notify_exit(event, active)
+    if on_complete is not None:
+        on_complete(event)
     return result
 
 
@@ -547,15 +556,16 @@ class Binding:
         self._stack_depth = stack
         self._when = when
 
-        # The behaviour pipelines, keyed by operation ("call", "get",
-        # "set" or "delete"): composing stages around one terminal, with
-        # the composed form cached until either changes. Request
-        # behaviour is phase-keyed rather than composed, so it lives in
+        # The behaviour phases, keyed by operation ("call", "get", "set"
+        # or "delete"): each operation has a chain of Phase records
+        # starting at its head, and the phase currently deciding what
+        # the operation does. Both are created on first use. Request
+        # behaviour is stage-keyed rather than composed, so it lives in
         # its own structure, consumed by the WSGI and ASGI middlewares.
 
-        self._pipelines: dict[str, list[StageFunction]] = {}
-        self._terminals: dict[str, WrapperFunction] = {}
-        self._composed: dict[str, WrapperFunction] = {}
+        self._heads: dict[str, Phase] = {}
+        self._active: dict[str, Phase] = {}
+        self._phase_lock = threading.Lock()
         self._request_hooks: dict[str, Any] = {
             "inbound": [],
             "response": [],
@@ -580,8 +590,9 @@ class Binding:
 
         self._expectations: list[tuple[str, int]] = []
 
-        # Which operations currently have an injecting terminal
-        # (returns / raises / rejects), so their events can be marked.
+        # Whether request behaviour currently has an injecting terminal
+        # (returns / rejects), so request events can be marked. The
+        # composed operations carry the flag on their phases instead.
 
         self._injects: dict[str, bool] = {}
 
@@ -779,6 +790,10 @@ class Binding:
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
+
+        # Behaviour restarts from phase 0 on every apply.
+
+        self._restart_phases()
 
         # A fresh apply may warn about missed thread calls again.
 
@@ -1019,15 +1034,13 @@ class Binding:
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> Any:
-            behaviour = bnd._behaviour("call")
+            phase = bnd._select("call")
 
             # when=False is a behaviour-only binding: it never records,
             # counts nothing, and takes no part in gap detection.
 
             if bnd._when is False:
-                if behaviour is None:
-                    return wrapped(*args, **kwargs)
-                return behaviour(wrapped, instance, args, kwargs)
+                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             active = _active_sinks()
 
@@ -1043,9 +1056,7 @@ class Binding:
                 if not active and not _in_recorder.get() and _timelines_active():
                     bnd._note_missed_call()
 
-                if behaviour is None:
-                    return wrapped(*args, **kwargs)
-                return behaviour(wrapped, instance, args, kwargs)
+                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # The per-call predicate decides whether this operation is
             # recorded at all, before any event is constructed. It runs
@@ -1061,10 +1072,7 @@ class Binding:
 
                 if not wanted:
                     bnd._filtered_calls += 1
-
-                    if behaviour is None:
-                        return wrapped(*args, **kwargs)
-                    return behaviour(wrapped, instance, args, kwargs)
+                    return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # Create the event under the recorder guard, so anything
             # the bookkeeping calls that is itself observed passes
@@ -1072,7 +1080,7 @@ class Binding:
 
             guard = _in_recorder.set(True)
             try:
-                event = bnd._record_call(active, wrapped, instance, args, kwargs)
+                event = bnd._record_call(active, wrapped, instance, args, kwargs, phase)
             finally:
                 _in_recorder.reset(guard)
 
@@ -1092,20 +1100,30 @@ class Binding:
             started = time.perf_counter()
             event.started = started
 
+            slot: list[Phase | None] = [phase]
+
             try:
-                if behaviour is None:
-                    outcome = wrapped(*args, **kwargs)
-                else:
-                    outcome = behaviour(
-                        _forwarder(wrapped, event), instance, args, kwargs
-                    )
+                outcome = bnd._invoke(
+                    "call",
+                    phase,
+                    wrapped,
+                    instance,
+                    args,
+                    kwargs,
+                    event,
+                    via=_forwarder(wrapped, event),
+                    slot=slot,
+                )
             except BaseException as exc:
                 event.duration = time.perf_counter() - started
                 event.exception = exc
                 _notify_error(event, active)
+                bnd._completed("call", slot[0], event)
                 raise
             finally:
                 _pop(token)
+
+            phase = slot[0]
 
             # A generator or coroutine outcome has not run yet: calling
             # the target only constructed it, and the body executes when
@@ -1118,20 +1136,40 @@ class Binding:
             if result_policy is None:
                 result_policy = _required_policy(active, "capture_result")
 
+            # An until= predicate needs the outcome whatever the sinks
+            # asked for, so capture at least by reference for it.
+
+            watching = phase is not None and phase.watches
+            if watching and _level_of(result_policy) < REFERENCE:
+                result_policy = REFERENCE
+
+            def completed(event: Event) -> None:
+                bnd._completed("call", phase, event)
+
             if inspect.isgenerator(outcome):
+                completed(event)
                 return _record_generator(outcome, event, base, result_policy, active)
 
             if inspect.isasyncgen(outcome):
+                completed(event)
                 return _record_async_generator(
                     outcome, event, base, result_policy, active
                 )
 
             if inspect.isawaitable(outcome):
-                return _record_awaited(outcome, event, base, result_policy, active)
+                return _record_awaited(
+                    outcome,
+                    event,
+                    base,
+                    result_policy,
+                    active,
+                    completed if watching else None,
+                )
 
             event.duration = time.perf_counter() - started
             _capture_result(event, outcome, result_policy)
             _notify_exit(event, active)
+            completed(event)
             return outcome
 
         return wrapper
@@ -1143,6 +1181,7 @@ class Binding:
         instance: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        phase: Phase | None,
     ) -> Event:
         # Resolve the argument capture policy: the binding's override,
         # else the highest level the active sinks declare.
@@ -1150,6 +1189,13 @@ class Binding:
         policy = self._capture_args
         if policy is None:
             policy = _required_policy(active, "capture_args")
+
+        # An until= predicate needs the arguments whatever the sinks
+        # asked for, so capture at least by reference for it.
+
+        if phase is not None and phase.watches and _level_of(policy) < REFERENCE:
+            policy = REFERENCE
+
         level = _level_of(policy)
 
         event = Event(
@@ -1159,7 +1205,8 @@ class Binding:
             instance=instance,
             binding=self,
             capture=level,
-            injected=self._injects.get("call", False),
+            injected=phase is not None and phase.injected,
+            phase=self._phase_of(phase),
         )
 
         if self._stack_depth is not None:
@@ -1199,42 +1246,317 @@ class Binding:
 
         return event
 
-    # -- behaviour pipelines -------------------------------------------------
+    # -- behaviour phases -----------------------------------------------------
+
+    def _head(self, operation: str) -> Phase:
+        """Phase 0 for the operation, created on first use."""
+
+        head = self._heads.get(operation)
+
+        if head is None:
+            head = self._heads[operation] = Phase()
+            self._active[operation] = head
+
+        return head
 
     def _set_terminal(
-        self, operation: str, fn: WrapperFunction, *, injected: bool = False
+        self,
+        operation: str,
+        fn: WrapperFunction,
+        *,
+        injected: bool = False,
+        phase: Phase | None = None,
     ) -> None:
-        self._terminals[operation] = fn
-        self._injects[operation] = injected
-        self._composed.pop(operation, None)
+        (phase or self._head(operation)).set_terminal(fn, injected=injected)
 
-    def _add_stage(self, operation: str, fn: StageFunction) -> None:
-        self._pipelines.setdefault(operation, []).append(fn)
-        self._composed.pop(operation, None)
+    def _add_stage(
+        self, operation: str, fn: StageFunction, *, phase: Phase | None = None
+    ) -> None:
+        (phase or self._head(operation)).add_stage(fn)
 
     def _clear_behaviour(self, operation: str) -> None:
-        self._pipelines.pop(operation, None)
-        self._terminals.pop(operation, None)
-        self._injects.pop(operation, None)
-        self._composed.pop(operation, None)
+        self._heads.pop(operation, None)
+        self._active.pop(operation, None)
 
-    def _behaviour(self, operation: str) -> WrapperFunction | None:
-        """The composed pipeline for one operation, or None when nothing
-        is configured for it."""
+    def _then(
+        self, operation: str, phase: Phase, exit: tuple[str, Any] | None
+    ) -> Phase:
+        """Create or fetch the successor of `phase`, recording the exit
+        condition that hands over to it."""
 
-        pipeline = self._pipelines.get(operation)
-        terminal = self._terminals.get(operation)
+        with self._phase_lock:
+            if phase.successor is None:
+                phase.successor = Phase(phase.index + 1)
+                phase.exit = exit
+            elif exit is not None:
+                phase.exit = exit
 
-        if not pipeline and terminal is None:
+            return phase.successor
+
+    def _select(self, operation: str) -> Phase | None:
+        """The phase that handles the operation now, or None when nothing
+        is configured.
+
+        Choosing the phase also counts the operation against a count exit,
+        so that exactly n operations run under a phase whose exit is
+        after=n, even with concurrent callers: the phase is chosen and
+        counted under the lock, and a count reached by this operation
+        moves subsequent operations on while this one keeps its phase.
+        """
+
+        active = self._active.get(operation)
+
+        # The common case, one phase or the last of the chain, needs no
+        # counting and no lock.
+
+        if active is None or active.successor is None:
+            return active
+
+        with self._phase_lock:
+            active = self._active[operation]
+            active.handled += 1
+
+            if (
+                active.exit is not None
+                and active.exit[0] == "after"
+                and active.handled >= active.exit[1]
+                and active.successor is not None
+            ):
+                self._active[operation] = active.successor
+
+            return active
+
+    def _invoke(
+        self,
+        operation: str,
+        phase: Phase | None,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        event: Event | None = None,
+        via: WrappedFunction | None = None,
+        slot: list[Phase | None] | None = None,
+    ) -> Any:
+        """Run the operation under `phase`, or the real operation when
+        there is none.
+
+        Behaviour receives `via` in place of `wrapped` when given: the
+        recording path hands over a forwarder that notes what behaviour
+        actually passed on. A returns_from() sequence that runs out ends
+        its phase here: the operation is re-dispatched to the successor,
+        the event, when one is being recorded, is restamped with the
+        phase that actually handled it, and `slot`, when given, is
+        updated so the caller learns which phase that was.
+        """
+
+        while True:
+            behaviour = None if phase is None else phase.behaviour()
+
+            try:
+                if behaviour is None:
+                    return wrapped(*args, **kwargs)
+                return behaviour(via or wrapped, instance, args, kwargs)
+            except _Exhausted:
+                assert phase is not None
+                phase = self._exhausted(operation, phase)
+
+                if event is not None:
+                    event.injected = phase.injected
+                    event.phase = self._phase_of(phase)
+                if slot is not None:
+                    slot[0] = phase
+
+    def _completed(self, operation: str, phase: Phase | None, event: Event) -> None:
+        """Show a completed operation to the phase's until= predicate,
+        handing over to the successor when it says so.
+
+        The predicate runs under the recorder guard, like when=, so
+        observed code it consults does not record; if it raises, the
+        caller of the operation sees the exception.
+        """
+
+        if phase is None or not phase.watches or phase.successor is None:
+            return
+
+        assert phase.exit is not None
+        predicate = phase.exit[1]
+
+        guard = _in_recorder.set(True)
+        try:
+            finished = predicate(event)
+        finally:
+            _in_recorder.reset(guard)
+
+        if not finished:
+            return
+
+        with self._phase_lock:
+            if self._active.get(operation) is phase:
+                self._active[operation] = phase.successor
+
+    def _quiet(
+        self,
+        operation: str,
+        phase: Phase | None,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Run an unrecorded call: nothing is listening, or the binding or
+        its when= excluded it.
+
+        A phase with an until= exit still needs to see the completed
+        call, so one is built for it privately, never delivered to a
+        sink, capturing by reference. The cost is paid only while such a
+        phase is active.
+        """
+
+        slot: list[Phase | None] = [phase]
+
+        try:
+            outcome = self._invoke(
+                operation, phase, wrapped, instance, args, kwargs, slot=slot
+            )
+        except BaseException as exc:
+            final = slot[0]
+
+            if final is not None and final.watches:
+                event = self._record_call((), wrapped, instance, args, kwargs, final)
+                event.exception = exc
+                self._completed(operation, final, event)
+
+            raise
+
+        final = slot[0]
+        if final is None or not final.watches:
+            return outcome
+
+        event = self._record_call((), wrapped, instance, args, kwargs, final)
+
+        # A coroutine has not run yet, so the predicate sees it once it
+        # resolves; a generator is shown at construction, with no result.
+
+        if inspect.isawaitable(outcome):
+            return self._quiet_awaited(operation, final, outcome, event)
+
+        if not inspect.isgenerator(outcome) and not inspect.isasyncgen(outcome):
+            event.result = outcome
+
+        self._completed(operation, final, event)
+        return outcome
+
+    async def _quiet_awaited(
+        self, operation: str, phase: Phase, awaitable: Any, event: Event
+    ) -> Any:
+        try:
+            result = await awaitable
+        except BaseException as exc:
+            event.exception = exc
+            self._completed(operation, phase, event)
+            raise
+
+        event.result = result
+        self._completed(operation, phase, event)
+        return result
+
+    def _exhausted(self, operation: str, phase: Phase) -> Phase:
+        """Hand over from a phase whose sequence ran out, returning the
+        phase that takes the operation."""
+
+        with self._phase_lock:
+            if phase.successor is None:
+                raise SequenceExhaustedError(
+                    f"{self._label}: the returns_from() sequence of phase"
+                    f" {phase.index} is exhausted and no phase follows it;"
+                    f" add one with then() or supply an endless sequence"
+                )
+
+            if self._active.get(operation) is phase:
+                self._active[operation] = phase.successor
+
+        successor = self._select(operation)
+        assert successor is not None
+        return successor
+
+    def _advance(self, operation: str) -> bool:
+        """Move the operation to its successor phase; False when it is
+        already on the last one."""
+
+        with self._phase_lock:
+            active = self._active.get(operation)
+
+            if active is None or active.successor is None:
+                return False
+
+            self._active[operation] = active.successor
+            return True
+
+    def _restart_phases(self) -> None:
+        """Return every operation to phase 0 with fresh counters."""
+
+        with self._phase_lock:
+            for operation, head in self._heads.items():
+                self._active[operation] = head
+
+                phase: Phase | None = head
+                while phase is not None:
+                    phase.restart()
+                    phase = phase.successor
+
+    def _phase_index(self, operation: str) -> int:
+        active = self._active.get(operation)
+        return 0 if active is None else active.index
+
+    def _phased(self) -> list[str]:
+        """The operations that have more than one phase."""
+
+        return [
+            operation
+            for operation, head in self._heads.items()
+            if head.successor is not None
+        ]
+
+    @property
+    def phase(self) -> int:
+        """Index of the phase currently deciding the binding's behaviour.
+
+        Zero for a binding that never called then(). An attribute binding
+        with phases on more than one operation has no single answer; ask
+        the namespace instead (`on_get.phase`).
+        """
+
+        phased = self._phased()
+
+        if len(phased) > 1:
+            raise ValueError(
+                f"{self._label} has phases on {', '.join(sorted(phased))};"
+                f" use the operation's namespace, e.g. on_get.phase"
+            )
+
+        return self._phase_index(phased[0]) if phased else 0
+
+    def advance(self) -> Self:
+        """Move every operation with phases on to its next phase, whatever
+        the current phase's exit condition. A no-op on the last phase.
+        Returns self."""
+
+        for operation in self._phased():
+            self._advance(operation)
+
+        return self
+
+    @staticmethod
+    def _phase_of(phase: Phase | None) -> int | None:
+        """The phase index to stamp on an event: None unless the operation
+        actually has more than one phase, so unphased bindings record
+        nothing new."""
+
+        if phase is None or (phase.index == 0 and phase.successor is None):
             return None
 
-        composed = self._composed.get(operation)
-
-        if composed is None:
-            composed = _compose(pipeline or (), terminal)
-            self._composed[operation] = composed
-
-        return composed
+        return phase.index
 
 
 class BindingGroup:
@@ -1320,6 +1642,14 @@ class BindingGroup:
 
         for bnd in self._bindings.values():
             bnd.resume()
+        return self
+
+    def advance(self) -> Self:
+        """Advance every binding in the group to its next phase, so a set
+        of stand-ins changes regime together. Returns self."""
+
+        for bnd in self._bindings.values():
+            bnd.advance()
         return self
 
     def remove(self) -> Self:

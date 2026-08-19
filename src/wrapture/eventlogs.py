@@ -57,6 +57,12 @@ class EventLog:
         wanted = set(kinds)
         return self._narrow(f"[{','.join(kinds)}]", lambda event: event.kind in wanted)
 
+    def in_phase(self, index: int) -> EventLog:
+        """Events handled by phase `index` of a phased binding. Events of
+        a binding with a single phase carry no phase and never match."""
+
+        return self._narrow(f"[in_phase={index}]", lambda event: event.phase == index)
+
     def matching(self, predicate: Callable[[Event], bool]) -> EventLog:
         """Events for which the predicate returns true."""
 

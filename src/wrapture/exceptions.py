@@ -53,6 +53,16 @@ class DeferredTargetError(ValueError):
     """
 
 
+class SequenceExhaustedError(RuntimeError):
+    """A returns_from() sequence ran out with no phase to take over.
+
+    The phase supplying values from the sequence has no successor, so
+    the operation that found the sequence empty had nothing to fall back
+    to. Add a successor with then() (a bare then() passes through) or
+    supply a sequence that does not end.
+    """
+
+
 class ConfigError(Exception):
     """A tracing configuration could not be loaded or applied: a config
     file said something the schema does not allow, a reference in it did

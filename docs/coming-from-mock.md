@@ -12,6 +12,7 @@ The quick translation, expanded below:
 | `patch.object(C, "m", return_value=v)` | `binding(C, "m").on_call.returns(v)` |
 | `patch.object(C, "m", side_effect=exc)` | `binding(C, "m").on_call.raises(exc)` |
 | `side_effect=fn` (fabricate per call) | `on_call.decorates(fn)` |
+| `side_effect=[a, b, exc]` (a sequence) | `on_call.returns_from([a, b])`, then `then().raises(exc)` |
 | `Mock(wraps=real)` | `on_call.transforms_args(fn)` / `transforms_result(fn)` / `decorates(fn)` |
 | `patch.multiple(C, a=..., b=...)` | `bindings(a=(C, "a"), b=(C, "b"))`, per-member behaviour |
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
@@ -74,6 +75,43 @@ and the rest of the pipeline stays real: the reservation is really taken,
 the ledger write really does or does not happen, and by recording on a
 timeline the test can assert on what the rest of the system did about
 the failure.
+
+## A sequence of outcomes
+
+mock's `side_effect` also takes a list, consumed one entry per call,
+with exceptions raised and anything else returned:
+
+```python
+# unittest.mock
+with patch.object(Gateway, "charge", side_effect=[{"id": "A"}, TimeoutError("down"), {"id": "B"}]):
+    ...
+```
+
+wrapture keeps values and exceptions apart. `returns_from()` hands out
+successive values from an iterable, lazily, and `then()` adds a phase
+that takes over, here once the sequence is exhausted; each phase has
+the full behaviour vocabulary, so the third outcome is another phase
+in turn:
+
+```python
+# wrapture
+charge = wrapture.binding(Gateway, "charge")
+charge.on_call.returns_from([{"id": "A"}])
+
+down = charge.on_call.then()
+down.raises(TimeoutError("down"))
+
+back = down.then(after=1)
+back.returns({"id": "B"})
+```
+
+More lines for the same three outcomes, but each phase says what it is,
+and the same shape covers what a list cannot: `then(after=n)` and
+`then(until=fn)` change behaviour on a count or on a condition seen in
+the calls, `advance()` moves on from the test, and `binding.phase` and
+`in_phase(n)` on the recording tell you which regime a call ran under.
+[Phased behaviour](monkey-patching.md#phased-behaviour-changing-what-a-call-does-over-time)
+has the details.
 
 ## Patching several methods at once
 

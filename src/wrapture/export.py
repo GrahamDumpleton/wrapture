@@ -88,6 +88,7 @@ _SLICE_ARGS = (
     "previous",
     "items",
     "body_duration",
+    "phase",
     "stack",
     "data",
 )

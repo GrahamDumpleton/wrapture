@@ -15,11 +15,17 @@ what happens at the centre and replaces any previous terminal.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 if TYPE_CHECKING:
     from .bindings import Binding
+
+# The namespaces are generic in R, what a behaviour verb hands back: the
+# Binding from a base namespace, so configuration chains into apply() or
+# the context manager, and the phase namespace itself from a phase, so
+# one phase configures in a chain.
 
 # The signature wrapt uses for wrappers and decorators:
 # fn(wrapped, instance, args, kwargs).
@@ -92,25 +98,221 @@ def _stage_wrapper(stage: StageFunction, nxt: WrapperFunction) -> WrapperFunctio
     return call
 
 
-class _Behaviour:
-    """Base for the per-operation behaviour namespaces."""
+class _Exhausted(BaseException):
+    """Raised by a returns_from() terminal when its sequence runs out.
 
-    __slots__ = ("_binding",)
+    A BaseException so that stages catching Exception around the rest of
+    the pipeline do not swallow it; the binding's dispatch turns it into
+    a hand-over to the successor phase.
+    """
+
+
+class Phase:
+    """One phase of a binding's behaviour for a single operation.
+
+    A phase is a complete behaviour: composing stages around at most one
+    terminal, with the composed form cached until either changes. Phases
+    form a chain per operation, each holding its successor and the exit
+    condition that hands over to it; a binding that never calls then()
+    has a single phase and behaves as a plain pipeline.
+    """
+
+    __slots__ = (
+        "index",
+        "stages",
+        "terminal",
+        "injected",
+        "_composed",
+        "successor",
+        "exit",
+        "handled",
+        "source",
+        "iterator",
+        "draw_lock",
+    )
+
+    def __init__(self, index: int = 0) -> None:
+        self.index = index
+        self.stages: list[StageFunction] = []
+        self.terminal: WrapperFunction | None = None
+        self.injected = False
+        self._composed: WrapperFunction | None = None
+
+        # Chain bookkeeping: the phase that takes over, the condition
+        # under which it does, and how many operations this phase has
+        # handled since it became active.
+
+        self.successor: Phase | None = None
+        self.exit: tuple[str, Any] | None = None
+        self.handled = 0
+
+        # A returns_from() sequence: the iterable as given, so apply()
+        # can restart it with a fresh iter(), the live iterator, and a
+        # lock so concurrent operations draw one value each.
+
+        self.source: Iterable[Any] | None = None
+        self.iterator: Iterator[Any] | None = None
+        self.draw_lock: threading.RLock | None = None
+
+    @property
+    def configured(self) -> bool:
+        """Whether any stage or terminal has been set."""
+
+        return bool(self.stages) or self.terminal is not None
+
+    @property
+    def watches(self) -> bool:
+        """Whether this phase ends on an until= predicate, so completed
+        operations must be shown to it."""
+
+        return self.exit is not None and self.exit[0] == "until"
+
+    def set_terminal(self, fn: WrapperFunction, *, injected: bool = False) -> None:
+        self.terminal = fn
+        self.injected = injected
+        self._composed = None
+        self.source = None
+        self.iterator = None
+        self.draw_lock = None
+
+    def set_sequence(self, iterable: Iterable[Any]) -> None:
+        """Make the terminal draw successive values from `iterable`."""
+
+        phase = self
+
+        def draw(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            assert phase.iterator is not None and phase.draw_lock is not None
+
+            with phase.draw_lock:
+                try:
+                    return next(phase.iterator)
+                except StopIteration:
+                    raise _Exhausted from None
+
+        self.set_terminal(draw, injected=True)
+        self.source = iterable
+        self.iterator = iter(iterable)
+        self.draw_lock = threading.RLock()
+
+    def restart(self) -> None:
+        """Reset the handled count and restart any sequence from the
+        iterable it was given."""
+
+        self.handled = 0
+
+        if self.source is not None:
+            self.iterator = iter(self.source)
+
+    def add_stage(self, fn: StageFunction) -> None:
+        self.stages.append(fn)
+        self._composed = None
+
+    def clear(self) -> None:
+        """Drop stages and terminal, so the phase performs the real operation."""
+
+        self.stages = []
+        self.terminal = None
+        self.injected = False
+        self._composed = None
+        self.source = None
+        self.iterator = None
+        self.draw_lock = None
+
+    def behaviour(self) -> WrapperFunction | None:
+        """The composed pipeline, or None when nothing is configured."""
+
+        if not self.configured:
+            return None
+
+        if self._composed is None:
+            self._composed = _compose(self.stages, self.terminal)
+
+        return self._composed
+
+
+class _Behaviour[R]:
+    """Base for the per-operation behaviour namespaces.
+
+    A namespace configures one phase of one operation. The base
+    namespaces (`on_call` and friends) configure phase 0 and hand the
+    Binding back from every verb; a phase namespace, obtained from
+    then(), configures its own phase and hands itself back.
+    """
+
+    __slots__ = ("_binding", "_phase")
 
     _operation: ClassVar[str]
 
-    def __init__(self, bnd: Binding) -> None:
+    def __init__(self, bnd: Binding, phase: Phase | None = None) -> None:
         self._binding = bnd
+        self._phase = phase
 
-    def _terminal(self, fn: WrapperFunction, *, injected: bool = False) -> Binding:
-        self._binding._set_terminal(self._operation, fn, injected=injected)
-        return self._binding
+    def _done(self) -> R:
+        raise NotImplementedError
 
-    def _stage(self, fn: StageFunction) -> Binding:
-        self._binding._add_stage(self._operation, fn)
-        return self._binding
+    def __repr__(self) -> str:
+        index = 0 if self._phase is None else self._phase.index
+        return f"<{type(self).__name__} {index} of {self._binding._label!r}>"
 
-    def raises(self, exc: BaseException | type[BaseException]) -> Binding:
+    def _current(self) -> Phase:
+        """The phase this namespace configures."""
+
+        if self._phase is not None:
+            return self._phase
+
+        return self._binding._head(self._operation)
+
+    def _terminal(self, fn: WrapperFunction, *, injected: bool = False) -> R:
+        self._binding._set_terminal(
+            self._operation, fn, injected=injected, phase=self._phase
+        )
+        return self._done()
+
+    def _stage(self, fn: StageFunction) -> R:
+        self._binding._add_stage(self._operation, fn, phase=self._phase)
+        return self._done()
+
+    def _successor(
+        self, after: int | None, until: Callable[[Any], Any] | None
+    ) -> Phase:
+        """Create or fetch the successor of the phase this namespace
+        configures, recording the exit condition on this phase."""
+
+        if after is not None and until is not None:
+            raise TypeError("then() takes after= or until=, not both")
+
+        if after is not None and (
+            isinstance(after, bool) or not isinstance(after, int) or after < 1
+        ):
+            raise ValueError(f"after= must be a positive int, got {after!r}")
+
+        exit: tuple[str, Any] | None = None
+        if after is not None:
+            exit = ("after", after)
+        elif until is not None:
+            exit = ("until", until)
+
+        return self._binding._then(self._operation, self._current(), exit)
+
+    @property
+    def phase(self) -> int:
+        """Index of the phase currently deciding this operation."""
+
+        return self._binding._phase_index(self._operation)
+
+    def advance(self) -> R:
+        """Move this operation to its next phase, whatever the current
+        phase's exit condition. A no-op past the last phase."""
+
+        self._binding._advance(self._operation)
+        return self._done()
+
+    def raises(self, exc: BaseException | type[BaseException]) -> R:
         """Raise `exc` instead of performing the operation. Terminal."""
 
         def boom(
@@ -123,29 +325,60 @@ class _Behaviour:
 
         return self._terminal(boom, injected=True)
 
-    def passes_through(self) -> Binding:
-        """Drop all configured behaviour for this operation: both the
-        terminal and every composing stage."""
+    def passes_through(self) -> R:
+        """Perform the real operation in this phase: drop the phase's
+        stages and terminal. Other phases are untouched; to drop the
+        whole chain, use reset() on the base namespace."""
 
-        self._binding._clear_behaviour(self._operation)
-        return self._binding
+        self._current().clear()
+        return self._done()
 
 
-class CallBehaviour(_Behaviour):
-    """`binding.on_call`: behaviour for calls to a wrapped callable."""
+class _CallVerbs[R](_Behaviour[R]):
+    """The verbs for calls to a wrapped callable, shared by `on_call`
+    and the phases chained from it."""
 
     __slots__ = ()
 
     _operation = "call"
 
+    def then(
+        self, *, after: int | None = None, until: Callable[[Any], Any] | None = None
+    ) -> CallPhase:
+        """The phase that takes over from this one, created on first call.
+
+        The argument is this phase's exit condition: after=n hands over
+        once this phase has handled n more operations, until=fn once
+        fn(event) is true for a completed operation, and neither means
+        the phase ends only on advance(). Calling then() again returns
+        the same successor; an argument on the repeat call replaces the
+        exit condition, a bare repeat leaves it alone.
+        """
+
+        return CallPhase(self._binding, self._successor(after, until))
+
     # -- terminal ---------------------------------------------------------
 
-    def returns(self, value: Any) -> Binding:
+    def returns(self, value: Any) -> R:
         """Return `value`; the real callable is never invoked. Terminal."""
 
         return self._terminal(lambda nxt, i, a, k: value, injected=True)
 
-    def decorates(self, fn: WrapperFunction) -> Binding:
+    def returns_from(self, iterable: Iterable[Any]) -> R:
+        """Return the next value of `iterable` on each call; the real
+        callable is never invoked. Terminal.
+
+        The iterable is consumed lazily, one value per call, so a
+        generator or itertools.cycle() works, and iter() is called on it
+        afresh at each apply(). When it runs out the phase ends and the
+        call that found it empty is handled by the successor phase; with
+        no successor that call raises SequenceExhaustedError.
+        """
+
+        self._current().set_sequence(iterable)
+        return self._done()
+
+    def decorates(self, fn: WrapperFunction) -> R:
         """Wrap the real callable: fn(wrapped, instance, args, kwargs).
 
         This is wrapt's own wrapper signature, so the function you would
@@ -164,7 +397,7 @@ class CallBehaviour(_Behaviour):
             [tuple[Any, ...], dict[str, Any]],
             tuple[tuple[Any, ...], dict[str, Any]],
         ],
-    ) -> Binding:
+    ) -> R:
         """fn(args, kwargs) -> (args, kwargs), rewriting the inbound call."""
 
         def stage(
@@ -178,7 +411,7 @@ class CallBehaviour(_Behaviour):
 
         return self._stage(stage)
 
-    def transforms_result(self, fn: Callable[[Any], Any]) -> Binding:
+    def transforms_result(self, fn: Callable[[Any], Any]) -> R:
         """fn(result) -> result, rewriting what came back.
 
         Await-aware: when the target is async, the transform is applied to
@@ -195,7 +428,7 @@ class CallBehaviour(_Behaviour):
 
         return self._stage(stage)
 
-    def validates_args(self, check: Callable[..., Any]) -> Binding:
+    def validates_args(self, check: Callable[..., Any]) -> R:
         """check(*args, **kwargs); the call passes through unchanged.
 
         The check fails the call only by raising; its return value is
@@ -213,7 +446,7 @@ class CallBehaviour(_Behaviour):
 
         return self._stage(stage)
 
-    def validates_result(self, check: Callable[[Any], Any]) -> Binding:
+    def validates_result(self, check: Callable[[Any], Any]) -> R:
         """check(result); the result passes through unchanged.
 
         The check fails the call only by raising; its return value is
@@ -236,8 +469,8 @@ class CallBehaviour(_Behaviour):
         return self._stage(stage)
 
 
-class GetBehaviour(_Behaviour):
-    """`binding.on_get`: behaviour for attribute reads.
+class _GetVerbs[R](_Behaviour[R]):
+    """The verbs for attribute reads, shared by `on_get` and its phases.
 
     The real read is a zero-argument operation producing the value.
     """
@@ -246,12 +479,42 @@ class GetBehaviour(_Behaviour):
 
     _operation = "get"
 
-    def returns(self, value: Any) -> Binding:
+    def then(
+        self, *, after: int | None = None, until: Callable[[Any], Any] | None = None
+    ) -> GetPhase:
+        """The phase that takes over from this one, created on first call.
+
+        The argument is this phase's exit condition: after=n hands over
+        once this phase has handled n more operations, until=fn once
+        fn(event) is true for a completed operation, and neither means
+        the phase ends only on advance(). Calling then() again returns
+        the same successor; an argument on the repeat call replaces the
+        exit condition, a bare repeat leaves it alone.
+        """
+
+        return GetPhase(self._binding, self._successor(after, until))
+
+    def returns(self, value: Any) -> R:
         """Reading gives `value`; the real read never happens. Terminal."""
 
         return self._terminal(lambda nxt, i, a, k: value, injected=True)
 
-    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
+    def returns_from(self, iterable: Iterable[Any]) -> R:
+        """Reading gives the next value of `iterable` on each read; the
+        real read never happens. Terminal.
+
+        Consumed lazily, one value per read, and restarted with iter()
+        at each apply(). When it runs out the phase ends and the read
+        that found it empty is handled by the successor phase; with no
+        successor that read raises SequenceExhaustedError. Reads are
+        easy to trigger by accident (repr, hasattr, a debugger), so pair
+        a sequence with a successor or use itertools.cycle().
+        """
+
+        self._current().set_sequence(iterable)
+        return self._done()
+
+    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> R:
         """Wrap the real read: fn(read, instance) -> value, where read()
         performs the read. Terminal."""
 
@@ -265,7 +528,7 @@ class GetBehaviour(_Behaviour):
 
         return self._terminal(terminal)
 
-    def transforms(self, fn: Callable[[Any], Any]) -> Binding:
+    def transforms(self, fn: Callable[[Any], Any]) -> R:
         """fn(value) -> value, rewriting the value read."""
 
         def stage(
@@ -278,7 +541,7 @@ class GetBehaviour(_Behaviour):
 
         return self._stage(stage)
 
-    def validates(self, check: Callable[[Any], Any]) -> Binding:
+    def validates(self, check: Callable[[Any], Any]) -> R:
         """check(value); the read passes through unchanged.
 
         The check fails the read only by raising; its return value is
@@ -298,8 +561,8 @@ class GetBehaviour(_Behaviour):
         return self._stage(stage)
 
 
-class SetBehaviour(_Behaviour):
-    """`binding.on_set`: behaviour for attribute writes.
+class _SetVerbs[R](_Behaviour[R]):
+    """The verbs for attribute writes, shared by `on_set` and its phases.
 
     The real write takes the value and produces nothing, so there is no
     returns().
@@ -309,7 +572,22 @@ class SetBehaviour(_Behaviour):
 
     _operation = "set"
 
-    def rejects(self) -> Binding:
+    def then(
+        self, *, after: int | None = None, until: Callable[[Any], Any] | None = None
+    ) -> SetPhase:
+        """The phase that takes over from this one, created on first call.
+
+        The argument is this phase's exit condition: after=n hands over
+        once this phase has handled n more operations, until=fn once
+        fn(event) is true for a completed operation, and neither means
+        the phase ends only on advance(). Calling then() again returns
+        the same successor; an argument on the repeat call replaces the
+        exit condition, a bare repeat leaves it alone.
+        """
+
+        return SetPhase(self._binding, self._successor(after, until))
+
+    def rejects(self) -> R:
         """Raise AttributeError instead of writing. Terminal."""
 
         binding = self._binding
@@ -324,7 +602,7 @@ class SetBehaviour(_Behaviour):
 
         return self._terminal(terminal, injected=True)
 
-    def decorates(self, fn: Callable[[Callable[[Any], Any], Any, Any], Any]) -> Binding:
+    def decorates(self, fn: Callable[[Callable[[Any], Any], Any, Any], Any]) -> R:
         """Wrap the real write: fn(write, instance, value), where
         write(value) performs the write. Terminal."""
 
@@ -338,7 +616,7 @@ class SetBehaviour(_Behaviour):
 
         return self._terminal(terminal)
 
-    def transforms(self, fn: Callable[[Any], Any]) -> Binding:
+    def transforms(self, fn: Callable[[Any], Any]) -> R:
         """fn(value) -> value, rewriting the value actually written."""
 
         def stage(
@@ -351,7 +629,7 @@ class SetBehaviour(_Behaviour):
 
         return self._stage(stage)
 
-    def validates(self, check: Callable[[Any], Any]) -> Binding:
+    def validates(self, check: Callable[[Any], Any]) -> R:
         """check(value); the write passes through unchanged.
 
         The check fails the write only by raising; its return value is
@@ -370,8 +648,9 @@ class SetBehaviour(_Behaviour):
         return self._stage(stage)
 
 
-class DeleteBehaviour(_Behaviour):
-    """`binding.on_delete`: behaviour for attribute deletes.
+class _DeleteVerbs[R](_Behaviour[R]):
+    """The verbs for attribute deletes, shared by `on_delete` and its
+    phases.
 
     The real delete takes nothing and produces nothing.
     """
@@ -380,7 +659,22 @@ class DeleteBehaviour(_Behaviour):
 
     _operation = "delete"
 
-    def rejects(self) -> Binding:
+    def then(
+        self, *, after: int | None = None, until: Callable[[Any], Any] | None = None
+    ) -> DeletePhase:
+        """The phase that takes over from this one, created on first call.
+
+        The argument is this phase's exit condition: after=n hands over
+        once this phase has handled n more operations, until=fn once
+        fn(event) is true for a completed operation, and neither means
+        the phase ends only on advance(). Calling then() again returns
+        the same successor; an argument on the repeat call replaces the
+        exit condition, a bare repeat leaves it alone.
+        """
+
+        return DeletePhase(self._binding, self._successor(after, until))
+
+    def rejects(self) -> R:
         """Raise AttributeError instead of deleting. Terminal."""
 
         binding = self._binding
@@ -395,7 +689,7 @@ class DeleteBehaviour(_Behaviour):
 
         return self._terminal(terminal, injected=True)
 
-    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> Binding:
+    def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> R:
         """Wrap the real delete: fn(erase, instance), where erase()
         performs the delete. Terminal."""
 
@@ -409,7 +703,7 @@ class DeleteBehaviour(_Behaviour):
 
         return self._terminal(terminal)
 
-    def validates(self, check: Callable[[Any], Any]) -> Binding:
+    def validates(self, check: Callable[[Any], Any]) -> R:
         """check(instance); the delete passes through unchanged.
 
         The check fails the delete only by raising; its return value is
@@ -426,3 +720,96 @@ class DeleteBehaviour(_Behaviour):
             return nxt()
 
         return self._stage(stage)
+
+
+# The concrete namespaces. A base namespace configures phase 0 and
+# returns the Binding from its verbs; a phase namespace configures the
+# phase then() created and returns itself.
+
+
+class _BaseNamespace:
+    """What only a base namespace offers: dropping the whole chain."""
+
+    __slots__ = ()
+
+    _binding: Binding
+    _operation: ClassVar[str]
+
+    def reset(self) -> Binding:
+        """Drop all behaviour for this operation, every phase included,
+        leaving a bare phase 0 that performs the real operation."""
+
+        self._binding._clear_behaviour(self._operation)
+        return self._binding
+
+
+class CallBehaviour(_BaseNamespace, _CallVerbs["Binding"]):
+    """`binding.on_call`: behaviour for calls to a wrapped callable."""
+
+    __slots__ = ()
+
+    def _done(self) -> Binding:
+        return self._binding
+
+
+class CallPhase(_CallVerbs["CallPhase"]):
+    """One phase of call behaviour, from `on_call.then()`."""
+
+    __slots__ = ()
+
+    def _done(self) -> CallPhase:
+        return self
+
+
+class GetBehaviour(_BaseNamespace, _GetVerbs["Binding"]):
+    """`binding.on_get`: behaviour for attribute reads."""
+
+    __slots__ = ()
+
+    def _done(self) -> Binding:
+        return self._binding
+
+
+class GetPhase(_GetVerbs["GetPhase"]):
+    """One phase of read behaviour, from `on_get.then()`."""
+
+    __slots__ = ()
+
+    def _done(self) -> GetPhase:
+        return self
+
+
+class SetBehaviour(_BaseNamespace, _SetVerbs["Binding"]):
+    """`binding.on_set`: behaviour for attribute writes."""
+
+    __slots__ = ()
+
+    def _done(self) -> Binding:
+        return self._binding
+
+
+class SetPhase(_SetVerbs["SetPhase"]):
+    """One phase of write behaviour, from `on_set.then()`."""
+
+    __slots__ = ()
+
+    def _done(self) -> SetPhase:
+        return self
+
+
+class DeleteBehaviour(_BaseNamespace, _DeleteVerbs["Binding"]):
+    """`binding.on_delete`: behaviour for attribute deletes."""
+
+    __slots__ = ()
+
+    def _done(self) -> Binding:
+        return self._binding
+
+
+class DeletePhase(_DeleteVerbs["DeletePhase"]):
+    """One phase of delete behaviour, from `on_delete.then()`."""
+
+    __slots__ = ()
+
+    def _done(self) -> DeletePhase:
+        return self
