@@ -357,6 +357,35 @@ costs almost
 nothing beyond wrapt's own dispatch, so leaving bindings applied while
 only occasionally recording is a supported pattern, not a mistake.
 
+### Recording only the part you care about
+
+A tape is never cleared: it is the record of what happened while the
+timeline was open, and an assertion reads it as it stands. When a test
+has setup that itself goes through the bound code (a constructor that
+pings the gateway, a fixture that seeds data) and the assertions are
+about the act step alone, the answer is not to erase the setup's
+events (the idiom `reset_mock()` serves in `unittest.mock`) but to open
+the timeline around the act step only. The simplest form is the
+fixture shape above: the fixture applies the binding, and the test body
+opens `timeline()` around the call under test. Where the setup must
+happen inside the recording scope, timelines nest, and an inner
+`timeline()` with no arguments records only what happens inside it,
+with `binding.events` reading the innermost tape:
+
+```python
+with wrapture.timeline(charge, record) as whole:
+    service = make_service()            # its calls land on `whole` only
+
+    with wrapture.timeline() as act:
+        service.place("widget")
+        charge.events.with_args(amount=500).assert_once()   # the act step alone
+```
+
+A loop of scenarios opens a fresh `timeline()` per iteration the same
+way. Behaviour is separate from recording and is reconfigured in place,
+`on_call.returns(...)` again, `passes_through()` or `reset()`, without
+touching any tape.
+
 ### What one event contains
 
 Every call through a binding inside the scope records one event. The

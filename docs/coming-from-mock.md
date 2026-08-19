@@ -19,6 +19,7 @@ The quick translation, expanded below:
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
+| `m.reset_mock()` | no equivalent by design; open `timeline()` around the step to assert on (tapes are not cleared) |
 | `m.assert_has_calls([call(a), call(b)])` | `tape.assert_order(m.events.with_args(...), m.events.with_args(...), consecutive=True)` |
 | `m.mock_calls == [call(a), call(b)]` | `tape.assert_order(..., exact=True)` |
 | `manager.attach_mock(...)` then `manager.mock_calls` for cross-mock order | `tape.assert_order(charge, record)`, any bindings, arguments optional |
