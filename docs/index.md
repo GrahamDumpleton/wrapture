@@ -31,8 +31,8 @@ One mechanism, three uses, in increasing order of machinery:
 
 2. **Unit testing.** Observe and assert on how calls actually flowed through a
    *real* call graph (nesting, ordering, arguments and return values) and
-   optionally intervene (stub, transform, fail-inject). Unlike a `Mock`,
-   which fabricates values and cannot see calls an object makes to itself,
+   optionally intervene (stub, transform, fail-inject). Unlike a
+   `unittest.mock` `Mock`, which fabricates values and cannot see calls an object makes to itself,
    wrapture watches the real code run.
 
 3. **Ad-hoc tracing.** Attach bindings to a running application, including

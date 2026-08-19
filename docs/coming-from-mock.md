@@ -21,7 +21,8 @@ The quick translation, expanded below:
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
 | `patch.dict(os.environ, {"K": "v"})`, `monkeypatch.setenv("K", "v")` | `binding(os.environ, item="K").overrides("v")` |
 | `monkeypatch.delenv("K")`, `monkeypatch.delitem(d, "k")` | `binding(os.environ, item="K").hides()`, `binding(d, item="k").hides()` |
-| `patch.dict(d, {"k": v})`, `monkeypatch.setitem(d, "k", v)` | `binding(d, item="k").overrides(v)` |
+| `patch.dict(d, {"k": v})`, `monkeypatch.setitem(d, "k", v)` | `binding(d, item="k").overrides(v)`, or `binding(d, mode="mapping").updates({"k": v})` for several at once |
+| `patch.dict(d, {...}, clear=True)` | `binding(d, mode="mapping").overrides({...})`; `overrides({})` for an empty `d` |
 | `monkeypatch.setattr(mod, "CONST", v)`, `patch("mod.CONST", v)` | `binding("mod", attr="CONST").overrides(v)`; or `binding("mod", "CONST").on_get.returns(v)` to also see each read |
 | `patch.dict(registry, {"GET": fake})` for a callable | `binding(registry, item="GET", mode="callable").on_call...` (wrapped, recorded, removable) |
 
@@ -202,11 +203,30 @@ the change. What a value binding adds is the binding lifecycle: it is
 a context manager, it can be suspended and resumed, it goes in a
 `bindings()` group with everything else the test patches, and the
 pytest plugin's leak sweep reports one left applied. It records
-nothing, and says so, since there is no call to observe.
-`patch.dict(d, {...}, clear=True)`, replacing a whole mapping's content
-in place, has no equivalent yet: use one binding per key, or
-`patch.dict` for that case. See
+nothing, and says so, since there is no call to observe. See
 [Value bindings](monkey-patching.md#value-bindings-holding-a-value-in-place).
+
+`patch.dict(d, {...})` on a whole mapping, merging several entries or
+with `clear=True` replacing the content outright, is a *mapping
+binding*, `mode="mapping"` on the dict: `updates({...})` merges,
+`overrides({...})` replaces, and `overrides({})` empties it. As with
+`patch.dict` the one dict is changed in place, so every holder of it
+sees the change, and the original entries come back on exit:
+
+```python
+# unittest.mock
+with patch.dict(config.SETTINGS, {"currency": "EUR"}, clear=True):
+    ...
+```
+
+```python
+# wrapture
+with wrapture.binding(config, "SETTINGS", mode="mapping").overrides({"currency": "EUR"}):
+    ...
+```
+
+See
+[Mapping bindings](monkey-patching.md#mapping-bindings-substituting-a-mappings-content).
 
 ## Running the real code while modifying the call
 

@@ -87,6 +87,13 @@ def test_missing_key_is_reported(api_key):
         make_client()
 ```
 
+A whole settings dict works the same way with `mode="mapping"`: the
+fixture applies `wrapture.binding("myapp.config", "SETTINGS",
+mode="mapping")` and each test calls `updates({...})` or
+`overrides({...})` on it, the dict being changed in place so every
+holder of it sees the test's content and the original entries come
+back afterwards.
+
 Keep fixtures that apply bindings **function scoped** (the pytest
 default). A session or module scoped fixture leaves the patch applied
 across every test in between, which reintroduces exactly the leakage the
