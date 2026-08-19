@@ -579,6 +579,67 @@ calls = wrapture.binding(Service, "ping")
 calls.on_call.validates_args(record_call)
 ```
 
+### Module attributes
+
+A module attribute is bound the same way, and a module's plain data is
+detected as attribute mode, so a constant, a flag or a settings object
+held on a module gets `on_get`, `on_set` and `on_delete` with the same
+vocabulary, phases and events:
+
+```python
+>>> import types, wrapture
+>>> config = types.ModuleType("config")
+>>> config.TIMEOUT = 30
+
+>>> timeout = wrapture.binding(config, "TIMEOUT")
+>>> timeout.mode
+'attribute'
+
+>>> _ = timeout.on_get.returns(5)
+>>> _ = timeout.on_get.then(after=2).passes_through()
+>>> _ = timeout.on_set.raises(RuntimeError("frozen while the test runs"))
+
+>>> with timeout, wrapture.timeline() as tape:
+...     print(config.TIMEOUT, config.TIMEOUT, config.TIMEOUT)
+...     try:
+...         config.TIMEOUT = 1
+...     except RuntimeError as exc:
+...         print(exc)
+5 5 30
+frozen while the test runs
+
+>>> [event.kind for event in tape.for_binding(timeout)]
+['get', 'get', 'get', 'set']
+>>> config.TIMEOUT
+30
+
+```
+
+Under the covers the descriptor cannot go on `ModuleType` itself, so
+the binding gives the module a private subclass of its type, assigned
+to the module's `__class__` while any binding on that module is
+applied, and puts the descriptor there. The value stays in the
+module's `__dict__`, every binding on the module shares the one class,
+and the original type is restored when the last binding is removed.
+Two consequences are visible: `type(module) is types.ModuleType` is
+False while a binding is applied (`isinstance` and `inspect.ismodule`
+are unaffected, and the class is named `module` so reprs and messages
+read the same), and a module whose type does not allow `__class__`
+assignment, which some extension modules do not, is refused with
+`TypeError` at `apply()`.
+
+What is intercepted is access *through the module object*:
+`config.TIMEOUT`, `getattr(config, "TIMEOUT")`, `setattr`, `del`. Code
+that did `from config import TIMEOUT` holds the value already, and
+reads through `vars(config)` or `config.__dict__` bypass the
+descriptor, as they do for an attribute binding on a class. When all
+that is wanted is a different value in place for the duration of a
+test, with nothing observed,
+`binding(config, attr="TIMEOUT").overrides(5)` is the
+[value binding](#value-bindings-holding-a-value-in-place) form, and a
+value binding applied on top of an interception binding on the same
+name is seen by it as a set, since that is what it does.
+
 ### Decorating a method on the fly
 
 Because `on_get` runs with the instance in hand, an attribute binding on
@@ -618,10 +679,8 @@ one wrapper once, where this pattern allocates a wrapper per access.
 Note also that class-level access bypasses it: `Gateway.charge(obj, 1)`
 reaches the raw function, since no instance access occurs.
 
-Two limits worth knowing here. Binding an attribute of a module is
-refused with `NotImplementedYetError`, because module attribute access
-does not go through class descriptors. And the target must resolve to a
-class: an instance target is refused with `TypeError`, since the
+One limit worth knowing here: the target must resolve to a class or a
+module. An instance target is refused with `TypeError`, since the
 descriptor is installed on the class and would affect every instance,
 not just the one given. See [Known limitations](known-limitations.md)
 for the full list, including that attribute bindings intercept access
@@ -727,8 +786,9 @@ Some cases worth knowing:
   for this case.)
 - A module constant:
   `binding("myapp.http", attr="TIMEOUT").overrides(0.01)`. Positional
-  `binding("myapp.http", "TIMEOUT")` is still refused for
-  interception; the error names `attr=`.
+  `binding("myapp.http", "TIMEOUT")` is the
+  [interception form](#attribute-bindings), which sees and can shape
+  each read; the value binding just holds the value.
 - A stand-in module: `binding(sys.modules, item="boto3").overrides(fake)`,
   affecting imports made while applied, as `patch.dict(sys.modules, ...)`
   does.

@@ -22,7 +22,7 @@ The quick translation, expanded below:
 | `patch.dict(os.environ, {"K": "v"})`, `monkeypatch.setenv("K", "v")` | `binding(os.environ, item="K").overrides("v")` |
 | `monkeypatch.delenv("K")`, `monkeypatch.delitem(d, "k")` | `binding(os.environ, item="K").hides()`, `binding(d, item="k").hides()` |
 | `patch.dict(d, {"k": v})`, `monkeypatch.setitem(d, "k", v)` | `binding(d, item="k").overrides(v)` |
-| `monkeypatch.setattr(mod, "CONST", v)`, `patch("mod.CONST", v)` | `binding("mod", attr="CONST").overrides(v)` |
+| `monkeypatch.setattr(mod, "CONST", v)`, `patch("mod.CONST", v)` | `binding("mod", attr="CONST").overrides(v)`; or `binding("mod", "CONST").on_get.returns(v)` to also see each read |
 | `patch.dict(registry, {"GET": fake})` for a callable | `binding(registry, item="GET", mode="callable").on_call...` (wrapped, recorded, removable) |
 
 ## Stubbing a return value

@@ -261,13 +261,13 @@ override. Used as a context manager, it is a scoped clamp:
 
 The mode was detected from what was found at the target: `timeout` is
 plain data, so the binding is in attribute mode and offers `on_get`,
-`on_set` and `on_delete` instead of `on_call`. Two limits shape where
-this applies. Attribute bindings intercept access through instances,
+`on_set` and `on_delete` instead of `on_call`. One limit shapes where
+this applies: attribute bindings intercept access through instances,
 so a library reading `Client.timeout` off the class would not be
-affected; and a module-level constant cannot be bound this way at all
-(it is refused with `NotImplementedYetError`, see
-[known limitations](known-limitations.md#module-attributes-cannot-be-bound-in-attribute-mode)),
-which is why this example clamps a class attribute.
+affected (see [known limitations](known-limitations.md)). A
+module-level constant is bound the same way, with the module as the
+owner; see
+[Attribute bindings](monkey-patching.md#attribute-bindings).
 
 ## Applying before the library is imported
 

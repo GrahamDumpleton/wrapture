@@ -535,21 +535,8 @@ def test_on_get_can_decorate_the_bound_method_on_the_fly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# unsupported targets
+# slots
 # ---------------------------------------------------------------------------
-
-
-def test_module_attribute_binding_is_refused() -> None:
-    import types
-
-    module = types.ModuleType("wrapture_attr_sample")
-    vars(module)["setting"] = True
-
-    setting = binding(module, "setting")
-    assert setting.mode == "attribute"
-
-    with pytest.raises(wrapture.NotImplementedYetError, match="module"):
-        setting.apply()
 
 
 def test_slots_member_is_attribute_mode() -> None:

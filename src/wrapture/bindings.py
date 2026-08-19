@@ -23,6 +23,8 @@ import wrapt
 from wrapt import MISSING, is_wrapped_by, unwrap_object
 
 from .attributes import install as install_attribute
+from .attributes import is_installed as attribute_installed
+from .attributes import uninstall as uninstall_attribute
 from .behaviours import (
     CallBehaviour,
     DeleteBehaviour,
@@ -944,9 +946,14 @@ class Binding:
         if self._wrapper is None:
             return False
 
-        # Resolve what is at the target right now; if the path no longer
-        # resolves at all, the wrapper is certainly not installed. A
-        # mapping entry is read directly.
+        # An attribute descriptor may sit on a per-module class rather
+        # than at the target path itself, so the attribute module finds
+        # it. Otherwise resolve what is at the target right now; if the
+        # path no longer resolves at all, the wrapper is certainly not
+        # installed. A mapping entry is read directly.
+
+        if self._mode == "attribute":
+            return attribute_installed(self._target, self._name, self._wrapper)
 
         if self._slot_kind == "item" and self._owner is not None:
             current = slot_read(self._owner, "item", self._slot)
@@ -1075,6 +1082,12 @@ class Binding:
 
     def _uninstall(self, *, missing_ok: bool) -> None:
         """Put the original back where the wrapper was."""
+
+        if self._mode == "attribute":
+            uninstall_attribute(
+                self._target, self._name, self._wrapper, missing_ok=missing_ok
+            )
+            return
 
         if self._slot_kind != "item" or self._owner is None:
             unwrap_object(
