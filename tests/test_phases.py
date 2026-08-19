@@ -410,3 +410,200 @@ def test_exactly_n_calls_run_under_a_count_phase_with_concurrent_callers() -> No
 
     assert results.count("first") == 50
     assert results.count("second") == 150
+
+
+# ---------------------------------------------------------------------------
+# returns_from(): sequences
+# ---------------------------------------------------------------------------
+
+
+def test_returns_from_yields_successive_values_lazily() -> None:
+    drawn: list[int] = []
+
+    def numbers() -> Any:
+        for n in (10, 20, 30):
+            drawn.append(n)
+            yield n
+
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from(numbers())
+
+    with lookup, timeline() as tape:
+        gateway = Gateway()
+        assert drawn == []
+        assert gateway.charge(1) == 10
+        assert drawn == [10]
+        assert gateway.charge(1) == 20
+        assert gateway.charge(1) == 30
+
+    assert all(event.injected for event in tape.all)
+
+
+def test_exhaustion_hands_the_call_to_the_successor() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from([1, 2])
+
+    settled = lookup.on_call.then()
+    settled.returns("default")
+
+    with lookup, timeline() as tape:
+        gateway = Gateway()
+        assert [gateway.charge(1) for _ in range(4)] == [1, 2, "default", "default"]
+
+    assert lookup.phase == 1
+    assert [event.phase for event in tape.all] == [0, 0, 1, 1]
+
+
+def test_exhaustion_then_pass_through_and_the_event_is_restamped() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from(["a"])
+    lookup.on_call.then()
+
+    with lookup, timeline() as tape:
+        gateway = Gateway()
+        assert gateway.charge(1) == "a"
+        assert gateway.charge(2) == {"id": "ch_2", "amount": 2}
+
+    second = tape.all[1]
+    assert second.phase == 1
+    assert not second.injected
+
+
+def test_exhaustion_with_no_successor_raises() -> None:
+    from wrapture import SequenceExhaustedError
+
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from(iter([1]))
+
+    with lookup:
+        gateway = Gateway()
+        assert gateway.charge(1) == 1
+
+        with pytest.raises(SequenceExhaustedError, match="phase 0 is exhausted"):
+            gateway.charge(1)
+
+        # and stays that way
+
+        with pytest.raises(SequenceExhaustedError):
+            gateway.charge(1)
+
+
+def test_a_count_exit_still_applies_to_a_sequence_phase() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from([1, 2, 3, 4])
+    lookup.on_call.then(after=2).returns("cut")
+
+    with lookup:
+        gateway = Gateway()
+        assert [gateway.charge(1) for _ in range(3)] == [1, 2, "cut"]
+
+
+def test_stages_wrap_each_value_from_the_sequence() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from([1, 2, 3])
+    lookup.on_call.transforms_result(lambda n: n * 10)
+
+    # Stages compose in the order added, so the transform is outermost
+    # and the check sees the raw value.
+
+    def refuse_two(n: int) -> None:
+        if n == 2:
+            raise ValueError("two")
+
+    lookup.on_call.validates_result(refuse_two)
+
+    with lookup:
+        gateway = Gateway()
+        assert gateway.charge(1) == 10
+        with pytest.raises(ValueError, match="two"):
+            gateway.charge(1)
+        assert gateway.charge(1) == 30
+
+
+def test_apply_restarts_a_list_sequence_but_a_generator_continues() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from([1, 2])
+    lookup.on_call.then().returns("done")
+
+    gateway = Gateway()
+
+    with lookup:
+        assert [gateway.charge(1) for _ in range(3)] == [1, 2, "done"]
+
+    with lookup:
+        assert [gateway.charge(1) for _ in range(3)] == [1, 2, "done"]
+
+    generated = binding(Gateway, "charge")
+    generated.on_call.returns_from(n for n in (1, 2, 3))
+    generated.on_call.then().returns("done")
+
+    with generated:
+        assert gateway.charge(1) == 1
+
+    with generated:
+        assert [gateway.charge(1) for _ in range(3)] == [2, 3, "done"]
+
+
+def test_a_new_terminal_or_passes_through_drops_the_sequence() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from([1, 2])
+    lookup.on_call.returns("fixed")
+
+    with lookup:
+        gateway = Gateway()
+        assert [gateway.charge(1) for _ in range(3)] == ["fixed"] * 3
+
+    lookup.on_call.returns_from([1, 2])
+    lookup.on_call.passes_through()
+
+    with lookup:
+        assert gateway.charge(1)["id"] == "ch_1"
+
+
+def test_random_random_can_be_made_deterministic() -> None:
+    import random
+
+    with binding(random, "random").on_call.returns_from([0.1, 0.9, 0.5]):
+        assert [random.random() for _ in range(3)] == [0.1, 0.9, 0.5]
+
+    with binding(random.Random, "random").on_call.returns_from([0.25, 0.75]):
+        own = random.Random()
+        assert [own.random() for _ in range(2)] == [0.25, 0.75]
+
+    assert 0.0 <= random.random() < 1.0
+
+
+def test_attribute_reads_draw_from_a_sequence() -> None:
+    retries = binding(Settings, "retries")
+    retries.on_get.returns_from([1, 2])
+
+    steady = retries.on_get.then()
+    steady.returns(5)
+
+    with retries:
+        settings = Settings()
+        assert [settings.retries for _ in range(4)] == [1, 2, 5, 5]
+
+    assert retries.on_get.phase == 1
+
+
+def test_concurrent_callers_each_draw_one_value() -> None:
+    lookup = binding(Gateway, "charge")
+    lookup.on_call.returns_from(range(200))
+    lookup.on_call.then().returns("done")
+
+    gateway = Gateway()
+    start = threading.Barrier(8)
+
+    def worker() -> list[Any]:
+        start.wait()
+        return [gateway.charge(1) for _ in range(30)]
+
+    with lookup, ThreadPoolExecutor(max_workers=8) as pool:
+        results = [
+            item for batch in pool.map(lambda _: worker(), range(8)) for item in batch
+        ]
+
+    numbers = sorted(item for item in results if item != "done")
+    assert numbers == list(range(200))
+    assert results.count("done") == 40

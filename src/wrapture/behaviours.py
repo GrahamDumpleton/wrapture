@@ -15,7 +15,8 @@ what happens at the centre and replaces any previous terminal.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 if TYPE_CHECKING:
@@ -97,6 +98,15 @@ def _stage_wrapper(stage: StageFunction, nxt: WrapperFunction) -> WrapperFunctio
     return call
 
 
+class _Exhausted(BaseException):
+    """Raised by a returns_from() terminal when its sequence runs out.
+
+    A BaseException so that stages catching Exception around the rest of
+    the pipeline do not swallow it; the binding's dispatch turns it into
+    a hand-over to the successor phase.
+    """
+
+
 class Phase:
     """One phase of a binding's behaviour for a single operation.
 
@@ -116,6 +126,9 @@ class Phase:
         "successor",
         "exit",
         "handled",
+        "source",
+        "iterator",
+        "draw_lock",
     )
 
     def __init__(self, index: int = 0) -> None:
@@ -133,6 +146,14 @@ class Phase:
         self.exit: tuple[str, Any] | None = None
         self.handled = 0
 
+        # A returns_from() sequence: the iterable as given, so apply()
+        # can restart it with a fresh iter(), the live iterator, and a
+        # lock so concurrent operations draw one value each.
+
+        self.source: Iterable[Any] | None = None
+        self.iterator: Iterator[Any] | None = None
+        self.draw_lock: threading.RLock | None = None
+
     @property
     def configured(self) -> bool:
         """Whether any stage or terminal has been set."""
@@ -143,6 +164,42 @@ class Phase:
         self.terminal = fn
         self.injected = injected
         self._composed = None
+        self.source = None
+        self.iterator = None
+        self.draw_lock = None
+
+    def set_sequence(self, iterable: Iterable[Any]) -> None:
+        """Make the terminal draw successive values from `iterable`."""
+
+        phase = self
+
+        def draw(
+            nxt: WrappedFunction,
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            assert phase.iterator is not None and phase.draw_lock is not None
+
+            with phase.draw_lock:
+                try:
+                    return next(phase.iterator)
+                except StopIteration:
+                    raise _Exhausted from None
+
+        self.set_terminal(draw, injected=True)
+        self.source = iterable
+        self.iterator = iter(iterable)
+        self.draw_lock = threading.RLock()
+
+    def restart(self) -> None:
+        """Reset the handled count and restart any sequence from the
+        iterable it was given."""
+
+        self.handled = 0
+
+        if self.source is not None:
+            self.iterator = iter(self.source)
 
     def add_stage(self, fn: StageFunction) -> None:
         self.stages.append(fn)
@@ -155,6 +212,9 @@ class Phase:
         self.terminal = None
         self.injected = False
         self._composed = None
+        self.source = None
+        self.iterator = None
+        self.draw_lock = None
 
     def behaviour(self) -> WrapperFunction | None:
         """The composed pipeline, or None when nothing is configured."""
@@ -297,6 +357,20 @@ class _CallVerbs[R](_Behaviour[R]):
 
         return self._terminal(lambda nxt, i, a, k: value, injected=True)
 
+    def returns_from(self, iterable: Iterable[Any]) -> R:
+        """Return the next value of `iterable` on each call; the real
+        callable is never invoked. Terminal.
+
+        The iterable is consumed lazily, one value per call, so a
+        generator or itertools.cycle() works, and iter() is called on it
+        afresh at each apply(). When it runs out the phase ends and the
+        call that found it empty is handled by the successor phase; with
+        no successor that call raises SequenceExhaustedError.
+        """
+
+        self._current().set_sequence(iterable)
+        return self._done()
+
     def decorates(self, fn: WrapperFunction) -> R:
         """Wrap the real callable: fn(wrapped, instance, args, kwargs).
 
@@ -417,6 +491,21 @@ class _GetVerbs[R](_Behaviour[R]):
         """Reading gives `value`; the real read never happens. Terminal."""
 
         return self._terminal(lambda nxt, i, a, k: value, injected=True)
+
+    def returns_from(self, iterable: Iterable[Any]) -> R:
+        """Reading gives the next value of `iterable` on each read; the
+        real read never happens. Terminal.
+
+        Consumed lazily, one value per read, and restarted with iter()
+        at each apply(). When it runs out the phase ends and the read
+        that found it empty is handled by the successor phase; with no
+        successor that read raises SequenceExhaustedError. Reads are
+        easy to trigger by accident (repr, hasattr, a debugger), so pair
+        a sequence with a successor or use itertools.cycle().
+        """
+
+        self._current().set_sequence(iterable)
+        return self._done()
 
     def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> R:
         """Wrap the real read: fn(read, instance) -> value, where read()

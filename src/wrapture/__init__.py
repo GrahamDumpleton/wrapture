@@ -73,6 +73,7 @@ from .exceptions import (
     NeverAppliedError,
     NotImplementedYetError,
     RecordingGapWarning,
+    SequenceExhaustedError,
     SinkErrorWarning,
     WrongModeError,
 )
@@ -178,6 +179,7 @@ __all__ = [
     "Printer",
     "RecordingGapWarning",
     "Sample",
+    "SequenceExhaustedError",
     "SetBehaviour",
     "SetPhase",
     "SetupEntry",

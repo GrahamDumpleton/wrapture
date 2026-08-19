@@ -33,6 +33,7 @@ from .behaviours import (
     WrappedFunction,
     WrapperFunction,
     _Behaviour,
+    _Exhausted,
 )
 from .capture import (
     NONE,
@@ -50,6 +51,7 @@ from .exceptions import (
     ExpectationNotMetError,
     NeverAppliedError,
     RecordingGapWarning,
+    SequenceExhaustedError,
     WrongModeError,
 )
 from .sinks import (
@@ -1027,15 +1029,12 @@ class Binding:
             kwargs: dict[str, Any],
         ) -> Any:
             phase = bnd._select("call")
-            behaviour = None if phase is None else phase.behaviour()
 
             # when=False is a behaviour-only binding: it never records,
             # counts nothing, and takes no part in gap detection.
 
             if bnd._when is False:
-                if behaviour is None:
-                    return wrapped(*args, **kwargs)
-                return behaviour(wrapped, instance, args, kwargs)
+                return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
 
             active = _active_sinks()
 
@@ -1051,9 +1050,7 @@ class Binding:
                 if not active and not _in_recorder.get() and _timelines_active():
                     bnd._note_missed_call()
 
-                if behaviour is None:
-                    return wrapped(*args, **kwargs)
-                return behaviour(wrapped, instance, args, kwargs)
+                return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
 
             # The per-call predicate decides whether this operation is
             # recorded at all, before any event is constructed. It runs
@@ -1069,10 +1066,7 @@ class Binding:
 
                 if not wanted:
                     bnd._filtered_calls += 1
-
-                    if behaviour is None:
-                        return wrapped(*args, **kwargs)
-                    return behaviour(wrapped, instance, args, kwargs)
+                    return bnd._invoke("call", phase, wrapped, instance, args, kwargs)
 
             # Create the event under the recorder guard, so anything
             # the bookkeeping calls that is itself observed passes
@@ -1101,12 +1095,16 @@ class Binding:
             event.started = started
 
             try:
-                if behaviour is None:
-                    outcome = wrapped(*args, **kwargs)
-                else:
-                    outcome = behaviour(
-                        _forwarder(wrapped, event), instance, args, kwargs
-                    )
+                outcome = bnd._invoke(
+                    "call",
+                    phase,
+                    wrapped,
+                    instance,
+                    args,
+                    kwargs,
+                    event,
+                    via=_forwarder(wrapped, event),
+                )
             except BaseException as exc:
                 event.duration = time.perf_counter() - started
                 event.exception = exc
@@ -1289,6 +1287,62 @@ class Binding:
 
             return active
 
+    def _invoke(
+        self,
+        operation: str,
+        phase: Phase | None,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        event: Event | None = None,
+        via: WrappedFunction | None = None,
+    ) -> Any:
+        """Run the operation under `phase`, or the real operation when
+        there is none.
+
+        Behaviour receives `via` in place of `wrapped` when given: the
+        recording path hands over a forwarder that notes what behaviour
+        actually passed on. A returns_from() sequence that runs out ends
+        its phase here: the operation is re-dispatched to the successor,
+        and the event, when one is being recorded, is restamped with the
+        phase that actually handled it.
+        """
+
+        while True:
+            behaviour = None if phase is None else phase.behaviour()
+
+            try:
+                if behaviour is None:
+                    return wrapped(*args, **kwargs)
+                return behaviour(via or wrapped, instance, args, kwargs)
+            except _Exhausted:
+                assert phase is not None
+                phase = self._exhausted(operation, phase)
+
+                if event is not None:
+                    event.injected = phase.injected
+                    event.phase = self._phase_of(phase)
+
+    def _exhausted(self, operation: str, phase: Phase) -> Phase:
+        """Hand over from a phase whose sequence ran out, returning the
+        phase that takes the operation."""
+
+        with self._phase_lock:
+            if phase.successor is None:
+                raise SequenceExhaustedError(
+                    f"{self._label}: the returns_from() sequence of phase"
+                    f" {phase.index} is exhausted and no phase follows it;"
+                    f" add one with then() or supply an endless sequence"
+                )
+
+            if self._active.get(operation) is phase:
+                self._active[operation] = phase.successor
+
+        successor = self._select(operation)
+        assert successor is not None
+        return successor
+
     def _advance(self, operation: str) -> bool:
         """Move the operation to its successor phase; False when it is
         already on the last one."""
@@ -1311,7 +1365,7 @@ class Binding:
 
                 phase: Phase | None = head
                 while phase is not None:
-                    phase.handled = 0
+                    phase.restart()
                     phase = phase.successor
 
     def _phase_index(self, operation: str) -> int:

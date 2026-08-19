@@ -118,7 +118,7 @@ def _record(
     kind: EventKind,
     instance: Any,
     attribute: str,
-    operate: Callable[[], Any],
+    operate: Callable[[Event | None], Any],
     value: Any = MISSING,
     phase: Phase | None = None,
 ) -> Any:
@@ -134,14 +134,14 @@ def _record(
     # nothing, and takes no part in gap detection.
 
     if binding._when is False:
-        return operate()
+        return operate(None)
 
     active = _active_sinks()
     if not active or _in_recorder.get():
         if not active and not _in_recorder.get() and _timelines_active():
             binding._note_missed_call()
 
-        return operate()
+        return operate(None)
 
     # The per-access predicate, mapped onto call shape the same way
     # behaviour stages are: a set passes the written value as the one
@@ -158,7 +158,7 @@ def _record(
 
         if not wanted:
             binding._filtered_calls += 1
-            return operate()
+            return operate(None)
 
     # The written value and the prior value are inbound data, so they
     # capture on the arguments axis, under the attribute's name so a
@@ -211,7 +211,7 @@ def _record(
     event.started = started
 
     try:
-        outcome = operate()
+        outcome = operate(event)
     except BaseException as exc:
         event.duration = time.perf_counter() - started
         event.exception = exc
@@ -266,15 +266,12 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return _read(prior, attribute, instance, owner)
 
         phase = binding._select("get")
-        behaviour = None if phase is None else phase.behaviour()
 
         def read() -> Any:
             return _read(prior, attribute, instance, owner)
 
-        def operate() -> Any:
-            if behaviour is None:
-                return read()
-            return behaviour(read, instance, (), {})
+        def operate(event: Event | None) -> Any:
+            return binding._invoke("get", phase, read, instance, (), {}, event)
 
         return _record(binding, "get", instance, attribute, operate, phase=phase)
 
@@ -289,16 +286,12 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return
 
         phase = binding._select("set")
-        behaviour = None if phase is None else phase.behaviour()
 
         def write(new_value: Any) -> None:
             _write(prior, attribute, instance, new_value)
 
-        def operate() -> Any:
-            if behaviour is None:
-                write(value)
-                return None
-            return behaviour(write, instance, (value,), {})
+        def operate(event: Event | None) -> Any:
+            return binding._invoke("set", phase, write, instance, (value,), {}, event)
 
         _record(binding, "set", instance, attribute, operate, value=value, phase=phase)
 
@@ -313,16 +306,12 @@ class AttributeDescriptor(BaseObjectProxy[Any]):
             return
 
         phase = binding._select("delete")
-        behaviour = None if phase is None else phase.behaviour()
 
         def erase() -> None:
             _delete(prior, attribute, instance)
 
-        def operate() -> Any:
-            if behaviour is None:
-                erase()
-                return None
-            return behaviour(erase, instance, (), {})
+        def operate(event: Event | None) -> Any:
+            return binding._invoke("delete", phase, erase, instance, (), {}, event)
 
         _record(binding, "delete", instance, attribute, operate, phase=phase)
 
