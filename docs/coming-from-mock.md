@@ -11,6 +11,7 @@ The quick translation, expanded below:
 |---|---|
 | `patch.object(C, "m", return_value=v)` | `binding(C, "m").on_call.returns(v)` |
 | `patch.object(C, "m", side_effect=exc)` | `binding(C, "m").on_call.raises(exc)` |
+| `patch.object(C, "m", autospec=True, ...)` | the default; `strict=False` to opt out |
 | `side_effect=fn` (fabricate per call) | `on_call.decorates(fn)` |
 | `side_effect=[a, b, exc]` (a sequence) | `on_call.returns_from([a, b])`, then `then().raises(exc)` |
 | `Mock(wraps=real)` | `on_call.transforms_args(fn)` / `transforms_result(fn)` / `decorates(fn)` |
@@ -49,6 +50,16 @@ spec checking was configured. wrapture has no fabricating object
 anywhere: a binding names one real attribute, a misspelled name raises
 `AttributeError` at creation, and everything the binding does not
 explicitly change stays the real code.
+
+The same goes for the call itself. mock validates a stubbed call's
+arguments against the real signature only if `autospec=True` (or
+`create_autospec`) was asked for; without it, `charge(500, bogus=True)`
+returns the stub happily and the drift shows up in production. A
+wrapture binding is strict by default: a call that `returns()`,
+`raises()` or `decorates()` would answer without reaching the real
+method is bound to the method's signature first and raises `TypeError`
+as the real call would. `binding(..., strict=False)` turns that off for
+the rare patch that means to accept a different shape.
 
 ## Injecting a failure
 

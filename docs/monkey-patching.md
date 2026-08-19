@@ -108,6 +108,30 @@ matching what `unittest.mock` does with `return_value` and `side_effect`.
 Everything else in the namespace runs the real callable and intervenes
 around it.
 
+A call the real callable never sees is still checked against its
+signature. A binding is **strict** by default: whenever the active
+behaviour has a terminal (`returns`, `raises`, `returns_from` or
+`decorates`), the call is bound to the target's signature first, and
+one that does not fit raises `TypeError` exactly as the real call
+would, before anything is counted or recorded. That is the safety
+`create_autospec` gives a mock, without asking for it: a call site
+that drifts from the signature cannot pass on the strength of a
+stub. Pipelines without a terminal run the real callable, which does
+its own checking, so a `transforms_args` that deliberately adapts the
+call shape is left alone; targets whose signature cannot be read
+(some C-implemented callables) are not checked.
+`binding(..., strict=False)` switches the check off, for the rare
+patch that means to accept a call shape the target would not, say a
+decorator that takes a test-only keyword.
+
+```python
+charge = wrapture.binding(Gateway, "charge")
+charge.on_call.returns({"id": "stub"})
+
+with charge:
+    gateway.charge(500, bogus=True)   # TypeError: Gateway.charge (stubbed): got an unexpected keyword argument 'bogus'
+```
+
 ### Transforming and validating
 
 ```python
