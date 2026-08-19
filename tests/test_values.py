@@ -90,7 +90,9 @@ def test_a_value_binding_has_no_namespaces_events_or_expectations() -> None:
     with pytest.raises(WrongModeError, match="cannot carry an expectation"):
         timeout.expect_once()
 
-    with pytest.raises(WrongModeError, match="only available on a value binding"):
+    with pytest.raises(
+        WrongModeError, match="only available on a value or mapping binding"
+    ):
         binding(Client, "base_url").overrides("x")
 
 

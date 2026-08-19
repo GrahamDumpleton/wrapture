@@ -120,9 +120,9 @@ behaviour has a terminal (`returns`, `raises`, `returns_from` or
 `decorates`), the call is bound to the target's signature first, and
 one that does not fit raises `TypeError` exactly as the real call
 would, before anything is counted or recorded. That is the safety
-`create_autospec` gives a mock, without asking for it: a call site
-that drifts from the signature cannot pass on the strength of a
-stub. Pipelines without a terminal run the real callable, which does
+`unittest.mock`'s `create_autospec` gives a mock, without asking for
+it: a call site that drifts from the signature cannot pass on the
+strength of a stub. Pipelines without a terminal run the real callable, which does
 its own checking, so a `transforms_args` that deliberately adapts the
 call shape is left alone; targets whose signature cannot be read
 (some C-implemented callables) are not checked.
@@ -369,16 +369,19 @@ with wrapture.binding(random, "random").on_call.returns_from([0.1, 0.9, 0.5]):
 `random.random` is a module attribute, so this catches
 `random.random()` callers; code holding its own `random.Random()`
 instance is covered by binding `random.Random` instead, and
-`from random import random` at import time escapes, as with mock.
+`from random import random` at import time escapes, as it does from
+a `unittest.mock` patch.
 
 Stages compose around each drawn value as they do around any
 terminal, so `validates_result()` on the same phase can refuse a
 particular value when it comes through.
 
-### mock's side_effect list, spelled out
+### unittest.mock's side_effect list, spelled out
 
-`side_effect=[a, b, Err]` becomes one phase per regime, values and
-exceptions kept apart:
+`unittest.mock` accepts a list for `side_effect`, consumed one entry
+per call, with exceptions raised and anything else returned. With
+phases, `side_effect=[a, b, Err]` becomes one phase per regime, values
+and exceptions kept apart:
 
 ```python
 lookup.on_call.returns_from([a, b])
@@ -736,7 +739,9 @@ into. Rebinding the *attribute* (`binding("config", attr="SETTINGS").overrides({
 is different: it gives `config.SETTINGS` a new
 object, which reaches code that reads it through the module and not
 code that copied the name at import; use `item=` on the dict itself
-when the point is a changed entry.
+when the point is a changed entry, or a
+[mapping binding](#mapping-bindings-substituting-a-mappings-content) when the point is
+the whole content.
 
 The verbs may be called before or after `apply()`, and on an applied
 binding they take effect at once, so the fixture shape is one binding
@@ -790,8 +795,8 @@ Some cases worth knowing:
   [interception form](#attribute-bindings), which sees and can shape
   each read; the value binding just holds the value.
 - A stand-in module: `binding(sys.modules, item="boto3").overrides(fake)`,
-  affecting imports made while applied, as `patch.dict(sys.modules, ...)`
-  does.
+  affecting imports made while applied, as
+  `unittest.mock.patch.dict(sys.modules, ...)` does.
 - Replacing a function wholesale rather than wrapping it,
   `binding("myapp.clock", attr="now").overrides(lambda: FIXED)`, when
   a whole different object is wanted; `on_call.returns()` or
@@ -818,6 +823,84 @@ Some cases worth knowing:
   when the callable does sit in a mapping; the usual caveat applies,
   as for a module function, that whoever pulled `HANDLERS["GET"]`
   into a local before `apply()` holds the original.
+
+## Mapping bindings: substituting a mapping's content
+
+A value binding changes one slot. Sometimes the thing to change is the
+whole content of one mapping: the settings dict should hold exactly
+these entries for the test, or the environment should be empty, and
+every holder of that dict, including code that did `from config import
+SETTINGS` at import time, should see it. That is `mode="mapping"` on a
+location whose object is a mutable mapping; the object is mutated in
+place and never replaced:
+
+```python
+>>> import types, wrapture
+>>> config = types.ModuleType("config")
+>>> config.SETTINGS = {"currency": "USD", "tax_rate": 0.2}
+>>> SETTINGS = config.SETTINGS            # a holder, as `from config import SETTINGS`
+
+>>> settings = wrapture.binding(config, "SETTINGS", mode="mapping")
+>>> settings.mode
+'mapping'
+
+>>> with settings.overrides({"currency": "EUR"}):      # exactly these entries
+...     print(SETTINGS, config.SETTINGS is SETTINGS)
+{'currency': 'EUR'} True
+
+>>> with settings.updates({"currency": "EUR"}):        # merged over what is there
+...     print(SETTINGS)
+{'currency': 'EUR', 'tax_rate': 0.2}
+
+>>> SETTINGS                                          # put back, in order
+{'currency': 'USD', 'tax_rate': 0.2}
+
+```
+
+Three verbs: `overrides(values)` makes `values` the whole content
+while applied, and `overrides({})` is the empty mapping (there is no
+`hides()` here, since a mapping's absent content is just no entries);
+`updates(values)` merges the named keys over the original content;
+`passes_through()` leaves the content as it is. For readers coming
+from `unittest.mock`, `overrides()` is `patch.dict(d, values,
+clear=True)` and `updates()` is `patch.dict(d, values)`; see
+[coming from mock](coming-from-mock.md). As with a value binding the
+verbs may be called before or after `apply()`, take effect at once on
+an applied binding, and `remove()` restores exactly the entries that
+were there at `apply()`, in their order. `values` is copied when the
+verb is called, so changing the dict you passed afterwards changes
+nothing. The entries' values are the same objects, not copies, so a
+nested list or dict mutated during the test stays mutated (as it does
+with `patch.dict`).
+
+The target can be the mapping itself, `binding(os.environ,
+mode="mapping")`, or any location form that reaches it, and `item=`
+takes the mode too for a mapping held in an entry:
+`binding(config, "DATABASE", item="primary", mode="mapping")`.
+`attr=` does not: the object held in an attribute is what the
+positional form names. A clean environment for a test is:
+
+```python
+with wrapture.binding(os, "environ", mode="mapping").overrides({"HOME": "/tmp/h"}):
+    ...
+```
+
+Which of the three dict spellings to reach for:
+
+| want | spelling |
+|---|---|
+| one entry changed or absent | `binding(d, item="k").overrides(v)` / `.hides()` |
+| `config.SETTINGS` to be a different object (holders of the old one unaffected) | `binding("config", attr="SETTINGS").overrides({...})` |
+| the one dict to hold these entries, for every holder | `binding(d, mode="mapping").overrides({...})` / `.updates({...})` |
+
+Everything else is as for value bindings: `suspend()` puts the
+content back until `resume()`, `active` reports whether the content
+still matches what the binding wrote (for `updates()`, whether its own
+keys still hold their values), groups apply and unwind in order, so a
+mapping binding and an `item=` binding on the same dict stack, nothing
+is recorded, and the recording options are refused. Two mapping
+bindings on one dict unwind correctly when removed in reverse order;
+removed out of order, each restores what it saw at its own `apply()`.
 
 ## Iterators and generators
 

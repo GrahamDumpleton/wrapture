@@ -1,14 +1,18 @@
-"""Slot access for value bindings.
+"""Slot access for value bindings, and content access for mapping bindings.
 
 A value binding holds a value in a slot of an owner object for as long
 as it is applied: an attribute (`attr=`) or a mapping entry (`item=`).
 These helpers read, write, delete and test the slot uniformly for the
-two kinds, and capture the prior state that remove() puts back.
+two kinds, and capture the prior state that remove() puts back. A
+mapping binding does the same for the whole content of one mapping
+object, which is mutated in place so every holder of it sees the
+change; its helpers snapshot, write and restore that content.
 """
 
 from __future__ import annotations
 
 import importlib
+from collections.abc import MutableMapping
 from typing import Any
 
 import wrapt
@@ -93,3 +97,67 @@ def slot_restore(owner: Any, kind: str, key: Any, prior: Any) -> None:
         slot_delete(owner, kind, key)
     else:
         slot_write(owner, kind, key, prior)
+
+
+# -- whole-mapping content ------------------------------------------------
+
+
+def check_mapping(label: str, obj: Any) -> Any:
+    """Refuse anything a mapping binding cannot substitute the content
+    of: it needs the mutable mapping protocol (clear, update, items),
+    so a read-only proxy or a non-mapping is a TypeError."""
+
+    if not isinstance(obj, MutableMapping):
+        raise TypeError(
+            f"{label}: mode='mapping' needs a mutable mapping whose content"
+            f" is substituted in place, got {type(obj).__name__}"
+        )
+
+    return obj
+
+
+def mapping_snapshot(mapping: Any) -> list[tuple[Any, Any]]:
+    """The content at apply(), as (key, value) pairs in order, so
+    remove() can put back exactly what was there."""
+
+    return list(mapping.items())
+
+
+def mapping_restore(mapping: Any, snapshot: Any) -> None:
+    """Make the content exactly the snapshot again, in its order."""
+
+    if snapshot is MISSING:
+        return
+
+    mapping.clear()
+    for key, value in snapshot:
+        mapping[key] = value
+
+
+def mapping_write(mapping: Any, state: str, values: Any, snapshot: Any) -> None:
+    """Put the content into the configured state, relative to the
+    snapshot taken at apply(): `overrides` replaces it, `updates`
+    merges over the original content, and anything else restores it."""
+
+    if state == "overrides":
+        mapping.clear()
+        mapping.update(values)
+    elif state == "updates":
+        mapping_restore(mapping, snapshot)
+        mapping.update(values)
+    else:
+        mapping_restore(mapping, snapshot)
+
+
+def mapping_matches(mapping: Any, state: str, values: Any, snapshot: Any) -> bool:
+    """Whether the content is still what the binding put there."""
+
+    if state == "overrides":
+        return dict(mapping.items()) == dict(values)
+
+    if state == "updates":
+        return all(
+            key in mapping and mapping[key] == value for key, value in values.items()
+        )
+
+    return dict(mapping.items()) == dict(snapshot)

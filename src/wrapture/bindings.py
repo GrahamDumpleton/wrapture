@@ -15,7 +15,14 @@ import time
 import types
 import warnings
 import weakref
-from collections.abc import AsyncGenerator, Callable, Generator, Iterable, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    Callable,
+    Generator,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from fnmatch import fnmatchcase
 from typing import Any, Protocol, Self, TypeVar, cast
 
@@ -76,6 +83,11 @@ from .timeline import (
     _timelines_active,
 )
 from .values import (
+    check_mapping,
+    mapping_matches,
+    mapping_restore,
+    mapping_snapshot,
+    mapping_write,
     resolve_owner,
     slot_delete,
     slot_prior,
@@ -151,6 +163,12 @@ def _reject_deferred(target: Any) -> None:
             f" first and bind against it, or create the binding inside a"
             f" `wrapture.when_imported` hook for that module."
         )
+
+
+# The modes that hold state in place rather than installing a wrapper:
+# a value binding holds a slot, a mapping binding holds content.
+
+_HOLDING_MODES = ("value", "mapping")
 
 
 def _detect_mode(target: Any, name: str, missing_ok: bool = False) -> str:
@@ -576,12 +594,18 @@ class Binding:
                 "mode='value' needs a slot: name the owner positionally and"
                 " the slot with attr= or item="
             )
+        elif mode == "mapping":
+            self._check_holding_options(
+                "mapping", capture, capture_args, capture_result, stack, when
+            )
 
         # Collapse the location to an owner and a dotted name, so the
         # colon spelling, the multi-step spelling and the dotted-name
-        # spelling of the same member are one binding from here on.
+        # spelling of the same member are one binding from here on. A
+        # bare object is a location only when it is itself what is
+        # bound: the owner of a slot, or the mapping whose content is.
 
-        target, name = _location(target, attrs, allow_bare=slot)
+        target, name = _location(target, attrs, allow_bare=slot or mode == "mapping")
 
         stack = _resolve_depth(stack)
         if stack is not None and stack < 1:
@@ -604,9 +628,10 @@ class Binding:
 
         if mode is None:
             mode = _detect_mode(target, name, missing_ok=missing_ok)
-        elif mode not in ("callable", "attribute", "wsgi", "asgi", "value"):
+        elif mode not in ("callable", "attribute", "wsgi", "asgi", "value", "mapping"):
             raise ValueError(
-                f"mode must be 'callable', 'attribute', 'wsgi' or 'asgi', got {mode!r}"
+                f"mode must be 'callable', 'attribute', 'wsgi', 'asgi' or"
+                f" 'mapping', got {mode!r}"
             )
 
         # What this binding is bound to.
@@ -631,9 +656,29 @@ class Binding:
         if slot:
             self._path = self._slot_path(target, name)
             self._label = label or self._slot_label(target, name)
+        elif mode == "mapping":
+            self._path = self._bare_path(target, name)
+            self._label = label or self._bare_label(target, name)
         else:
             self._path = _derive_path(target, name)
             self._label = label or self._default_label(target, name)
+
+        # The mapping whose content a mapping binding substitutes: the
+        # object at the location, or the entry an item= slot names.
+        # Resolved now, and checked to be a mutable mapping, so a bad
+        # location fails on the line that created the binding.
+
+        self._mapping: Any = None
+        if mode == "mapping":
+            if slot:
+                held = slot_read(self._owner, self._slot_kind, self._slot)
+                if held is MISSING:
+                    raise KeyError(
+                        f"{self._label}: the mapping has no entry {self._slot!r}"
+                    )
+            else:
+                held = resolve_owner(target, name)
+            self._mapping = check_mapping(self._label, held)
 
         # Capture policy overrides. None means follow whatever the sink
         # consuming the events declares; capture= is shorthand for both
@@ -731,6 +776,7 @@ class Binding:
             "callable",
             "wsgi",
             "asgi",
+            "mapping",
         ):
             if mode == "attribute":
                 raise TypeError(
@@ -738,19 +784,29 @@ class Binding:
                     " take mode='attribute'; bind the attribute on its class"
                 )
             raise ValueError(
-                f"mode must be 'value', 'callable', 'wsgi' or 'asgi' for item=,"
-                f" got {mode!r}"
+                f"mode must be 'value', 'callable', 'wsgi', 'asgi' or 'mapping'"
+                f" for item=, got {mode!r}"
             )
 
         if mode is None or mode == "value":
-            if any(option is not None for option in recording):
-                raise ValueError(
-                    "a value binding records nothing, so capture=, capture_args=,"
-                    " capture_result=, stack= and when= do not apply to it"
-                )
+            Binding._check_holding_options("value", *recording)
             return "value"
 
+        if mode == "mapping":
+            Binding._check_holding_options("mapping", *recording)
+
         return mode
+
+    @staticmethod
+    def _check_holding_options(mode: str, *recording: Any) -> None:
+        # A value or mapping binding records nothing, so for it the
+        # recording options are refused rather than silently ignored.
+
+        if any(option is not None for option in recording):
+            raise ValueError(
+                f"a {mode} binding records nothing, so capture=, capture_args=,"
+                f" capture_result=, stack= and when= do not apply to it"
+            )
 
     def _slot_label(self, target: Any, name: str) -> str:
         # An owner given as an object with no name of its own (an
@@ -769,6 +825,25 @@ class Binding:
 
         return f"{owner}[{self._slot!r}]"
 
+    def _bare_label(self, target: Any, name: str) -> str:
+        # The label of the object at a location with no slot: the
+        # member's own label when there are steps, else the object's
+        # name or, failing that, its type, as for a slot's owner.
+
+        if name:
+            return self._default_label(target, name)
+
+        if isinstance(target, str):
+            return target
+
+        return getattr(target, "__name__", None) or type(target).__qualname__
+
+    def _bare_path(self, target: Any, name: str) -> str:
+        if name:
+            return _derive_path(target, name)
+
+        return _derive_path(target, name).rstrip(".").rstrip(":")
+
     def _slot_path(self, target: Any, name: str) -> str:
         owner = _derive_path(target, name).rstrip(".")
 
@@ -782,15 +857,17 @@ class Binding:
 
     @property
     def mode(self) -> str:
-        """'callable', 'attribute', 'wsgi', 'asgi' or 'value'.
+        """'callable', 'attribute', 'wsgi', 'asgi', 'value' or 'mapping'.
 
         Names what is bound, not the operation: a 'callable' binding
         exposes on_call, an 'attribute' binding exposes on_get / on_set /
-        on_delete, the request modes expose on_request, and a 'value'
+        on_delete, the request modes expose on_request, a 'value'
         binding (a slot named with attr= or item=) exposes overrides(),
-        hides() and passes_through(). Detected at creation, except the
-        request modes, which are always explicit, and value mode, which
-        the slot keyword selects.
+        hides() and passes_through(), and a 'mapping' binding (the
+        content of one mapping object) exposes overrides(), updates()
+        and passes_through(). Detected at creation, except the request
+        modes and mapping mode, which are always explicit, and value
+        mode, which the slot keyword selects.
         """
 
         return self._mode
@@ -849,6 +926,7 @@ class Binding:
             "wsgi": "on_request",
             "asgi": "on_request",
             "value": "overrides(), hides() or passes_through()",
+            "mapping": "overrides(), updates() or passes_through()",
         }[self._mode]
         article = "an" if self._mode == "attribute" else "a"
 
@@ -940,7 +1018,7 @@ class Binding:
         active / displaced.
         """
 
-        if self._mode == "value":
+        if self._mode in _HOLDING_MODES:
             return self._value_applied and self._slot_as_configured()
 
         if self._wrapper is None:
@@ -979,19 +1057,25 @@ class Binding:
                 f" not both."
             )
 
-        # A value binding has no wrapper: it notes what the slot holds
-        # and writes what it is configured to hold. Nothing else below
-        # applies to it.
+        # A value or mapping binding has no wrapper: it notes what the
+        # slot or the mapping holds and writes what it is configured to
+        # hold. Nothing else below applies to it.
 
-        if self._mode == "value":
-            self._prior = slot_prior(self._owner, self._slot_kind, self._slot)
+        if self._mode in _HOLDING_MODES:
+            self._note_prior()
 
             # Write before marking applied, so a slot that refuses the
             # value (os.environ given a non-string) leaves nothing to
-            # undo and the binding unapplied.
+            # undo and the binding unapplied; a mapping written part
+            # way is put back first.
 
             if not suspended:
-                self._write_slot()
+                try:
+                    self._write_slot()
+                except BaseException:
+                    self._restore_slot()
+                    self._prior = MISSING
+                    raise
 
             self._value_applied = True
             self._suspended = suspended
@@ -1122,8 +1206,8 @@ class Binding:
         binding puts the slot's prior state back until resume().
         """
 
-        if self._mode == "value" and self._value_applied and not self._suspended:
-            slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
+        if self._mode in _HOLDING_MODES and self._value_applied and not self._suspended:
+            self._restore_slot()
 
         self._suspended = True
         return self
@@ -1132,7 +1216,7 @@ class Binding:
         """Reactivate a suspended wrapper; a value binding writes its slot
         again."""
 
-        if self._mode == "value" and self._value_applied and self._suspended:
+        if self._mode in _HOLDING_MODES and self._value_applied and self._suspended:
             self._suspended = False
             self._write_slot()
             return self
@@ -1202,10 +1286,10 @@ class Binding:
         applied, and RuntimeError outside a timeline.
         """
 
-        if self._mode == "value":
+        if self._mode in _HOLDING_MODES:
             raise WrongModeError(
-                f"{self._label} is a value binding and records nothing; there"
-                f" are no events to read"
+                f"{self._label} is a {self._mode} binding and records nothing;"
+                f" there are no events to read"
             )
 
         if self._apply_count == 0:
@@ -1226,10 +1310,10 @@ class Binding:
         """Remove the wrapper. Idempotent. The binding can be applied
         again afterwards, starting unsuspended."""
 
-        if self._mode == "value":
+        if self._mode in _HOLDING_MODES:
             if self._value_applied:
                 if not self._suspended:
-                    slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
+                    self._restore_slot()
                 self._value_applied = False
                 self._suspended = False
                 self._prior = MISSING
@@ -1252,27 +1336,67 @@ class Binding:
     def __exit__(self, *exc: object) -> None:
         self.remove()
 
-    # -- value bindings ----------------------------------------------------
+    # -- value and mapping bindings ------------------------------------------
 
-    def _value_only(self, verb: str) -> None:
-        if self._mode != "value":
+    def _value_only(self, verb: str, *modes: str) -> None:
+        if self._mode not in modes:
+            if self._mode == "mapping" and verb == "hides":
+                raise WrongModeError(
+                    f"hides() is not available on a mapping binding; a"
+                    f" mapping's absent content is empty content, so use"
+                    f" overrides({{}}) on {self._label}"
+                )
+
+            if self._mode == "value" and verb == "updates":
+                raise WrongModeError(
+                    f"updates() is only available on a mapping binding"
+                    f" (mode='mapping'); {self._label} holds one slot, so"
+                    f" use overrides(value)"
+                )
+
+            wanted = (
+                "a value or mapping binding"
+                if len(modes) > 1
+                else (
+                    "a mapping binding (mode='mapping')"
+                    if modes == ("mapping",)
+                    else "a value binding (a slot named with attr= or item=)"
+                )
+            )
+            article = "an" if self._mode == "attribute" else "a"
             raise WrongModeError(
-                f"{verb}() is only available on a value binding (a slot named"
-                f" with attr= or item=); {self._label} is a {self._mode!r}"
-                f" binding"
+                f"{verb}() is only available on {wanted}; {self._label} is"
+                f" {article} {self._mode!r} binding"
             )
 
     def overrides(self, value: Any) -> Self:
-        """Hold `value` in the slot while applied. Value bindings only.
+        """Hold `value` in the slot while applied, or, on a mapping
+        binding, make `value` the mapping's whole content while applied
+        (exactly those entries, as `patch.dict(..., clear=True)` does;
+        `overrides({})` empties it). Value and mapping bindings only.
 
         Settable before or after apply(); on an applied binding the slot
-        is written at once. Returns self, so it chains into apply() or
-        the context manager.
+        or content is written at once. Returns self, so it chains into
+        apply() or the context manager.
         """
 
-        self._value_only("overrides")
-        self._holding = ("overrides", value)
-        self._write_slot_if_live()
+        self._value_only("overrides", "value", "mapping")
+
+        if self._mode == "mapping":
+            self._hold(("overrides", self._mapping_values("overrides", value)))
+        else:
+            self._hold(("overrides", value))
+
+        return self
+
+    def updates(self, values: Mapping[Any, Any]) -> Self:
+        """Merge `values` over the mapping's content while applied: the
+        named keys are set, every other entry is left as it was (as
+        `patch.dict(d, values)` does). Mapping bindings only. Settable
+        before or after apply(). Returns self."""
+
+        self._value_only("updates", "mapping")
+        self._hold(("updates", self._mapping_values("updates", values)))
         return self
 
     def hides(self) -> Self:
@@ -1280,32 +1404,73 @@ class Binding:
         unset, the key not in the mapping, the attribute not on the
         owner. Value bindings only. Returns self."""
 
-        self._value_only("hides")
-        self._holding = ("hides", None)
-        self._write_slot_if_live()
+        self._value_only("hides", "value")
+        self._hold(("hides", None))
         return self
 
     def passes_through(self) -> Self:
-        """Leave the slot as it really is: the initial state, and the way
-        back to it on an applied binding without removing it. Value
-        bindings only. Returns self."""
+        """Leave the slot, or the mapping's content, as it really is: the
+        initial state, and the way back to it on an applied binding
+        without removing it. Value and mapping bindings only. Returns
+        self."""
 
-        self._value_only("passes_through")
-        self._holding = ("through", None)
-        self._write_slot_if_live()
+        self._value_only("passes_through", "value", "mapping")
+        self._hold(("through", None))
         return self
 
-    def _write_slot_if_live(self) -> None:
-        if self._value_applied and not self._suspended:
+    def _mapping_values(self, verb: str, values: Any) -> dict[Any, Any]:
+        # What the binding writes is copied now, so a caller mutating
+        # their dict afterwards does not change a later write.
+
+        if not isinstance(values, Mapping):
+            raise TypeError(
+                f"{self._label}: {verb}() on a mapping binding takes a"
+                f" mapping of entries, got {type(values).__name__}"
+            )
+
+        return dict(values)
+
+    def _hold(self, holding: tuple[str, Any]) -> None:
+        # Adopt a configured state and, on a live binding, write it at
+        # once. A mapping written part way is put back and the previous
+        # configuration kept, so the binding still says what it holds.
+
+        previous = self._holding
+        self._holding = holding
+
+        if not (self._value_applied and not self._suspended):
+            return
+
+        try:
             self._write_slot()
+        except BaseException:
+            if self._mode == "mapping":
+                self._restore_slot()
+                self._holding = previous
+                self._write_slot()
+            raise
+
+    def _note_prior(self) -> None:
+        if self._mode == "mapping":
+            self._prior = mapping_snapshot(self._mapping)
+        else:
+            self._prior = slot_prior(self._owner, self._slot_kind, self._slot)
+
+    def _restore_slot(self) -> None:
+        if self._mode == "mapping":
+            mapping_restore(self._mapping, self._prior)
+        else:
+            slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
 
     def _write_slot(self) -> None:
-        # Put the slot into the configured state, relative to what it
-        # held when the binding was applied.
+        # Put the slot, or the mapping's content, into the configured
+        # state, relative to what it held when the binding was applied.
 
         state, value = self._holding
 
-        if state == "overrides":
+        if self._mode == "mapping":
+            mapping_write(self._mapping, state, value, self._prior)
+        elif state == "overrides":
             slot_write(self._owner, self._slot_kind, self._slot, value)
         elif state == "hides":
             slot_delete(self._owner, self._slot_kind, self._slot)
@@ -1313,12 +1478,18 @@ class Binding:
             slot_restore(self._owner, self._slot_kind, self._slot, self._prior)
 
     def _slot_as_configured(self) -> bool:
-        # Whether the slot still holds what the binding put there. A
-        # suspended binding put the prior back, so that is what counts;
-        # equality is the fallback for immutables such as the strings
-        # os.environ hands back.
+        # Whether the slot, or the mapping's content, still holds what
+        # the binding put there. A suspended binding put the prior
+        # back, so that is what counts; equality is the fallback for
+        # immutables such as the strings os.environ hands back.
 
         state, value = self._holding
+
+        if self._mode == "mapping":
+            if self._suspended:
+                state = "through"
+            return mapping_matches(self._mapping, state, value, self._prior)
+
         current = slot_read(self._owner, self._slot_kind, self._slot)
 
         if self._suspended or state == "through":
@@ -1336,10 +1507,10 @@ class Binding:
     # -- declared expectations ---------------------------------------------
 
     def _expects(self, kind: str, count: int) -> Self:
-        if self._mode == "value":
+        if self._mode in _HOLDING_MODES:
             raise WrongModeError(
-                f"{self._label} is a value binding and records nothing; it"
-                f" cannot carry an expectation"
+                f"{self._label} is a {self._mode} binding and records nothing;"
+                f" it cannot carry an expectation"
             )
 
         self._expectations.append((kind, count))
@@ -2123,14 +2294,27 @@ def binding(
     registry): the entry is wrapped in place, with the whole vocabulary
     of that mode, and the original put back on remove().
 
+    With `mode="mapping"` the location (or the entry an `item=` names)
+    must hold a mutable mapping, and the binding substitutes that
+    mapping's content in place: `overrides(values)` makes `values` its
+    whole content while applied (`overrides({})` empties it),
+    `updates(values)` merges `values` over what is there, and
+    `passes_through()` leaves it alone; remove() puts the original
+    entries back. The mapping object is never replaced, so code that
+    copied the name at import (`from config import SETTINGS`) sees the
+    change too, unlike `attr=`, which rebinds the attribute. The
+    target may be the mapping itself, `binding(os.environ,
+    mode="mapping")`. Like a value binding it records nothing and
+    refuses the recording options.
+
     The mode, 'callable' or 'attribute', is detected from whatever is at
     the target and selects which behaviour namespaces exist. Pass `mode=`
     to override for the ambiguous case of a callable stored as data.
-    `mode="wsgi"` and `mode="asgi"` are never detected and must be
-    passed explicitly: each wraps an application object of that
-    protocol in its recording middleware, records "request" events,
-    and offers the on_request namespace; see the wrapture.wsgi and
-    wrapture.asgi modules.
+    `mode="wsgi"`, `mode="asgi"` and `mode="mapping"` are never
+    detected and must be passed explicitly: the request modes each wrap
+    an application object of that protocol in its recording middleware,
+    record "request" events, and offer the on_request namespace; see
+    the wrapture.wsgi and wrapture.asgi modules.
 
     `missing_ok=True` permits binding a name that is not on the class,
     typically one assigned in __init__. Without it such a name raises
