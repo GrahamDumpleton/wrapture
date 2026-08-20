@@ -1,23 +1,29 @@
-"""Stand-ins for callables the test must supply itself.
+"""Stand-ins the test supplies itself: one callable, or one collaborator.
 
 A binding wraps a callable that already lives somewhere; observed()
 wraps one the test has in hand. Both leave the real code running. The
-remaining case is the callable the test has to make up: a hook slot
-read by name, a receiver handed to a signal, a callback passed into a
-registration call, where the test does not care what arrives and only
-counts calls or dictates the outcome. stub() builds that stand-in and
-returns it already observed: a recording proxy with events, suspend()
-and resume(), the honest counters, and timeline participation.
+remaining cases are the stand-ins a test has to make up. stub() builds
+one callable: a hook slot read by name, a receiver handed to a signal,
+a callback passed into a registration call, where the test does not
+care what arrives and only counts calls or dictates the outcome.
+mock() builds one collaborator: an instance-shaped double of a named
+class, every method a signature-checked recording stub, for the code
+under test to receive through a seam. Both record through the
+observed() machinery: events, suspend() and resume(), the honest
+counters, and timeline participation.
 
-A stub stands in for one callable and that is its whole surface. It
-fabricates no attributes and never widens into an object; a test that
-needs a many-method collaborator should build one from real parts.
+A mock requires a spec and fabricates nothing beyond it. There is no
+spec-less form: the double's surface is exactly the named class's
+methods, an absent name raises AttributeError, every method returns
+None until configured, and there are no fabricated return-value
+chains. A stub stands in for one callable and that is its whole
+surface.
 
 By default a stub accepts any arguments, the explicit statement that
-they do not matter here. mimics= opts back into strictness: the stub
-borrows a real callable's signature, so calls are checked and recorded
-by parameter name, and borrows its kind, so a stub for an async def
-is itself awaited.
+they do not matter here. mimics= opts back into strictness, and every
+mock() method has it: the borrowed signature checks calls and records
+arguments by parameter name, and the borrowed kind makes a stand-in
+for an async def itself awaited.
 """
 
 from __future__ import annotations
@@ -49,47 +55,127 @@ def _infer_kind(mimics: Callable[..., Any]) -> str:
     return "function"
 
 
-def _stand_in(kind: str, returns: Any, raises: Any) -> Callable[..., Any]:
+class _Outcome:
+    """The one configured outcome of a stub, read live on every call so
+    returns() and raises() reconfigure a stub already placed."""
+
+    __slots__ = ("returns", "raises")
+
+    def __init__(self) -> None:
+        self.returns: Any = None
+        self.raises: BaseException | type[BaseException] | None = None
+
+
+def _check_raises(raises: Any) -> None:
+    acceptable = isinstance(raises, BaseException) or (
+        isinstance(raises, type) and issubclass(raises, BaseException)
+    )
+    if not acceptable:
+        raise TypeError(
+            f"raises must be an exception instance or class, got {raises!r}"
+        )
+
+
+def _check_yields(kind: str, returns: Any) -> None:
+    # The generator kinds deliver returns by iterating it, so reject a
+    # value that cannot be iterated when it is configured rather than
+    # at the first call.
+
+    if kind in ("generator", "async_generator") and returns is not None:
+        if not isinstance(returns, Iterable):
+            raise TypeError(
+                f"returns must be an iterable of items to yield for"
+                f" kind={kind!r}, got {returns!r}"
+            )
+
+
+def _stand_in(kind: str, outcome: _Outcome) -> Callable[..., Any]:
     # The stand-in is a real function of the stated kind, so calling
     # convention detection through the transparent proxy answers
-    # truthfully, and it carries the outcome itself: return or raise
-    # for the plain kinds, delivered on await or iteration for the
+    # truthfully, and it delivers the configured outcome itself: return
+    # or raise for the plain kinds, on await or iteration for the
     # others, exactly as the real callable's protocol would deliver it.
 
     if kind == "function":
 
         def stand_in(*args: Any, **kwargs: Any) -> Any:
-            if raises is not None:
-                raise raises
-            return returns
+            if outcome.raises is not None:
+                raise outcome.raises
+            return outcome.returns
 
         return stand_in
 
     if kind == "coroutine":
 
         async def coroutine_stand_in(*args: Any, **kwargs: Any) -> Any:
-            if raises is not None:
-                raise raises
-            return returns
+            if outcome.raises is not None:
+                raise outcome.raises
+            return outcome.returns
 
         return coroutine_stand_in
 
     if kind == "generator":
 
         def generator_stand_in(*args: Any, **kwargs: Any) -> Any:
-            if raises is not None:
-                raise raises
-            yield from returns if returns is not None else ()
+            if outcome.raises is not None:
+                raise outcome.raises
+            yield from outcome.returns if outcome.returns is not None else ()
 
         return generator_stand_in
 
     async def async_generator_stand_in(*args: Any, **kwargs: Any) -> Any:
-        if raises is not None:
-            raise raises
-        for item in returns if returns is not None else ():
+        if outcome.raises is not None:
+            raise outcome.raises
+        for item in outcome.returns if outcome.returns is not None else ():
             yield item
 
     return async_generator_stand_in
+
+
+class StubCallable(ObservedCallable):
+    """The stand-in stub() returns and every mock() method is.
+
+    An ObservedCallable whose target delivers a configured outcome
+    instead of running real code. returns() and raises() set and reset
+    that outcome at any time, before or after the stub is placed; each
+    replaces the other, and there are no phases.
+    """
+
+    _self_kind: str
+    _self_outcome: _Outcome
+
+    def returns(self, value: Any) -> StubCallable:
+        """Make every call produce this value: returned at the call,
+        resolved on await for a coroutine stub, yielded per item for
+        the generator kinds (where the value must be iterable).
+        Replaces any configured outcome. Returns the stub."""
+
+        _check_yields(self._self_kind, value)
+
+        outcome = self._self_outcome
+        outcome.returns = value
+        outcome.raises = None
+        return self
+
+    def raises(self, exc: BaseException | type[BaseException]) -> StubCallable:
+        """Make every call raise this exception: at the call, on await
+        for a coroutine stub, on iteration for the generator kinds.
+        Replaces any configured outcome. Returns the stub."""
+
+        _check_raises(exc)
+
+        outcome = self._self_outcome
+        outcome.raises = exc
+        outcome.returns = None
+        return self
+
+    @property
+    def returns_value(self) -> Any:
+        """The configured return value, None until returns() sets one:
+        the way to reach a double configured as another method's
+        result without holding it in a variable."""
+
+        return self._self_outcome.returns
 
 
 def stub(
@@ -99,7 +185,7 @@ def stub(
     raises: BaseException | type[BaseException] | None = None,
     mimics: Callable[..., Any] | None = None,
     kind: str | None = None,
-) -> ObservedCallable:
+) -> StubCallable:
     """Build a stand-in callable that records, for the test to place.
 
     With no arguments the stub accepts any call, returns None, and
@@ -107,9 +193,13 @@ def stub(
     `events.assert_once()` and the rest apply. `label` names it in
     events and assertions (default "stub"). `returns=` makes every
     call produce that value instead; `raises=` makes every call raise;
-    the two are mutually exclusive, and there are no phases: a stand-in
-    whose behaviour must change over time should be a real function, or
-    a binding on a real location.
+    the two are mutually exclusive. The same pair exist as methods on
+    the returned stub, so an outcome can be set or replaced after
+    construction (`hook.returns(42)`, `hook.raises(exc)`), each
+    replacing the other; there are no phases beyond that one
+    reconfigurable outcome: a stand-in whose behaviour must change over
+    time on its own should be a real function, or a binding on a real
+    location.
 
     `kind=` sets the calling convention of the stand-in: "function"
     (default), "generator", "coroutine" or "async_generator". The stub
@@ -142,13 +232,7 @@ def stub(
         raise ValueError("stub() takes returns= or raises=, not both")
 
     if raises is not None:
-        acceptable = isinstance(raises, BaseException) or (
-            isinstance(raises, type) and issubclass(raises, BaseException)
-        )
-        if not acceptable:
-            raise TypeError(
-                f"raises must be an exception instance or class, got {raises!r}"
-            )
+        _check_raises(raises)
 
     # Resolve the kind: inferred from mimics=, stated with kind=, or
     # the plain function default.
@@ -165,19 +249,12 @@ def stub(
     elif kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}, got {kind!r}")
 
-    # The generator kinds deliver returns= by iterating it, so reject a
-    # value that cannot be iterated at construction rather than at the
-    # first call.
+    outcome = _Outcome()
+    outcome.returns = None if returns is MISSING else returns
+    outcome.raises = raises
+    _check_yields(kind, outcome.returns)
 
-    returns_value = None if returns is MISSING else returns
-    if kind in ("generator", "async_generator") and returns_value is not None:
-        if not isinstance(returns_value, Iterable):
-            raise TypeError(
-                f"returns must be an iterable of items to yield for"
-                f" kind={kind!r}, got {returns_value!r}"
-            )
-
-    stand_in = _stand_in(kind, returns_value, raises)
+    stand_in = _stand_in(kind, outcome)
 
     # Identity: a mimicked stub reports and records as what it stands
     # in for; a bare one as its label. The names go onto the stand-in
@@ -229,7 +306,7 @@ def stub(
             except TypeError as exc:
                 raise TypeError(f"{effective} (stubbed): {exc}") from None
 
-    return ObservedCallable(
+    double = StubCallable(
         stand_in,
         path=path,
         label=effective,
@@ -239,3 +316,129 @@ def stub(
         when=None,
         precheck=precheck,
     )
+    double._self_kind = kind
+    double._self_outcome = outcome
+    return double
+
+
+def _spec_methods(spec: type) -> dict[str, Any]:
+    # The spec's callable surface through the full MRO: plain methods,
+    # classmethods and staticmethods, each kept in its descriptor form
+    # so the stub can mimic the underlying function. Dunders are never
+    # stubs; __enter__/__exit__ get dedicated handling on the double,
+    # everything else double-underscored is left alone.
+
+    methods: dict[str, Any] = {}
+
+    for name in dir(spec):
+        if name.startswith("__"):
+            continue
+
+        attribute = inspect.getattr_static(spec, name)
+
+        if isinstance(attribute, (staticmethod, classmethod)) or callable(attribute):
+            methods[name] = attribute
+
+    return methods
+
+
+def _double_namespace(spec: type) -> dict[str, Any]:
+    # The generated class reports the spec as __class__ (so isinstance
+    # checks in the code under test hold), refuses names beyond the
+    # spec with an error saying so, and reads as a mock in repr.
+
+    def __getattr__(self: Any, name: str) -> Any:
+        if hasattr(spec, name):
+            raise AttributeError(
+                f"{spec.__name__}.{name} is not fabricated: the mock"
+                f" holds no value for it; assign it on the double if"
+                f" the code under test reads it"
+            )
+
+        raise AttributeError(
+            f"{spec.__name__} has no attribute {name!r}; the mock"
+            f" fabricates nothing beyond its spec"
+        )
+
+    def __repr__(self: Any) -> str:
+        return f"<wrapture.mock {spec.__name__}>"
+
+    namespace: dict[str, Any] = {
+        "__module__": spec.__module__,
+        "__class__": property(lambda self: spec),
+        "__getattr__": __getattr__,
+        "__repr__": __repr__,
+    }
+
+    # A context-managed spec keeps working: enter to the double itself,
+    # exit inert (exceptions are not suppressed). Provided only when
+    # the spec defines the protocol, per the no-fabrication rule.
+
+    if hasattr(spec, "__enter__"):
+        namespace["__enter__"] = lambda self: self
+    if hasattr(spec, "__exit__"):
+        namespace["__exit__"] = lambda self, *exc: None
+
+    return namespace
+
+
+def mock(spec: type) -> Any:
+    """Build an instance-shaped double of a class, for the test to
+    inject where the code under test expects a collaborator.
+
+    A mock requires a spec and fabricates nothing beyond it. Every
+    method of the spec, inherited ones included, becomes a stub that
+    mimics the real method: calls are checked against its signature and
+    raise TypeError on drift, arguments record by parameter name, and
+    the method's kind carries over, so an `async def` method is
+    awaited, a generator method is iterated, and the outcome arrives as
+    the real one would deliver it. Every method returns None until
+    configured with `double.method.returns(...)` or `.raises(...)`;
+    there are no fabricated return-value chains, so a call on an
+    unconfigured method's result fails loudly instead of inventing an
+    object. Wire a graph by configuring one double as another's return
+    value.
+
+    The double's surface is exactly the spec's: accessing a name the
+    spec does not have raises AttributeError, in the test and in the
+    code under test alike, and data attributes hold no fabricated
+    values, so the test assigns what the code reads (`double.host =
+    "amqp.local"`). `isinstance(double, Spec)` holds, as the double
+    stands in for exactly that class; `type(double)` still tells the
+    truth. When the spec is a context manager, entering the double
+    yields the double and exiting is inert.
+
+    Each method records events under `SpecName.method`, so the normal
+    vocabulary applies, `tape.assert_order()` mixes mocked methods with
+    real bindings, and a double is a value like a stub: the test places
+    it and owns its lifetime. To substitute a class at a location so
+    code constructing its own collaborator gets doubles, hold a factory
+    in a value binding instead.
+    """
+
+    if not isinstance(spec, type):
+        raise TypeError(
+            f"mock() requires a class as its spec, got {spec!r}: there"
+            f" is no spec-less form"
+        )
+
+    namespace = _double_namespace(spec)
+
+    for name, attribute in _spec_methods(spec).items():
+        if isinstance(attribute, staticmethod):
+            # A staticmethod never sees the instance; the descriptor
+            # preserves that, handing the stub out unbound.
+
+            namespace[name] = staticmethod(
+                stub(f"{spec.__name__}.{name}", mimics=attribute.__func__)
+            )
+        elif isinstance(attribute, classmethod):
+            # The underlying function's cls parameter binds to the
+            # double, standing in for the class the real method binds.
+
+            namespace[name] = stub(f"{spec.__name__}.{name}", mimics=attribute.__func__)
+        else:
+            namespace[name] = stub(f"{spec.__name__}.{name}", mimics=attribute)
+
+    double_class = type(f"mock({spec.__name__})", (object,), namespace)
+    return double_class()

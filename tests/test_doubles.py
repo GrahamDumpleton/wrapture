@@ -1,11 +1,15 @@
-"""Tests for stub(): the supplied stand-in callable.
+"""Tests for the supplied stand-ins: stub() and mock().
 
 A stub is a one-callable stand-in the test places itself: permissive by
 default (any arguments, returns None, records), with returns=/raises=
-to dictate the outcome, kind= to make the stand-in a generator,
-coroutine or async generator for real, and mimics= to borrow a
-callable's signature and kind, opting back into strict checking and
-by-name argument recording.
+to dictate the outcome (as constructor keywords or reconfigurable
+verbs), kind= to make the stand-in a generator, coroutine or async
+generator for real, and mimics= to borrow a callable's signature and
+kind, opting back into strict checking and by-name argument recording.
+
+A mock is an instance-shaped double of a named class: every method a
+signature-checked recording stub of the right kind, nothing fabricated
+beyond the spec, every method returning None until configured.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from wrapture import ObservedCallable, stub, timeline
+from wrapture import ObservedCallable, binding, mock, stub, timeline
 
 
 @contextmanager
@@ -355,3 +359,320 @@ def test_suspend_and_resume_control_recording_not_the_outcome() -> None:
 
         charge.events.assert_once()
         assert charge.suspended_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# reconfigurable outcomes on a stub
+# ---------------------------------------------------------------------------
+
+
+def test_returns_and_raises_verbs_reconfigure_a_placed_stub() -> None:
+    charge = stub("charge")
+
+    with timeline():
+        assert charge() is None
+
+        charge.returns({"id": "A"})
+        assert charge() == {"id": "A"}
+
+        charge.raises(TimeoutError("down"))
+        with pytest.raises(TimeoutError):
+            charge()
+
+        charge.returns({"id": "B"})
+        assert charge() == {"id": "B"}
+
+
+def test_the_verbs_chain_and_validate() -> None:
+    items = stub("items", kind="generator")
+
+    assert items.returns([1, 2]) is items
+
+    with pytest.raises(TypeError, match="iterable of items"):
+        items.returns(42)
+    with pytest.raises(TypeError, match="exception instance or class"):
+        items.raises("nope")  # type: ignore[arg-type]
+
+
+def test_returns_value_exposes_the_configured_return() -> None:
+    charge = stub("charge")
+
+    assert charge.returns_value is None
+    charge.returns({"id": "A"})
+    assert charge.returns_value == {"id": "A"}
+
+
+# ---------------------------------------------------------------------------
+# mock(): the spec and its fence
+# ---------------------------------------------------------------------------
+
+
+class Channel:
+    def basic_publish(self, body: Any, routing_key: str = "task") -> None: ...
+
+    def close(self) -> None: ...
+
+
+class BaseConnection:
+    def heartbeat(self) -> None: ...
+
+
+class Connection(BaseConnection):
+    port = 5672
+
+    def channel(self) -> Channel: ...  # type: ignore[empty-body]
+
+    def close(self) -> None: ...
+
+    async def drain(self, timeout: float = 1.0) -> str: ...  # type: ignore[empty-body]
+
+    async def stream(self, count: int) -> Any:
+        yield count
+
+    def paginate(self, size: int) -> Any:
+        yield size
+
+    @classmethod
+    def defaults(cls, profile: str) -> None: ...
+
+    @staticmethod
+    def parse_url(url: str) -> None: ...
+
+
+class Guard:
+    def acquire(self) -> None: ...
+
+    def __enter__(self) -> Guard:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+def test_a_mock_requires_a_class_spec() -> None:
+    with pytest.raises(TypeError, match="no spec-less form"):
+        mock("Connection")  # type: ignore[arg-type]
+
+
+def test_every_method_is_a_stub_inherited_ones_included() -> None:
+    conn = mock(Connection)
+
+    with timeline():
+        assert conn.close() is None
+        assert conn.heartbeat() is None
+
+        conn.close.events.assert_once()
+        conn.heartbeat.events.assert_once()
+        assert conn.close.events.first.label == "Connection.close"
+
+
+def test_an_absent_name_raises_naming_the_spec() -> None:
+    conn = mock(Connection)
+
+    with pytest.raises(AttributeError, match="fabricates nothing beyond its spec"):
+        _ = conn.chanel
+
+
+def test_data_attributes_are_assigned_not_fabricated() -> None:
+    conn = mock(Connection)
+
+    with pytest.raises(AttributeError, match="holds no value"):
+        _ = conn.port
+
+    conn.port = 5673
+    assert conn.port == 5673
+
+
+def test_isinstance_holds_and_type_is_honest() -> None:
+    conn = mock(Connection)
+
+    assert isinstance(conn, Connection)
+    assert isinstance(conn, BaseConnection)
+    assert type(conn).__name__ == "mock(Connection)"
+    assert repr(conn) == "<wrapture.mock Connection>"
+
+
+# ---------------------------------------------------------------------------
+# mock(): strictness and recording
+# ---------------------------------------------------------------------------
+
+
+def test_method_calls_are_checked_and_recorded_by_name() -> None:
+    channel = mock(Channel)
+
+    with timeline():
+        channel.basic_publish("hi")
+
+        event = channel.basic_publish.events.with_args(body="hi").assert_once().first
+        assert event.instance is channel
+        assert event.arguments == {"body": "hi", "routing_key": "task"}
+
+        with pytest.raises(TypeError, match=r"\(stubbed\)"):
+            channel.basic_publish("hi", bogus=True)
+
+        channel.basic_publish.events.assert_once()
+
+
+def test_two_doubles_of_one_spec_record_apart() -> None:
+    first = mock(Channel)
+    second = mock(Channel)
+
+    with timeline():
+        first.close()
+        second.close()
+        second.close()
+
+        first.close.events.assert_once()
+        second.close.events.assert_times(2)
+
+
+def test_assert_order_mixes_mock_methods_and_real_bindings() -> None:
+    class Ledger:
+        def record(self, entry: str) -> str:
+            return entry
+
+    conn = mock(Connection)
+    channel = mock(Channel)
+    conn.channel.returns(channel)
+    record = binding(Ledger, "record")
+
+    with timeline(record) as tape:
+        conn.channel().basic_publish("hi")
+        Ledger().record("sent")
+        conn.close()
+
+        tape.assert_order(conn.channel, channel.basic_publish, record, conn.close)
+
+
+# ---------------------------------------------------------------------------
+# mock(): outcomes and the declared graph
+# ---------------------------------------------------------------------------
+
+
+def test_methods_return_none_until_configured() -> None:
+    conn = mock(Connection)
+
+    with timeline():
+        assert conn.channel() is None
+
+        conn.channel.returns(mock(Channel))
+        assert isinstance(conn.channel(), Channel)
+
+
+def test_an_unconfigured_graph_fails_loudly_not_silently() -> None:
+    conn = mock(Connection)
+
+    with timeline():
+        with pytest.raises(AttributeError):
+            conn.channel().basic_publish("hi")
+
+
+def test_returns_value_reaches_the_configured_double() -> None:
+    conn = mock(Connection)
+    channel = mock(Channel)
+    conn.channel.returns(channel)
+
+    assert conn.channel.returns_value is channel
+
+
+def test_methods_reconfigure_like_any_stub() -> None:
+    conn = mock(Connection)
+
+    conn.close.raises(ConnectionError("gone"))
+    with timeline():
+        with pytest.raises(ConnectionError):
+            conn.close()
+
+        conn.close.returns(None)
+        assert conn.close() is None
+
+
+# ---------------------------------------------------------------------------
+# mock(): kinds from the spec
+# ---------------------------------------------------------------------------
+
+
+def test_async_methods_are_awaited_and_track_completion() -> None:
+    conn = mock(Connection)
+
+    assert inspect.iscoroutinefunction(conn.drain)
+
+    async def run() -> None:
+        with timeline():
+            conn.drain.returns("ok")
+            assert await conn.drain() == "ok"
+
+            conn.drain.events.finished().assert_once()
+            conn.drain.events.pending().assert_never()
+
+            conn.drain.raises(TimeoutError("down"))
+            with pytest.raises(TimeoutError):
+                await conn.drain()
+
+    asyncio.run(run())
+
+
+def test_the_delivered_coroutine_is_named_for_the_method() -> None:
+    conn = mock(Connection)
+
+    with timeline(), _discarding():
+        delivery = conn.drain()
+        assert delivery.__qualname__ == "Connection.drain"
+        delivery.close()
+
+
+def test_generator_methods_yield_their_configured_items() -> None:
+    conn = mock(Connection)
+
+    assert inspect.isasyncgenfunction(conn.stream)
+    assert inspect.isgeneratorfunction(conn.paginate)
+
+    async def run() -> None:
+        with timeline():
+            conn.stream.returns([1, 2])
+            assert [item async for item in conn.stream(5)] == [1, 2]
+
+    asyncio.run(run())
+
+    with timeline():
+        conn.paginate.returns([3, 4])
+        assert list(conn.paginate(10)) == [3, 4]
+
+
+def test_classmethods_and_staticmethods_are_stubs() -> None:
+    conn = mock(Connection)
+
+    with timeline():
+        conn.defaults("fast")
+        conn.defaults.events.with_args(profile="fast").assert_once()
+
+        conn.parse_url("amqp://host")
+        conn.parse_url.events.with_args(url="amqp://host").assert_once()
+
+
+# ---------------------------------------------------------------------------
+# mock(): context manager only when the spec defines it
+# ---------------------------------------------------------------------------
+
+
+def test_a_context_managed_spec_enters_to_the_double() -> None:
+    guard = mock(Guard)
+
+    with guard as entered:
+        assert entered is guard
+
+
+def test_a_context_managed_double_does_not_suppress_exceptions() -> None:
+    guard = mock(Guard)
+
+    with pytest.raises(KeyError):
+        with guard:
+            raise KeyError("boom")
+
+
+def test_a_plain_spec_gets_no_context_protocol() -> None:
+    channel = mock(Channel)
+
+    with pytest.raises(TypeError):
+        with channel:  # noqa: SIM117
+            pass

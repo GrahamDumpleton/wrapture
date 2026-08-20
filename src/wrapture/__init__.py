@@ -59,6 +59,8 @@ from .config import (
     load_config,
 )
 from .doubles import (
+    StubCallable,
+    mock,
     stub,
 )
 from .eventlogs import (
@@ -189,6 +191,7 @@ __all__ = [
     "Sink",
     "SinkErrorWarning",
     "StackFrame",
+    "StubCallable",
     "Tape",
     "Timeline",
     "WSGIMiddleware",
@@ -208,6 +211,7 @@ __all__ = [
     "load_config",
     "load_events",
     "mermaid",
+    "mock",
     "observed",
     "propagate",
     "redact",

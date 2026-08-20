@@ -296,11 +296,12 @@ class Tape(Sink):
     ) -> Tape:
         """Assert the tape recorded events matching the steps, in order.
 
-        Each step is a binding, accepting any event of that binding, or
+        Each step is a binding or an observed callable (stub() and
+        mock() methods included), accepting any event it recorded, or
         an EventLog, accepting exactly the events it holds, so a filtered
         log is the way to say which call: `charge.events.with_args(
         amount=500)`, `tape.for_binding(record).raising(TimeoutError)`.
-        The two kinds mix freely, and repeating a step requires that
+        The kinds mix freely, and repeating a step requires that
         many matching events in order.
 
         By default this is a subsequence check: other events may appear
@@ -328,14 +329,19 @@ class Tape(Sink):
             return lambda event: event.binding is wanted
 
         for step in steps:
+            # An observed callable accessed as a bound method records
+            # under its parent wrapper; resolve to that identity.
+
+            recorder = getattr(step, "_self_parent", None) or step
+
             if isinstance(step, EventLog):
                 matchers.append(accepts_log(step))
                 labels.append(step.label)
                 named.update(id(event.binding) for event in step)
-            elif hasattr(step, "apply"):
-                matchers.append(accepts_binding(step))
+            elif hasattr(step, "apply") or hasattr(recorder, "_self_path"):
+                matchers.append(accepts_binding(recorder))
                 labels.append(getattr(step, "label", repr(step)))
-                named.add(id(step))
+                named.add(id(recorder))
             else:
                 raise TypeError(
                     f"assert_order() steps are bindings or event logs, got {step!r}"

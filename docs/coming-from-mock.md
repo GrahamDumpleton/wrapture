@@ -16,6 +16,9 @@ The quick translation, expanded below:
 | `side_effect=[a, b, exc]` (a sequence) | `on_call.returns_from([a, b])`, then `then().raises(exc)` |
 | `Mock(wraps=real)` | `on_call.transforms_args(fn)` / `transforms_result(fn)` / `decorates(fn)` |
 | `patch.multiple(C, a=..., b=...)` | `bindings(a=wrapture.binding(C, "a"), b=wrapture.binding(C, "b"))`, per-member behaviour |
+| `Mock(spec=Connection)` / `create_autospec(Connection)` as a collaborator | `mock(Connection)`: the spec'd path is the only path |
+| bare `Mock()` as a collaborator | no translation by design: a mock requires a spec and fabricates nothing beyond it |
+| `AsyncMock` inside a spec'd collaborator | `mock(Connection)`: each method's kind comes from the spec |
 | `Mock()` supplied as a callable (a hook, a receiver, a callback) | `stub()`; `stub("label")` to name its events |
 | `Mock(return_value=v)` handed over as a callable | `stub(returns=v)`; `stub(raises=exc)` for `side_effect=exc` |
 | `create_autospec(fn)` supplied as a callable | `stub(mimics=fn)`: signature-checked, arguments by name |
@@ -63,10 +66,12 @@ fabricates attributes on demand, so the moment the substitution is any
 wider than one method (patching the class itself, or injecting `Mock()`
 as a collaborator), every method on the fabricated object succeeds with
 a fabricated result, and a misspelled method call passes silently unless
-spec checking was configured. wrapture has no fabricating object
-anywhere: a binding names one real attribute, a misspelled name raises
-`AttributeError` at creation, and everything the binding does not
-explicitly change stays the real code.
+spec checking was configured. wrapture has no spec-less fabrication
+anywhere: a binding names one real attribute and a misspelled name
+raises `AttributeError` at creation; a collaborator double is built
+with `mock(Connection)` from the named class and answers to exactly its
+surface; and everything a binding does not explicitly change stays the
+real code.
 
 The same goes for the call itself. mock validates a stubbed call's
 arguments against the real signature only if `autospec=True` (or
