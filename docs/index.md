@@ -111,11 +111,14 @@ scheduled-tracing
 :caption: Worked examples
 
 example-external-services
+example-supplied-stand-ins
 example-resource-hygiene
 example-streaming-data
+example-async-code
 example-request-timing
 example-service-over-time
 example-third-party-libraries
+example-pinning-configuration
 ```
 
 ```{toctree}

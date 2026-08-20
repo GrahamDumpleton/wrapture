@@ -233,7 +233,8 @@ charge.remove()
 
 Result-side stages are await-aware. When the wrapped callable is async,
 `transforms_result` and `validates_result` apply to the awaited value, not
-to the coroutine object:
+to the coroutine object (the [testing async code](example-async-code.md)
+example works through the testing side of all this):
 
 ```python
 fetch = wrapture.binding(Service, "fetch")
@@ -858,7 +859,9 @@ these entries for the test, or the environment should be empty, and
 every holder of that dict, including code that did `from config import
 SETTINGS` at import time, should see it. That is `mode="mapping"` on a
 location whose object is a mutable mapping; the object is mutated in
-place and never replaced:
+place and never replaced (the
+[pinning configuration](example-pinning-configuration.md) example puts
+this and the other configuration shapes to work together):
 
 ```python
 >>> import types, wrapture
