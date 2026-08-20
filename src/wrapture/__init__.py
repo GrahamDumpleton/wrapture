@@ -58,6 +58,11 @@ from .config import (
     find_config,
     load_config,
 )
+from .decorators import (
+    BoundSpec,
+    bound,
+    taped,
+)
 from .doubles import (
     StubCallable,
     mock,
@@ -148,6 +153,7 @@ __all__ = [
     "AlreadyAppliedError",
     "AppliedConfig",
     "Binding",
+    "BoundSpec",
     "Collector",
     "Report",
     "Run",
@@ -200,6 +206,7 @@ __all__ = [
     "annotate",
     "binding",
     "bindings",
+    "bound",
     "canonical",
     "chrome_trace",
     "clear_stacks",
@@ -219,6 +226,7 @@ __all__ = [
     "shutdown",
     "stack_frames",
     "stub",
+    "taped",
     "timeline",
     "window",
 ]

@@ -420,17 +420,26 @@ def test_timeout_leaves_the_order_pending(gateway, service):
     assert service.place("o-2", 300)["status"] == "pending"
 
 
-def test_cancelling_a_paid_order_refunds_it(service):
-    post = wrapture.binding(PaymentClient, "_post")
-    post.on_call.returns({"id": "ch_LIVE_9f2"})
-    refund = wrapture.binding(PaymentClient, "refund").expect_once()
+@wrapture.bound(PaymentClient, "_post").on_call.returns({"id": "ch_LIVE_9f2"})
+@wrapture.bound(PaymentClient, "refund")
+def test_cancelling_a_paid_order_refunds_it(service, _post, refund):
+    service.place("o-3", 700)
+    service.cancel("o-3")
 
-    with wrapture.timeline(post, refund):
-        service.place("o-3", 700)
-        service.cancel("o-3")
-
-        refund.events.with_args(charge_id="ch_LIVE_9f2").assert_once()
+    refund.events.with_args(charge_id="ch_LIVE_9f2").assert_once()
 ```
+
+The first two tests share their binding through a fixture, which is the
+right home for configuration several tests want. The third binds two
+targets for itself alone, and uses the decorator form instead: each
+`wrapture.bound()` line addresses a target exactly as `binding()`
+would, applies a fresh binding around the test, and injects it under
+the slot's name, with the plugin's `tape` fixture recording as usual.
+[Scoping with decorators](unit-testing.md#scoping-with-decorators)
+covers the form. One difference from the up-front expectations shown
+earlier: `expect_once()` declarations are verified by the `timeline()`
+block the binding was named to, so a decorator test asserts
+explicitly, as this one does with `assert_once()`.
 
 Keep fixtures that apply bindings function scoped, the pytest default,
 so no patch outlives the test that wanted it. wrapture's pytest plugin

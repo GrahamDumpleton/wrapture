@@ -43,6 +43,98 @@ def test_gateway_offline():
         ...
 ```
 
+## Scoping with decorators
+
+For the test that binds one or two statically addressable targets
+around its whole body, `bound()` says the same thing as the with-block
+without the nesting level. It takes the same addressing arguments as
+`binding()` and mirrors its fluent chain; the result is the decorator,
+and the binding it builds is injected into the test as a keyword
+argument, the way a fixture would arrive:
+
+```python
+@wrapture.taped()
+@wrapture.bound(Gateway, "charge").on_call.returns({"id": "stub"})
+def test_charge_is_stubbed(tape, charge):
+    assert place_order("widget")["charge"] == "stub"
+
+    charge.events.assert_once()
+    tape.assert_order(charge)
+```
+
+`taped()` opens a `timeline()` around the call and injects the tape;
+its default name matches the pytest plugin's `tape` fixture, so under
+the plugin `taped()` is unnecessary and the body reads identically.
+Each call of the test constructs a **fresh binding**: string targets
+resolve late the way the import paths given to `unittest.mock`'s
+`@patch` do, every parametrize case gets a clean history, and removal
+is owned by the decorator, so it cannot be forgotten.
+
+The injected name defaults to the slot's name, the final segment of
+the addressing path: `bound(Gateway, "charge")` injects `charge`.
+`alias=` overrides it, and is required, loudly, when the slot's name
+is not a valid identifier or when two decorators would inject the same
+name. Read a stack of these decorators as a top-to-bottom sequence of
+statements about the test below, not as nested wrappers: stages
+accumulate in reading order and the last terminal reading down wins,
+exactly as the same statements behave on a live binding. Decorators
+addressing the same slot collapse into one binding and one injected
+handle:
+
+```python
+@wrapture.bound(Model, "status").on_get.returns(5)
+@wrapture.bound(Model, "status").on_set.raises(AttributeError("read-only"))
+def test_reads_pinned_writes_rejected(status):
+    ...
+```
+
+Value and mapping bindings work the same way, which makes the
+decorator the direct counterpart of `unittest.mock`'s `@patch.dict`.
+The slot's name is the injected name exactly, capitalization included,
+so an environment variable arrives under its own spelling;
+`alias="api_key"` restyles it when the parameter should read as
+ordinary Python:
+
+```python
+@wrapture.bound(os.environ, item="API_KEY").overrides("sk_test")
+def test_priced_call_succeeds(API_KEY):
+    ...
+```
+
+The chain carries one phase's worth of behaviour: stages plus at most
+one terminal per channel. `then()` and `advance()` are deliberately
+not part of it; how behaviour changes over time is the test's script,
+and it is configured in the body through the injected handle, where
+the phase markers can be named:
+
+```python
+@wrapture.taped()
+@wrapture.bound(Gateway, "charge")
+def test_recovery_after_transient_timeout(tape, charge):
+    flaky = charge.on_call.then(after=2)
+    flaky.raises(TimeoutError("gateway busy"))
+    flaky.then(after=1).returns({"id": "fallback"})
+
+    ...
+```
+
+Async tests work unchanged, and the binding spans the await, not just
+the call that creates the coroutine; `unittest.TestCase` and
+`IsolatedAsyncioTestCase` methods are supported too. The decorators
+refuse a generator function or a pytest fixture at decoration time:
+a fixture's binding would be removed before the tests that use it
+run, and the with-block around the fixture's `yield` is the form for
+those.
+
+Two boundaries keep the choice of form honest. A decorator can only
+address targets that exist at decoration time or resolve by name at
+call time: modules by string, classes, module functions. A target born
+inside the test body is bound in the body, with a with-block. And the
+decorator fixes the recording extent to the whole function body; a
+test that wants "nothing before this line counts" keeps the
+with-block. The two mix freely, with body bindings recording onto the
+decorator's tape alongside the rest.
+
 ## Scoping with pytest fixtures
 
 A yield fixture gives the same guarantee with reuse across tests:
@@ -165,7 +257,9 @@ context manager when something else already applied it raises
 `AlreadyAppliedError` rather than silently letting the inner scope remove
 the outer scope's patch. If a fixture owns the binding, tests should only
 reconfigure behaviour, never call `apply()`, `remove()` or enter it as a
-context manager themselves.
+context manager themselves. A `bound()` decorator owns the lifecycle of
+the fresh binding it constructs for each call, so its handle is safe to
+reconfigure in the body and never needs applying or removing there.
 
 ## Discovering members by pattern
 

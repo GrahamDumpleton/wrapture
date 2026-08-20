@@ -258,6 +258,22 @@ def test_pricing_in_the_pinned_world(pinned_config):
     assert price(100) == "[EUR within 30.0s] total=100.00"
 ```
 
+A pin only one test wants need not earn a fixture: the decorator form
+holds a value binding around a single test, the direct counterpart of
+`unittest.mock`'s `@patch.dict` as a decorator, with the binding
+injected in case the test wants `hides()` or a different value
+mid-flight:
+
+```python
+@wrapture.bound(os.environ, item="API_KEY").overrides("sk_test")
+@wrapture.bound("config", attr="TIMEOUT").overrides(0.5)
+def test_pricing_against_a_slow_gateway(API_KEY, TIMEOUT):
+    assert price(100) == "[USD within 0.5s] total=120.00"
+```
+
+[Scoping with decorators](unit-testing.md#scoping-with-decorators)
+covers the form.
+
 ## Where next
 
 [Value bindings](monkey-patching.md#value-bindings-holding-a-value-in-place)
