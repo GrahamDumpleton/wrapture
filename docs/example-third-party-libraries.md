@@ -97,7 +97,7 @@ only the `headers` keyword is different by the time it does:
 
 >>> request = wrapture.binding(Client, "request")
 >>> request.on_call.transforms_args(with_tenant)
-<Binding 'Client.request' callable unapplied>
+<CallBehaviour of <Binding 'Client.request' callable unapplied>>
 
 ```
 
@@ -169,8 +169,8 @@ the patch itself never leaves the method:
 ...     headers = {**(kwargs.get("headers") or {}), "X-Tenant": "globex"}
 ...     return args, {**kwargs, "headers": headers}
 
->>> request.on_call.passes_through().on_call.transforms_args(with_other_tenant)
-<Binding 'Client.request' callable active>
+>>> request.on_call.passes_through().transforms_args(with_other_tenant)
+<CallBehaviour of <Binding 'Client.request' callable active>>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {'X-Tenant': 'globex'}, 'timeout': 30}
 
@@ -198,7 +198,7 @@ retry working:
 ...         return wrapped(*args, **kwargs)
 
 >>> request.on_call.decorates(retry_once)
-<Binding 'Client.request' callable active>
+<CallBehaviour of <Binding 'Client.request' callable active>>
 
 >>> class DropsFirst:
 ...     def __init__(self) -> None:
@@ -246,7 +246,7 @@ override. Used as a context manager, it is a scoped clamp:
 >>> timeout
 <Binding 'Client.timeout' attribute unapplied>
 >>> timeout.on_get.transforms(lambda value: min(value, 5))
-<Binding 'Client.timeout' attribute unapplied>
+<GetBehaviour of <Binding 'Client.timeout' attribute unapplied>>
 
 >>> with timeout:
 ...     client.timeout = 120

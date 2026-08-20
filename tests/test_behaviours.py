@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from wrapture import binding
+from wrapture import binding, timeline
 
 
 class Gateway:
@@ -288,3 +288,116 @@ def test_argument_and_result_stages_compose_on_an_async_target() -> None:
         assert asyncio.run(AsyncSvc().inner(2)) == 41
     finally:
         bnd.remove()
+
+
+# ---------------------------------------------------------------------------
+# the chain continuation rule: verbs hand the namespace back
+# ---------------------------------------------------------------------------
+
+
+def test_verbs_chain_on_one_channel_without_renaming_it() -> None:
+    chained = (
+        binding(Gateway, "charge")
+        .on_call.transforms_result(lambda r: {**r, "chained": True})
+        .returns({"id": "STUB"})
+    )
+
+    with chained:
+        assert Gateway().charge(1) == {"id": "STUB", "chained": True}
+
+
+def test_chain_and_separate_statements_configure_identically() -> None:
+    # The same two stages, chained in one expression and as separate
+    # statements, must compose in the same order.
+
+    class Service:
+        def word(self) -> str:
+            return "ab"
+
+    chained = (
+        binding(Service, "word")
+        .on_call.transforms_result(str.upper)
+        .transforms_result(lambda r: r + "!")
+    )
+
+    with chained:
+        one = Service().word()
+
+    stated = binding(Service, "word")
+    stated.on_call.transforms_result(str.upper)
+    stated.on_call.transforms_result(lambda r: r + "!")
+
+    with stated:
+        two = Service().word()
+
+    assert one == two == "AB!"
+
+
+def test_a_repeated_terminal_in_a_chain_is_last_wins() -> None:
+    with (
+        binding(Gateway, "charge")
+        .on_call.returns({"id": "first"})
+        .returns({"id": "second"})
+    ):
+        assert Gateway().charge(1) == {"id": "second"}
+
+
+def test_the_re_entry_spelling_still_works() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns({"id": "STUB"})
+
+    charge.on_call.passes_through().on_call.transforms_result(
+        lambda r: {**r, "adjusted": True}
+    )
+
+    with charge:
+        assert Gateway().charge(7) == {"id": "ch_7", "amount": 7, "adjusted": True}
+
+
+def test_the_namespace_stands_in_as_a_with_target() -> None:
+    from wrapture.bindings import Binding
+
+    charge = binding(Gateway, "charge")
+
+    with charge.on_call.returns({"id": "STUB"}) as entered:
+        assert entered is charge
+        assert isinstance(entered, Binding)
+        assert Gateway().charge(1) == {"id": "STUB"}
+
+    assert Gateway().charge(2) == {"id": "ch_2", "amount": 2}
+
+
+def test_the_namespace_stands_in_for_timeline_and_events() -> None:
+    charge = binding(Gateway, "charge").on_call.returns({"id": "STUB"})
+
+    with timeline(charge) as tape:
+        Gateway().charge(5)
+
+        charge.events.assert_once()
+        tape.for_binding(charge).assert_once()
+        tape.assert_order(charge)
+
+
+def test_the_attribute_channels_chain_too() -> None:
+    class Model:
+        status = 3
+
+    status = binding(Model, "status").on_get.transforms(lambda v: v + 1).returns(5)
+
+    with status:
+        assert Model().status == 6
+
+
+def test_reset_still_returns_the_binding() -> None:
+    charge = binding(Gateway, "charge")
+    charge.on_call.returns(1)
+
+    assert charge.on_call.reset() is charge
+
+
+def test_the_base_namespace_repr_shows_the_binding() -> None:
+    charge = binding(Gateway, "charge")
+
+    assert repr(charge.on_call) == (
+        "<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>"
+    )

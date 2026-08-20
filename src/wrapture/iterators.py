@@ -219,12 +219,37 @@ class _AsyncItemIterator:
 
 
 class _IteratorBehaviour:
-    """Base for the iterator factory's behaviour namespaces."""
+    """Base for the iterator factory's behaviour namespaces.
+
+    Verbs hand the namespace back (the same chain continuation rule the
+    binding namespaces follow), so several verbs chain on one namespace
+    without naming it again, and the namespace stands in for its
+    factory: it can be called with an iterator, handed to
+    `transforms_result()`, or asked for another namespace.
+    """
 
     __slots__ = ("_factory",)
 
     def __init__(self, factory: IteratorProxy) -> None:
         self._factory = factory
+
+    def __call__(self, iterable: Any) -> Any:
+        """Apply the factory this namespace configures to `iterable`."""
+
+        return self._factory(iterable)
+
+    def __getattr__(self, name: str) -> Any:
+        # Underscore names are the namespace's own business: delegating
+        # them could recurse before _factory is set, and nothing private
+        # to the factory is part of the stand-in surface.
+
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        return getattr(self._factory, name)
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} of {self._factory!r}>"
 
 
 class IteratorItemBehaviour(_IteratorBehaviour):
@@ -236,12 +261,13 @@ class IteratorItemBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
-    def transforms_item(self, fn: ItemFunction) -> IteratorProxy:
+    def transforms_item(self, fn: ItemFunction) -> Self:
         """fn(item) -> item, rewriting each item as it passes through."""
 
-        return self._factory._add(self._factory._item_stages, fn)
+        self._factory._add(self._factory._item_stages, fn)
+        return self
 
-    def validates_item(self, check: Callable[[Any], Any]) -> IteratorProxy:
+    def validates_item(self, check: Callable[[Any], Any]) -> Self:
         """check(item); each item passes through unchanged.
 
         The check fails the iteration only by raising; its return value
@@ -252,12 +278,14 @@ class IteratorItemBehaviour(_IteratorBehaviour):
             check(item)
             return item
 
-        return self._factory._add(self._factory._item_stages, stage)
+        self._factory._add(self._factory._item_stages, stage)
+        return self
 
-    def passes_through(self) -> IteratorProxy:
+    def passes_through(self) -> Self:
         """Drop all configured item behaviour."""
 
-        return self._factory._clear(self._factory._item_stages)
+        self._factory._clear(self._factory._item_stages)
+        return self
 
 
 class IteratorFinishBehaviour(_IteratorBehaviour):
@@ -269,15 +297,17 @@ class IteratorFinishBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
-    def validates(self, check: FinishFunction) -> IteratorProxy:
+    def validates(self, check: FinishFunction) -> Self:
         """check(value); completion stands unless check raises."""
 
-        return self._factory._add(self._factory._finish_checks, check)
+        self._factory._add(self._factory._finish_checks, check)
+        return self
 
-    def passes_through(self) -> IteratorProxy:
+    def passes_through(self) -> Self:
         """Drop all configured finish behaviour."""
 
-        return self._factory._clear(self._factory._finish_checks)
+        self._factory._clear(self._factory._finish_checks)
+        return self
 
 
 class IteratorErrorBehaviour(_IteratorBehaviour):
@@ -291,15 +321,17 @@ class IteratorErrorBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
-    def notifies(self, fn: ErrorFunction) -> IteratorProxy:
+    def notifies(self, fn: ErrorFunction) -> Self:
         """fn(exc), called before the exception propagates."""
 
-        return self._factory._add(self._factory._error_hooks, fn)
+        self._factory._add(self._factory._error_hooks, fn)
+        return self
 
-    def passes_through(self) -> IteratorProxy:
+    def passes_through(self) -> Self:
         """Drop all configured error behaviour."""
 
-        return self._factory._clear(self._factory._error_hooks)
+        self._factory._clear(self._factory._error_hooks)
+        return self
 
 
 class IteratorAbandonBehaviour(_IteratorBehaviour):
@@ -313,15 +345,17 @@ class IteratorAbandonBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
-    def notifies(self, fn: AbandonFunction) -> IteratorProxy:
+    def notifies(self, fn: AbandonFunction) -> Self:
         """fn(), called after the wrapped generator has been closed."""
 
-        return self._factory._add(self._factory._abandon_hooks, fn)
+        self._factory._add(self._factory._abandon_hooks, fn)
+        return self
 
-    def passes_through(self) -> IteratorProxy:
+    def passes_through(self) -> Self:
         """Drop all configured abandon behaviour."""
 
-        return self._factory._clear(self._factory._abandon_hooks)
+        self._factory._clear(self._factory._abandon_hooks)
+        return self
 
 
 class IteratorProxy:

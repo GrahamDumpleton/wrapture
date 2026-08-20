@@ -184,11 +184,11 @@ runs when a started, unexhausted generator is closed, by an explicit
 
 >>> watch = wrapture.iterator()
 >>> watch.on_item.validates_item(lambda page: cursors.append(page["cursor"]))
-<IteratorProxy 1 behaviour(s)>
+<IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>
 >>> watch.on_finish.validates(lambda value: outcomes.append(("finished", value)))
-<IteratorProxy 2 behaviour(s)>
+<IteratorFinishBehaviour of <IteratorProxy 2 behaviour(s)>>
 >>> watch.on_abandon.notifies(lambda: outcomes.append(("abandoned", None)))
-<IteratorProxy 3 behaviour(s)>
+<IteratorAbandonBehaviour of <IteratorProxy 3 behaviour(s)>>
 
 ```
 
@@ -200,7 +200,7 @@ enough here:
 
 ```python
 >>> pages.on_call.transforms_result(watch)
-<Binding 'Catalogue.pages' callable unapplied>
+<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
 
 >>> with pages:
 ...     collect_ids(catalogue.pages())
@@ -225,7 +225,7 @@ recorded:
 ...     wrapture.annotate(last_cursor=page["cursor"])
 
 >>> watch.on_item.validates_item(note_cursor)
-<IteratorProxy 4 behaviour(s)>
+<IteratorItemBehaviour of <IteratorProxy 4 behaviour(s)>>
 
 >>> cursors.clear(); outcomes.clear()
 
@@ -268,9 +268,9 @@ producing that page. A small counter picks the item:
 
 >>> flaky = wrapture.iterator()
 >>> flaky.on_item.validates_item(fail_at(2, OSError("connection reset")))
-<IteratorProxy 1 behaviour(s)>
+<IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>
 >>> flaky.on_error.notifies(errors.append)
-<IteratorProxy 2 behaviour(s)>
+<IteratorErrorBehaviour of <IteratorProxy 2 behaviour(s)>>
 
 ```
 
@@ -281,8 +281,8 @@ before the failure and no more; the timeline shows the iteration ending
 in the injected error rather than exhaustion:
 
 ```python
->>> pages.on_call.passes_through().on_call.transforms_result(flaky)
-<Binding 'Catalogue.pages' callable unapplied>
+>>> pages.on_call.passes_through().transforms_result(flaky)
+<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
 
 >>> with wrapture.timeline(pages) as tape:
 ...     out: list[str] = []
@@ -320,10 +320,10 @@ to check that the exporter counts rows and not pages:
 ```python
 >>> thin = wrapture.iterator()
 >>> thin.on_item.transforms_item(lambda page: {**page, "items": page["items"][:1]})
-<IteratorProxy 1 behaviour(s)>
+<IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>
 
->>> pages.on_call.passes_through().on_call.transforms_result(thin)
-<Binding 'Catalogue.pages' callable unapplied>
+>>> pages.on_call.passes_through().transforms_result(thin)
+<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
 
 >>> with pages:
 ...     Exporter().write(catalogue.pages(), out := [])
@@ -345,7 +345,7 @@ touching `Catalogue` at all:
 
 ```python
 >>> pages.on_call.passes_through()
-<Binding 'Catalogue.pages' callable unapplied>
+<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
 
 >>> cursors.clear(); outcomes.clear()
 
@@ -353,7 +353,7 @@ touching `Catalogue` at all:
 >>> write.on_call.transforms_args(
 ...     lambda args, kwargs: ((watch(args[0]), *args[1:]), kwargs)
 ... )
-<Binding 'Exporter.write' callable unapplied>
+<CallBehaviour of <Binding 'Exporter.write' callable unapplied>>
 
 >>> with write:
 ...     Exporter().write(catalogue.pages(), [])

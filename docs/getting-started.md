@@ -40,7 +40,7 @@ repr always tells you its state:
 
 ```python
 >>> charge.on_call.returns({"id": "stub"})
-<Binding 'Gateway.charge' callable unapplied>
+<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>
 
 >>> gateway = Gateway()
 >>> gateway.charge(500)
@@ -104,7 +104,7 @@ case substitution-based tools cannot express:
 ```python
 >>> pinned = wrapture.binding(Gateway, "charge")
 >>> pinned.on_call.transforms_result(lambda r: {**r, "id": "ch_TEST"})
-<Binding 'Gateway.charge' callable unapplied>
+<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>
 
 >>> with pinned:
 ...     gateway.charge(500)
