@@ -295,6 +295,13 @@ mock-style `assert_called_with(..., priority=5)` against a
 mock's misspelled `assert_calld_once` famously passed silently for
 years, a misspelled wrapture assertion is an `AttributeError`.
 
+One thing here has no mock counterpart at all: a patched class method
+in mock is one `Mock`, so calls made on different instances merge into
+a single call list and the test cannot say which object was charged.
+A binding on the class records the bound instance per event, and
+`with_instance(obj)` filters to the calls made on exactly that object
+(by identity, so even two equal-but-distinct instances stay apart).
+
 Order is the other habit. mock's `assert_has_calls([call(500),
 call(500)])` checks a contiguous run of calls on one mock, and
 `mock_calls == [...]` the exact list; across several mocks, ordering
