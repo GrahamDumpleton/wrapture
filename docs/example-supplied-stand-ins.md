@@ -174,7 +174,7 @@ pipeline:
 >>> transport.open_chanel
 Traceback (most recent call last):
     ...
-AttributeError: Transport has no attribute 'open_chanel'; the mock fabricates nothing beyond its spec. Did you mean: 'open_channel'?
+AttributeError: Transport has no attribute 'open_chanel'; the mock fabricates nothing beyond its spec
 
 ```
 

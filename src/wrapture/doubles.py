@@ -348,17 +348,25 @@ def _double_namespace(spec: type) -> dict[str, Any]:
     # spec with an error saying so, and reads as a mock in repr.
 
     def __getattr__(self: Any, name: str) -> Any:
+        # Setting name on the error keeps the structured field the
+        # interpreter would fill in, while opting out of its appended
+        # did-you-mean suggestion, whose wording varies by Python
+        # version; the message already names the attribute and spec.
+
         if hasattr(spec, name):
-            raise AttributeError(
+            error = AttributeError(
                 f"{spec.__name__}.{name} is not fabricated: the mock"
                 f" holds no value for it; assign it on the double if"
                 f" the code under test reads it"
             )
+        else:
+            error = AttributeError(
+                f"{spec.__name__} has no attribute {name!r}; the mock"
+                f" fabricates nothing beyond its spec"
+            )
 
-        raise AttributeError(
-            f"{spec.__name__} has no attribute {name!r}; the mock"
-            f" fabricates nothing beyond its spec"
-        )
+        error.name = name
+        raise error
 
     def __repr__(self: Any) -> str:
         return f"<wrapture.mock {spec.__name__}>"
