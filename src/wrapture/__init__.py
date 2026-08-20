@@ -58,6 +58,9 @@ from .config import (
     find_config,
     load_config,
 )
+from .doubles import (
+    stub,
+)
 from .eventlogs import (
     EventLog,
 )
@@ -211,6 +214,7 @@ __all__ = [
     "remove_sink",
     "shutdown",
     "stack_frames",
+    "stub",
     "timeline",
     "window",
 ]

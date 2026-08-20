@@ -331,6 +331,79 @@ works, its home is operator glue and tests: writing it inside the
 application would cross the line the rest of the library holds, that
 the observed code never imports wrapture.
 
+## Supplying a stand-in with stub()
+
+Sometimes there is no callable to wrap: the test itself must supply
+one. A hook slot read by name, a receiver handed to a signal's
+`connect()`, a callback passed into a registration call. Usually the
+test does not care what arguments arrive there; it wants to count the
+calls, or dictate the outcome, and nothing else. `stub()` builds that
+stand-in and returns it already observed, with the same recording
+character as everything else: `events`, `suspend()`/`resume()`, the
+honest counters, timeline participation.
+
+```python
+hook = wrapture.stub("before_start")
+
+service = Service(on_ready=hook)
+
+with wrapture.timeline():
+    service.start()
+    hook.events.assert_once()
+```
+
+A bare stub accepts any arguments and returns None; `returns=` makes
+every call produce a value, `raises=` makes every call raise, and the
+two are mutually exclusive. There are no phases and no `on_call`
+namespace: a stand-in whose behaviour must change over time has
+outgrown a stub and should be a real function, or a binding on a real
+location. And a stub stands in for one callable only: it fabricates no
+attributes and never widens into an object.
+
+The permissiveness is the point, and it is deliberately the inverse of
+the package's default. A binding on a real callable is strict first:
+calls are checked against the signature and recorded by name. Reaching
+for a bare `stub()` is the explicit statement that arguments do not
+matter here. `mimics=` is the opt back in:
+
+```python
+hook = wrapture.stub(mimics=Task.before_start)
+```
+
+borrows two things from the callable it names. The signature: calls
+are checked against it, a call that does not fit raises `TypeError`
+before anything is recorded (exactly as a strict binding rejects a
+drifted call), and events record arguments by parameter name, so
+`with_args(task_id=...)` matches them. And the kind: a stub mimicking
+an `async def` is itself a coroutine function, detected as one through
+the proxy and awaited like one.
+
+For a stand-in with nothing to mimic, `kind=` states the calling
+convention directly: `"function"` (the default), `"generator"`,
+`"coroutine"` or `"async_generator"`. The stand-in genuinely is a
+callable of that kind, and the outcome arrives as that kind delivers
+it:
+
+```python
+fetch = wrapture.stub("fetch", kind="coroutine", returns=payload)   # resolves on await
+stream = wrapture.stub("stream", kind="async_generator", returns=[1, 2])   # yields on async for
+items = wrapture.stub("items", kind="generator", returns=[1, 2])    # yields on for
+down = wrapture.stub("down", kind="coroutine", raises=TimeoutError("down"))   # raises on await
+```
+
+For the generator kinds `returns=` is the iterable of items to yield,
+and `raises=` fails the iteration rather than the call. Events keep
+the call/completion split, so `events.finished()` is the awaited (or
+fully consumed) subset and `events.pending()` catches the coroutine
+that was created and never awaited; where `unittest.mock` needs the
+separate `AsyncMock` class for all of this, the stub's kind is one
+argument, inferred whenever `mimics=` names the real thing.
+
+Placed on a class, a stub binds as a method like any observed
+callable: calls through instances record the instance, and a mimicked
+signature's `self` is accounted for by the binding, exactly as with
+the real method.
+
 ## Recording calls on a timeline
 
 A binding does more than intervene: inside a recording scope it also

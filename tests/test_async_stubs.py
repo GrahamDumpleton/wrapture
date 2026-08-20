@@ -7,7 +7,7 @@ import contextlib
 import gc
 import inspect
 import warnings
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator
 from typing import Any
 
 import pytest
@@ -53,7 +53,7 @@ async def drain(iterator: AsyncIterator[Any]) -> list[Any]:
 
 
 @contextlib.contextmanager
-def _discarding() -> Iterator[None]:
+def _discarding() -> Generator[None]:
     """Close and collect a deliberately un-awaited coroutine without the
     interpreter's warning about it (raised at close on some versions,
     at collection on others) reaching the test output."""
