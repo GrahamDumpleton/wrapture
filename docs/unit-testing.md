@@ -821,6 +821,13 @@ Each filter returns a new, narrowed `EventLog`, so filters chain freely:
   matches a call that passed `priority` through `**options`, other
   keys free, while `with_args(options={"priority": 5})` names the
   bundle parameter itself and compares the whole mapping.
+- `with_instance(obj)` keeps calls made on exactly that object, by
+  identity rather than equality, so two equal-but-distinct instances
+  seen through one class-level binding stay distinguishable; a
+  classmethod's calls record the class, so `with_instance(SomeClass)`
+  is "calls made on this class". It compares the live reference the
+  event holds, so it is a filter for in-timeline assertions rather
+  than for records reloaded with `load_events()`.
 - `returning(value)` keeps events whose outcome was the value: a call's
   return value, or the value an attribute read produced.
 - `with_value(value)` keeps attribute writes of that value.

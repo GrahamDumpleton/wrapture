@@ -131,6 +131,22 @@ class EventLog:
 
         return self._narrow(suffix, keep)
 
+    def with_instance(self, instance: Any) -> EventLog:
+        """Events recorded against exactly this object: calls made on
+        it as the bound instance, with classmethod calls recording the
+        class. Comparison is by identity, not equality, so two
+        equal-but-distinct instances stay distinguishable; anything
+        looser is a matching() predicate. Events with no bound
+        instance, module-level functions included, never match.
+        """
+
+        suffix = f"[instance={instance!r}]"
+
+        def keep(event: Event) -> bool:
+            return event.instance is not None and event.instance is instance
+
+        return self._narrow(suffix, keep)
+
     def returning(self, value: Any) -> EventLog:
         """Events whose recorded outcome equals the value: the return
         value of a call, or the value a read produced. Events that

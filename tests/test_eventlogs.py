@@ -128,6 +128,93 @@ class Sink:
         pass
 
 
+class Basket(dict[str, int]):
+    # dict subclass: two baskets with the same content compare equal,
+    # so identity and equality filtering give different answers.
+
+    def total(self) -> int:
+        return sum(self.values())
+
+
+class Registry:
+    @classmethod
+    def register(cls, name: str) -> str:
+        return name
+
+
+def helper(amount: int) -> int:
+    return amount
+
+
+def test_with_instance_narrows_by_identity_not_equality() -> None:
+    total = binding(Basket, "total")
+
+    first = Basket(apple=1)
+    second = Basket(apple=1)
+    assert first == second
+
+    with timeline(total):
+        first.total()
+        first.total()
+        second.total()
+
+        total.events.with_instance(first).assert_times(2)
+        total.events.with_instance(second).assert_once()
+        total.events.with_instance(Basket(apple=1)).assert_never()
+
+
+def test_with_instance_matches_the_class_for_classmethods() -> None:
+    register = binding(Registry, "register")
+
+    with timeline(register):
+        Registry.register("a")
+
+        register.events.with_instance(Registry).assert_once()
+
+
+def test_with_instance_chains_with_other_filters() -> None:
+    charge = binding(Gateway, "charge")
+    refund = binding(Gateway, "refund")
+
+    paying = Gateway()
+    other = Gateway()
+
+    with timeline(charge, refund):
+        paying.charge(500)
+        other.charge(500)
+        with pytest.raises(TimeoutError):
+            paying.refund(100)
+
+        charge.events.with_instance(paying).with_args(amount=500).assert_once()
+        refund.events.with_instance(paying).raising(TimeoutError).assert_once()
+        refund.events.with_instance(other).assert_never()
+
+
+def test_with_instance_never_matches_instance_less_events() -> None:
+    import sys
+
+    module = sys.modules[__name__]
+    bound = binding(module, "helper")
+
+    with timeline(bound):
+        module.helper(5)
+
+        bound.events.assert_once()
+        bound.events.with_instance(module).assert_never()
+        bound.events.with_instance(None).assert_never()
+
+
+def test_with_instance_shows_in_the_filter_label() -> None:
+    total = binding(Basket, "total")
+
+    basket = Basket(apple=1)
+    with timeline(total):
+        basket.total()
+
+        narrowed = total.events.with_instance(basket)
+        assert "[instance=" in narrowed.label
+
+
 def test_with_args_falls_through_into_the_var_keyword_bundle() -> None:
     submit = binding(Dispatcher, "submit")
 
