@@ -405,7 +405,9 @@ argument, inferred whenever `mimics=` names the real thing.
 Placed on a class, a stub binds as a method like any observed
 callable: calls through instances record the instance, and a mimicked
 signature's `self` is accounted for by the binding, exactly as with
-the real method.
+the real method. The
+[supplying hooks and collaborators](example-supplied-stand-ins.md)
+example builds a full test around stubs and doubles.
 
 ## A collaborator double with mock()
 

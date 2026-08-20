@@ -169,6 +169,9 @@ class ObservedCallable(
         self._self_missed_calls = 0
         self._self_gap_warned = False
 
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self._self_label!r}>"
+
     # -- identity ----------------------------------------------------------
 
     @property
