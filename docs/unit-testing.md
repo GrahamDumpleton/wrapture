@@ -404,6 +404,87 @@ callable: calls through instances record the instance, and a mimicked
 signature's `self` is accounted for by the binding, exactly as with
 the real method.
 
+## A collaborator double with mock()
+
+A stub stands in for one callable. When the code under test takes a
+whole object through a seam, a constructor argument, a function
+parameter, an attribute, and calls several methods on it, the stand-in
+is a collaborator, and `mock()` builds one. The fence comes first: **a
+mock requires a spec and fabricates nothing beyond it.** There is no
+spec-less form.
+
+```python
+class Connection:
+    def channel(self) -> "Channel": ...
+    def close(self) -> None: ...
+
+class Channel:
+    def basic_publish(self, body, routing_key="task"): ...
+
+channel = wrapture.mock(Channel)
+conn = wrapture.mock(Connection)
+conn.channel.returns(channel)          # the object graph, declared
+
+service = Service(conn)                # injected through the seam
+
+with wrapture.timeline() as tape:
+    service.send("hi")
+
+    channel.basic_publish.events.with_args(body="hi").assert_once()
+    tape.assert_order(conn.channel, channel.basic_publish, conn.close)
+```
+
+Every method of the spec, inherited ones included, is a stub that
+mimics the real method: calls are checked against its signature and
+raise `TypeError` on drift, events record arguments by parameter name
+under `Connection.channel`-style labels, and the method's kind carries
+over from the spec per method, so an `async def` method is awaited (and
+`events.finished()`/`events.pending()` distinguish awaited from
+called-and-forgotten), a generator method is iterated, and a class
+mixing all of them just works: the spec says which is which, so it can
+never be got wrong.
+
+What a mock deliberately does not do is fabricate. Every method returns
+None until `returns()` or `raises()` configures it; there are no
+auto-created children and no return-value chains, so the object graph a
+test depends on is declared, one double per node. Accessing a name the
+spec does not have raises `AttributeError`, in the test and in the code
+under test alike, and data attributes hold no invented values: the test
+assigns what the code reads (`conn.host = "amqp.local"`), and reading
+an unassigned one is a loud error. Compare the classic
+`unittest.mock` failure mode:
+
+```python
+# unittest.mock: everything below passes, no spec was asked for
+conn = Mock()
+service = Service(conn)
+service.send("hi")
+conn.chanel().basic_publish.assert_called()   # typo'd chanel: passes
+
+# wrapture.mock(Connection): the same typo is an AttributeError at the
+# call site inside Service, and an unconfigured channel() returns None,
+# so the chained call fails loudly instead of inventing a channel
+```
+
+(Spec'd mock, `Mock(spec=...)` or `create_autospec`, catches much of
+this too, per-method async detection included; the difference is that
+in wrapture the spec'd path is the only path.)
+
+The double passes `isinstance(conn, Connection)`, since it stands in
+for exactly that class (`type(conn)` still tells the truth), and when
+the spec is a context manager, `with conn:` enters to the double and
+exits inertly. A double is a value like a stub: the test places it and
+owns its lifetime. To substitute a class at a location, so code that
+constructs its own collaborator gets doubles, hold a factory in a
+value binding:
+
+```python
+with wrapture.binding("myapp.transport", attr="Connection").overrides(
+    lambda *a, **k: wrapture.mock(Connection)
+):
+    ...
+```
+
 ## Recording calls on a timeline
 
 A binding does more than intervene: inside a recording scope it also
