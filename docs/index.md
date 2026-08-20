@@ -52,7 +52,7 @@ have been written with them in mind, or can only be switched on for the
 whole program at once. wrapture needs neither: you point at a method by
 name and a trace appears.
 
-## Thirty seconds of it
+## At a glance
 
 None of the classes below import wrapture or know they are observed:
 

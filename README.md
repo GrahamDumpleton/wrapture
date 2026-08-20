@@ -44,7 +44,7 @@ worked examples, starting with
 [testing code that calls external services](https://wrapture.readthedocs.io/en/latest/example-external-services.html),
 each take one question you might arrive with and answer it end to end.
 
-## Thirty seconds of it
+## At a glance
 
 None of the classes below import wrapture or know they are observed:
 
