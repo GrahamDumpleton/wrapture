@@ -21,14 +21,14 @@ from __future__ import annotations
 import inspect
 import keyword
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, cast
 
 from wrapt import MISSING, FunctionWrapper
 
 from .bindings import Binding, binding
 from .capture import CapturePolicy
-from .exceptions import WrongModeError
-from .timeline import _Appliable, timeline
+from .exceptions import ExpectationNotMetError, WrongModeError
+from .timeline import _Appliable, _current_tape, timeline
 
 __all__ = ["BoundSpec", "bound", "taped"]
 
@@ -84,6 +84,15 @@ _KIND_CHANNELS: dict[str, frozenset[str]] = {
     "value": frozenset(),
     "mapping": frozenset(),
 }
+
+# Expectation declarations mirror Binding.expect_*: they live on the
+# root spec (an expectation is a property of the binding, not of one
+# channel) and are also reachable through a channel recorder, exactly
+# as a real namespace delegates them to its binding.
+
+_EXPECT_VERBS = frozenset(
+    {"expect_times", "expect_once", "expect_never", "expect_at_least"}
+)
 
 _KIND_VALUE_VERBS: dict[str, frozenset[str]] = {
     "value": frozenset({"overrides", "hides", "passes_through"}),
@@ -188,6 +197,29 @@ def _pruned_signature(fn: Any, alias: str, decorator: str) -> inspect.Signature 
     )
 
 
+def _verify_expectations(built: Binding) -> None:
+    """Verify a decorator binding's declared expectations at teardown.
+
+    Called only when the body did not raise, mirroring timeline exit:
+    a verification error on top of an in-flight failure would bury it.
+    Expectations with nothing recording are a loud error, not a silent
+    pass, exactly as reading `events` outside a timeline is.
+    """
+
+    if not built._expectations:
+        return
+
+    tape = _current_tape()
+    if tape is None:
+        raise ExpectationNotMetError(
+            f"{built.label}: expectations were declared but nothing was"
+            " recording; open a tape with taped() outermost, the pytest"
+            " plugin's tape fixture, or a timeline() spanning the test"
+        )
+
+    built._verify(tape)
+
+
 def _finish_wrapper(
     wrapper: Any,
     fn: Any,
@@ -232,6 +264,14 @@ class _BoundChannel:
                 " the test's script and are configured in the body, through"
                 " the injected binding."
             )
+
+        # Expectations route to the root spec, as a real namespace
+        # delegates them to its binding. The cast papers over the root
+        # being handed back instead of the recorder; both are
+        # decorator-callable and carry the same chain surface.
+
+        if name in _EXPECT_VERBS:
+            return cast("Callable[..., _BoundChannel]", getattr(self._spec, name))
 
         if name not in _CHANNEL_VERBS[self._channel]:
             raise AttributeError(f"bound() chain: {self._channel} has no verb {name!r}")
@@ -348,6 +388,43 @@ class BoundSpec:
 
         return self._value_verb("passes_through")
 
+    # -- declared expectations --------------------------------------------
+
+    def _expect_verb(self, name: str, *args: Any) -> BoundSpec:
+        # Value and mapping bindings record nothing, exactly the check
+        # Binding._expects makes; failing here keeps it at decoration.
+
+        if self._kind in ("value", "mapping"):
+            raise WrongModeError(
+                f"bound() chain: a {self._kind!r} binding records nothing;"
+                f" it cannot carry an expectation"
+            )
+
+        self._program.append((None, name, args, {}))
+
+        return self
+
+    def expect_times(self, count: int) -> BoundSpec:
+        """Declare that the binding records exactly `count` events,
+        verified when the decorator removes it after a passing body."""
+
+        return self._expect_verb("expect_times", count)
+
+    def expect_once(self) -> BoundSpec:
+        """Declare that the binding records exactly one event."""
+
+        return self._expect_verb("expect_once")
+
+    def expect_never(self) -> BoundSpec:
+        """Declare that the binding records no events."""
+
+        return self._expect_verb("expect_never")
+
+    def expect_at_least(self, count: int) -> BoundSpec:
+        """Declare that the binding records at least `count` events."""
+
+        return self._expect_verb("expect_at_least", count)
+
     # -- alias derivation -------------------------------------------------
 
     def _derived_alias(self) -> str | None:
@@ -460,9 +537,12 @@ class BoundSpec:
                 async def run() -> Any:
                     built = spec._build().apply()
                     try:
-                        return await wrapped(*args, **{**kwargs, alias: built})
+                        result = await wrapped(*args, **{**kwargs, alias: built})
                     finally:
                         built.remove()
+
+                    _verify_expectations(built)
+                    return result
 
                 return run()
 
@@ -473,9 +553,12 @@ class BoundSpec:
             ) -> Any:
                 built = spec._build().apply()
                 try:
-                    return wrapped(*args, **{**kwargs, alias: built})
+                    result = wrapped(*args, **{**kwargs, alias: built})
                 finally:
                     built.remove()
+
+                _verify_expectations(built)
+                return result
 
         def wrapper(
             wrapped: Any,

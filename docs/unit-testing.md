@@ -101,6 +101,21 @@ def test_priced_call_succeeds(API_KEY):
     ...
 ```
 
+Declared expectations ride the chain too, on the spec itself since an
+expectation belongs to the binding rather than to a channel, and are
+verified when the decorator removes the binding after a passing body,
+so verification cannot be forgotten. An expectation with nothing
+recording is a loud error rather than a silent pass:
+
+```python
+@wrapture.taped()
+@wrapture.bound(Gateway, "charge").on_call.raises(TimeoutError("down"))
+@wrapture.bound(Ledger, "record").expect_never()
+def test_failed_charge_never_reaches_the_ledger(tape, charge, record):
+    with pytest.raises(TimeoutError):
+        place_order("widget")
+```
+
 The chain carries one phase's worth of behaviour: stages plus at most
 one terminal per channel. `then()` and `advance()` are deliberately
 not part of it; how behaviour changes over time is the test's script,
@@ -1142,7 +1157,10 @@ def test_order_charges_exactly_once():
 
 Available: `expect_times(n)`, `expect_once()`, `expect_never()` and
 `expect_at_least(n)`. Several can be declared and all are verified; the
-timeline verifies the bindings (and group members) it was given.
+timeline verifies the bindings (and group members) it was given, and a
+`bound()` decorator verifies its own binding's declarations, chained
+or made in the body on the injected handle, when it removes the
+binding after a passing body.
 `ExpectationNotMetError` derives from `AssertionError`, so test
 frameworks report it as a failure, with the same event-listing output
 the immediate assertions produce.
@@ -1272,8 +1290,9 @@ When a test that used `tape` fails, the tape's `tree()` is attached to
 the failure report under a "wrapture tape" section, so the output shows
 what actually ran, not just the assertion that tripped. Note that the
 fixture's timeline is given no bindings, so it applies none and
-verifies no declared expectations; use `timeline(...)` inside the test
-where those are wanted.
+verifies no declared expectations itself; a `bound()` decorator's
+binding verifies its own, and for with-block bindings use
+`timeline(...)` inside the test where expectations are wanted.
 
 **Assertion output for event logs.** Comparisons involving an
 `EventLog` print the events, including the "filtered from" fallback
