@@ -84,6 +84,12 @@ with wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"}):
 The two styles must not be mixed: calling `apply()` on an already applied
 binding raises `AlreadyAppliedError`.
 
+In a test, a third form applies a binding around a whole test function:
+`wrapture.bound()` takes the same addressing arguments and the same
+chain, and is used as a decorator, with the binding injected into the
+test as an argument. See
+[scoping with decorators](unit-testing.md#scoping-with-decorators).
+
 Three properties report state honestly:
 
 ```python

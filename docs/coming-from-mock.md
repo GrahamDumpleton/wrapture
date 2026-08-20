@@ -15,6 +15,8 @@ The quick translation, expanded below:
 
 | unittest.mock | wrapture |
 |---|---|
+| `@patch("pkg.mod.fn")` as a decorator, mock injected | `@bound("pkg.mod", "fn")` as a decorator, binding injected by name |
+| `@patch.dict(os.environ, {"K": "v"})` as a decorator | `@bound(os.environ, item="K").overrides("v")` |
 | `patch.object(C, "m", return_value=v)` | `binding(C, "m").on_call.returns(v)` |
 | `patch.object(C, "m", side_effect=exc)` | `binding(C, "m").on_call.raises(exc)` |
 | `patch.object(C, "m", autospec=True, ...)` | the default; `strict=False` to opt out |
