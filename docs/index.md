@@ -89,7 +89,10 @@ with the facts in hand.
 ## Documentation
 
 The guides are organised by mechanism: bindings and behaviours, then
-recording in tests, then tracing a running process. The worked examples
+recording in tests, then tracing a running process. The
+[design concepts](design-concepts.md) page opens the section and is the recommended
+first read: every idea the guides build on, a paragraph apiece, and
+how they fit together. The worked examples
 are organised by the question you arrive with, and each one combines
 several of those mechanisms on a small concrete scenario, building up
 from the problem to a finished test or configuration.
@@ -108,6 +111,7 @@ how-wrapture-was-built
 :maxdepth: 2
 :caption: Guides
 
+design-concepts
 monkey-patching
 unit-testing
 ad-hoc-tracing

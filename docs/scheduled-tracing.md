@@ -1,4 +1,4 @@
-# Scheduled tracing: windows and collectors
+# Scheduled tracing
 
 The sinks on the [ad-hoc tracing page](ad-hoc-tracing.md) listen for
 as long as they are registered, which for a config sink is the life
