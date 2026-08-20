@@ -237,8 +237,12 @@ and calls straight through when nothing listens. Its path and label
 derive from the callable itself (`module:qualname`), with `label=` to
 override, and the keyword options are the uniform subset `binding()`
 takes: `capture=`, `capture_args=`, `capture_result=`, `stack=` and
-`when=` (which receives `(None, args, kwargs)`, there being no bound
-instance).
+`when=` (which receives `(instance, args, kwargs)`; the instance is
+None for a free-standing callable). Placed on a class, the proxy binds
+as a method exactly as the wrapped function would: calls made through
+instances record the instance (so `with_instance()` applies), the
+bound signature drops `self`, and the normalized arguments never
+contain it.
 
 The division of responsibility is the inverse of a binding's. A
 binding owns installation and removal; `observed()` owns neither:

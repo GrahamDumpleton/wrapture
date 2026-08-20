@@ -262,3 +262,110 @@ def test_observed_requires_a_callable() -> None:
 def test_the_proxy_type_is_exported() -> None:
     assert isinstance(observed(greet), ObservedCallable)
     assert isinstance(observed(greet), wrapture.ObservedCallable)
+
+
+# ---------------------------------------------------------------------------
+# placement on a class: the proxy binds as a method
+# ---------------------------------------------------------------------------
+
+
+def task_hook(self: Any, task_id: str, args: tuple[Any, ...]) -> None:
+    pass
+
+
+def test_placed_on_a_class_the_proxy_binds_and_records_the_instance() -> None:
+    hook = observed(task_hook, "before_start")
+
+    class Task:
+        before_start: Any = hook
+
+    task = Task()
+    with timeline():
+        task.before_start("id-1", (2, 2))
+
+        event = hook.events.assert_once().first
+        assert event.instance is task
+        assert event.arguments == {"task_id": "id-1", "args": (2, 2)}
+
+
+def test_bound_access_reaches_the_proxy_state_and_events() -> None:
+    hook = observed(task_hook, "state_hook")
+
+    class Task:
+        before_start: Any = hook
+
+    task = Task()
+    with timeline():
+        task.before_start.suspend()
+        task.before_start("id-1", ())
+        task.before_start.resume()
+        task.before_start("id-2", ())
+
+        assert hook.suspended_calls == 1
+        task.before_start.events.assert_once()
+
+
+def test_bound_signature_drops_self() -> None:
+    hook = observed(task_hook, "signature_hook")
+
+    class Task:
+        before_start: Any = hook
+
+    import inspect
+
+    assert list(inspect.signature(Task().before_start).parameters) == [
+        "task_id",
+        "args",
+    ]
+
+
+def test_when_receives_the_bound_instance() -> None:
+    seen: list[Any] = []
+
+    def only_flagged(
+        instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> bool:
+        seen.append(instance)
+        return getattr(instance, "flagged", True)
+
+    hook = observed(task_hook, "when_hook", when=only_flagged)
+
+    class Task:
+        flagged: bool
+        before_start: Any = hook
+
+    flagged = Task()
+    flagged.flagged = True
+    quiet = Task()
+    quiet.flagged = False
+
+    with timeline():
+        flagged.before_start("id-1", ())
+        quiet.before_start("id-2", ())
+
+        assert seen == [flagged, quiet]
+        assert hook.events.assert_once().first.instance is flagged
+        assert hook.filtered_calls == 1
+
+
+def test_wrapping_a_bound_method_records_its_instance() -> None:
+    class Gateway:
+        def charge(self, amount: int) -> int:
+            return amount
+
+    gateway = Gateway()
+    charge = observed(gateway.charge)
+
+    with timeline():
+        charge(500)
+
+        event = charge.events.assert_once().first
+        assert event.instance is gateway
+        assert event.arguments == {"amount": 500}
+
+
+def test_the_proxy_stays_weak_referenceable() -> None:
+    import weakref
+
+    proxy = observed(task_hook, "weak_hook")
+    assert weakref.ref(proxy)() is proxy
