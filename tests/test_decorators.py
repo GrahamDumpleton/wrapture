@@ -535,3 +535,113 @@ def test_a_spec_in_a_variable_is_reusable_across_functions() -> None:
 
     one()
     two()
+
+
+# ---------------------------------------------------------------------------
+# declared expectations
+# ---------------------------------------------------------------------------
+
+
+def test_a_chain_expectation_is_verified_at_teardown() -> None:
+    @taped()
+    @bound(Gateway, "charge").on_call.returns({"id": "STUB"}).expect_once()
+    def body(tape: Any, charge: Any) -> None:
+        Gateway().charge(1)
+
+    body()
+
+
+def test_an_unmet_chain_expectation_fails_the_test() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @taped()
+    @bound(Gateway, "charge").expect_once()
+    def body(tape: Any, charge: Any) -> None:
+        pass
+
+    with pytest.raises(ExpectationNotMetError, match="Gateway.charge"):
+        body()
+
+
+def test_expect_never_guards_the_negative_path() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @taped()
+    @bound(Gateway, "charge").expect_never()
+    def body(tape: Any, charge: Any) -> None:
+        Gateway().charge(1)
+
+    with pytest.raises(ExpectationNotMetError):
+        body()
+
+
+def test_a_body_declared_expectation_is_verified_too() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @taped()
+    @bound(Gateway, "charge")
+    def body(tape: Any, charge: Any) -> None:
+        charge.expect_once()
+
+    with pytest.raises(ExpectationNotMetError):
+        body()
+
+
+def test_a_raising_body_is_not_buried_by_verification() -> None:
+    @taped()
+    @bound(Gateway, "charge").expect_once()
+    def body(tape: Any, charge: Any) -> None:
+        raise KeyError("the real failure")
+
+    with pytest.raises(KeyError, match="the real failure"):
+        body()
+
+
+def test_expectations_with_no_tape_error_loudly() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @bound(Gateway, "charge").expect_once()
+    def body(charge: Any) -> None:
+        Gateway().charge(1)
+
+    with pytest.raises(ExpectationNotMetError, match="nothing was recording"):
+        body()
+
+
+def test_expectations_route_through_a_channel_recorder() -> None:
+    @taped()
+    @bound(Gateway, "charge").on_call.returns({"id": "STUB"}).expect_once()
+    def body(tape: Any, charge: Any) -> None:
+        Gateway().charge(1)
+
+    body()
+
+
+def test_expectations_merge_across_collapsed_decorators() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @taped()
+    @bound(Gateway, "charge").expect_once()
+    @bound(Gateway, "charge").on_call.returns({"id": "STUB"})
+    def body(tape: Any, charge: Any) -> None:
+        pass
+
+    with pytest.raises(ExpectationNotMetError):
+        body()
+
+
+def test_a_value_binding_cannot_carry_an_expectation() -> None:
+    with pytest.raises(WrongModeError, match="cannot carry an expectation"):
+        bound(os.environ, item="API_KEY").expect_once()
+
+
+def test_an_async_expectation_is_verified() -> None:
+    from wrapture import ExpectationNotMetError
+
+    @taped()
+    @bound(PushClient, "send").on_call.returns("queued").expect_once()
+    async def body(tape: Any, send: Any) -> None:
+        pass
+
+    with pytest.raises(ExpectationNotMetError):
+        asyncio.run(body())
