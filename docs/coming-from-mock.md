@@ -2,8 +2,14 @@
 
 `unittest.mock` substitutes objects: a patched attribute becomes a
 `Mock`, and the test asserts against what the `Mock` recorded. wrapture
-wraps the real attribute and intervenes in flight. The two overlap on
-simple cases and differ sharply once real code needs to keep running.
+defaults to the opposite strategy: wrap the real code and intervene in
+flight, with call signatures checked, real return values recorded, and
+order and nesting kept across everything observed. When a test does
+want a substitute, substitution is a deliberate, scoped opt-in rather
+than the silent baseline: `stub()` supplies one callable, `mock(Spec)`
+one collaborator, both strict and recorded. The one thing wrapture
+does not provide is fabrication without a spec; the end of this page
+says why.
 
 The quick translation, expanded below:
 
@@ -370,12 +376,26 @@ with wrapture.timeline(send):
 And with wrapture the real `send` ran, or was stubbed in place with
 the rest of the code still real, per everything above.
 
-## When to just use unittest.mock
+## Where unittest.mock still fits
 
-`unittest.mock` is in the standard library, universally understood, and
-the right tool when the code has injectable seams and the test wants a
-fabricated collaborator: no real side effects, spec-checked call
-signatures, recorded calls. wrapture is not a replacement for it.
-wrapture exists for the cases substitution cannot express: code with no
-seams, interventions that keep the real code running, and observation of
-a real call graph.
+Everything above follows one rule with one opt-out. The rule: wrap the
+real code, strictly, and record what actually flowed. The opt-out:
+when the test itself must supply the thing being called, `stub()`
+supplies one callable and `mock(Spec)` one collaborator, still strict
+(signatures checked, surfaces fixed by the spec) and still recorded on
+the same tape as everything else.
+
+What wrapture deliberately does not provide is the spec-less form: a
+bare `Mock()` or `MagicMock` whose attributes exist on first touch and
+whose call chains all answer. A fabricated object that answers
+everything verifies nothing; the misspelled method, the drifted
+signature and the unconfigured chain all pass silently, and that is a
+bug farm, not a feature gap. A test that cannot name the class it is
+substituting has a question to answer before it has a double to build.
+
+That leaves `unittest.mock` two genuine holds. It is in the standard
+library: zero dependencies, universally understood, on every team's
+common ground, and sometimes that alone decides. And it is the tool
+for fabrication without a spec, where a test wants an object invented
+as it is touched. The two libraries coexist happily in one suite;
+translating between them is what the table at the top is for.

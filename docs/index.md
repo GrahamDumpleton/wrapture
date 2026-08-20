@@ -33,7 +33,9 @@ One mechanism, three uses, in increasing order of machinery:
    *real* call graph (nesting, ordering, arguments and return values) and
    optionally intervene (stub, transform, fail-inject). Unlike a
    `unittest.mock` `Mock`, which fabricates values and cannot see calls an object makes to itself,
-   wrapture watches the real code run.
+   wrapture watches the real code run, and when a test must supply a
+   stand-in it provides strict, recorded ones: `stub()` for a callable,
+   spec-required `mock()` for a collaborator.
 
 3. **Ad-hoc tracing.** Attach bindings to a running application, including
    one you cannot modify or redeploy, and emit a structured, nested trace to
