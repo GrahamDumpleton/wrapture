@@ -7,7 +7,10 @@ the outcome of the test: a patch that leaks changes the behaviour of every
 test that runs after it.
 
 This page covers the workflow in the order a test suite grows into it:
-the scoping patterns for plain tests, pytest and unittest; recording what
+the scoping patterns for plain tests, pytest and unittest; observing
+callables no binding can reach, and the stand-ins a test supplies
+itself (`stub()` for one callable, spec-required `mock()` for a
+collaborator); recording what
 actually happened inside a test as events on a timeline, including how
 much of each value is captured, annotation, and stack capture; filtering
 and asserting on those events, immediately or as declared expectations;

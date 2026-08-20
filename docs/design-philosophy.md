@@ -54,9 +54,11 @@ If wrapture's API does not cover a case, you can always drop down a level.
 ## wrapture and unittest.mock
 
 The short version: `unittest.mock` substitutes objects and asserts on
-what the substitute recorded; wrapture wraps the real attribute and
-intervenes or observes in flight, so the real code keeps running. Each
-is the right tool for different tests, and they coexist happily in one
-suite. The "Coming from unittest.mock" page walks the comparison case
-by case, with the same test written both ways, and ends with when mock
-remains the better choice.
+what the substitute recorded; wrapture wraps the real code and
+intervenes or observes in flight, strictly and recorded, with
+substitution available as a deliberate opt-in (`stub()` for one
+callable, `mock(Spec)` for one collaborator) rather than the silent
+baseline. The two coexist happily in one suite. The "Coming from
+unittest.mock" page walks the comparison case by case, with the same
+test written both ways, and ends with the one kind of double wrapture
+deliberately does not provide.

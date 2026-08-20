@@ -83,7 +83,9 @@ One mechanism, three uses, in increasing order of machinery:
    *real* call graph (nesting, ordering, arguments and return values) and
    optionally intervene (stub, transform, fail-inject). Unlike a
    `unittest.mock` `Mock`, which fabricates values and cannot see calls an object makes to itself,
-   wrapture watches the real code run. This makes it possible to test code
+   wrapture watches the real code run, and when a test must supply a
+   stand-in it provides strict, recorded ones: `stub()` for a callable,
+   spec-required `mock()` for a collaborator. This makes it possible to test code
    with no injectable seams at all, and to assert on what *didn't* happen on
    an error path: inject a gateway timeout, then verify the ledger was not
    written, the receipt was not sent, and the compensating refund was issued.
