@@ -774,7 +774,27 @@ with wrapture.binding(os.environ, item="API_KEY").hides():
 
 `apply()` (or entering the `with`) notes what the slot held, or that
 it held nothing, and writes the configured state; `remove()` puts the
-prior state back, deleting the slot if it did not exist before. The
+prior state back, deleting the slot if it did not exist before. What
+comes back is the state noted at `apply()`, whatever happened to the
+slot in between: the configured value is only the starting state, and
+the test may reassign the slot directly, or delete it, with the
+original still restored on the way out. A test that walks one setting
+through several values therefore needs one binding, not one scope per
+value:
+
+```python
+with wrapture.binding(os.environ, item="APP_ENV").overrides("staging"):
+    assert detect_environment() == "staging"
+
+    os.environ["APP_ENV"] = "production"
+    assert detect_environment() == "production"
+# APP_ENV holds what it held before, or is absent again
+```
+
+The restore covers the slot itself, not objects reachable through it:
+a test that digs out the slot's *original* mutable value and changes
+it in place has changed the original, and putting the reference back
+does not undo that. The
 owner is never replaced, so every reference to it sees the change:
 `os.environ` is one object, and a settings dict imported elsewhere
 with `from config import SETTINGS` is the same dict the binding wrote

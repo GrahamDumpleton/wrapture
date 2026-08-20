@@ -29,8 +29,10 @@ The quick translation, expanded below:
 | `AsyncMock` inside a spec'd collaborator | `mock(Connection)`: each method's kind comes from the spec |
 | `Mock()` supplied as a callable (a hook, a receiver, a callback) | `stub()`; `stub("label")` to name its events |
 | `Mock(return_value=v)` handed over as a callable | `stub(returns=v)`; `stub(raises=exc)` for `side_effect=exc` |
+| `Mock(side_effect=fn)` handed over as a callable | `observed(fn)`: the function itself is the behaviour, its calls recorded |
 | `create_autospec(fn)` supplied as a callable | `stub(mimics=fn)`: signature-checked, arguments by name |
 | `AsyncMock()` supplied as a coroutine callable | `stub(kind="coroutine")`, or `stub(mimics=fn)` with the kind inferred |
+| a `Mock` faking an iterator, `__next__` scripted with `side_effect=[a, b, StopIteration()]` | `stub(kind="generator", returns=[a, b])`: a real generator, exhaustion included |
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |

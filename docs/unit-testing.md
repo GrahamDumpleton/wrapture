@@ -88,6 +88,20 @@ def test_reads_pinned_writes_rejected(status):
     ...
 ```
 
+Every injected name must have somewhere to land: a decorator whose
+name matches no parameter is a loud `TypeError` at decoration, never a
+surprise at call time. A `**kwargs` parameter absorbs any injected
+handles the body does not name, which keeps a decorator-heavy test's
+signature down to what it actually reads:
+
+```python
+@wrapture.taped()
+@wrapture.bound(Gateway, "charge").on_call.returns({"id": "stub"})
+@wrapture.bound(Ledger, "record").on_call.returns(None)
+def test_asserts_on_the_tape_alone(tape, **_):
+    ...
+```
+
 Value and mapping bindings work the same way, which makes the
 decorator the direct counterpart of `unittest.mock`'s `@patch.dict`.
 The slot's name is the injected name exactly, capitalization included,
@@ -99,6 +113,25 @@ ordinary Python:
 @wrapture.bound(os.environ, item="API_KEY").overrides("sk_test")
 def test_priced_call_succeeds(API_KEY):
     ...
+```
+
+One caution carries over from ordinary Python. The decorator's
+arguments are evaluated once, when the test function is defined,
+exactly as default argument values are, and with the same consequence
+for mutable values: `overrides([])` in a chain is one shared list. The
+binding is fresh on every call, but the value is not, so in the one
+situation where a decorated test runs more than once in a process,
+above all a parametrized test, whatever one run leaves in that list the
+next run inherits. A mutable override that must start clean on every
+run is built in the body instead, with the with-block, so the value is
+created in the scope of the call it serves:
+
+```python
+@pytest.mark.parametrize("payload", PAYLOADS)
+def test_each_payload_starts_clean(payload):
+    with wrapture.binding("config", attr="WARNINGS").overrides([]):
+        process(payload)
+        ...
 ```
 
 Declared expectations ride the chain too, on the spec itself since an
@@ -565,8 +598,12 @@ test depends on is declared, one double per node. Accessing a name the
 spec does not have raises `AttributeError`, in the test and in the code
 under test alike, and data attributes hold no invented values: the test
 assigns what the code reads (`conn.host = "amqp.local"`), and reading
-an unassigned one is a loud error. Compare the classic
-`unittest.mock` failure mode:
+an unassigned one is a loud error. A bare assignment lasts for the
+double's lifetime; when the value should hold for only part of the
+test, a value binding on the double scopes it,
+`with wrapture.binding(conn, attr="host").overrides("amqp.local"):`,
+and on exit the attribute is absent again, loud reads included.
+Compare the classic `unittest.mock` failure mode:
 
 ```python
 # unittest.mock: everything below passes, no spec was asked for
@@ -652,6 +689,31 @@ with wrapture.timeline(charge, record) as whole:
         service.place("widget")
         charge.events.with_args(amount=500).assert_once()   # the act step alone
 ```
+
+The same scoping is how a **phased test** keeps each phase's counts
+separate, the other job `reset_mock()` does in a mock suite: act,
+assert, change something, act again. Open one timeline per phase. A
+binding handed to `timeline()` is applied on entry and removed on
+exit, so the same binding serves every phase, and each phase's tape
+starts empty without any history being destroyed:
+
+```python
+charge = wrapture.binding(Gateway, "charge").on_call.returns({"id": "stub"})
+
+with wrapture.timeline(charge):
+    service.place("widget")
+    charge.events.assert_once()      # the first order pays
+
+with wrapture.timeline(charge):
+    service.place("widget")          # already paid: served from the cache
+    charge.events.assert_never()
+```
+
+The second phase states `assert_never()` outright, where one
+cumulative tape could only say "the count is still one". Under an
+ambient tape (the plugin's, or `taped()`) the same blocks nest as
+above, and the outer tape still holds the whole run, so per-phase
+counts and whole-test ordering assertions coexist.
 
 A loop of scenarios opens a fresh `timeline()` per iteration the same
 way. Behaviour is separate from recording and is reconfigured in place,
