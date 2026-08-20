@@ -23,9 +23,11 @@ if TYPE_CHECKING:
     from .bindings import Binding
 
 # The namespaces are generic in R, what a behaviour verb hands back: the
-# Binding from a base namespace, so configuration chains into apply() or
-# the context manager, and the phase namespace itself from a phase, so
-# one phase configures in a chain.
+# namespace the chain first encountered. A base namespace hands itself
+# back, so verbs chain on one channel without naming it again, and the
+# namespace stands in for its binding (apply(), the context manager,
+# timeline()); a phase namespace, from then(), likewise hands itself
+# back so one phase configures in a chain.
 
 # The signature wrapt uses for wrappers and decorators:
 # fn(wrapped, instance, args, kwargs).
@@ -322,10 +324,12 @@ class Phase:
 class _Behaviour[R]:
     """Base for the per-operation behaviour namespaces.
 
-    A namespace configures one phase of one operation. The base
-    namespaces (`on_call` and friends) configure phase 0 and hand the
-    Binding back from every verb; a phase namespace, obtained from
-    then(), configures its own phase and hands itself back.
+    A namespace configures one phase of one operation, and every verb
+    hands the namespace back: the base namespaces (`on_call` and
+    friends) configure phase 0, a phase namespace, obtained from
+    then(), configures its own phase. Verbs therefore chain without
+    naming the channel again, and a base namespace stands in for its
+    binding wherever one is expected.
     """
 
     __slots__ = ("_binding", "_phase")
@@ -812,7 +816,18 @@ class _DeleteVerbs[R](_Behaviour[R]):
 
 
 class _BaseNamespace:
-    """What only a base namespace offers: dropping the whole chain."""
+    """What only a base namespace offers: dropping the whole chain, and
+    standing in for the binding.
+
+    Verbs on a base namespace hand the namespace back, so an expression
+    like `binding(X, "y").on_call.transforms_args(f).returns(None)`
+    chains without naming the channel again and lands somewhere that
+    must behave as the binding: a with target, a timeline() argument,
+    the object whose `.events` a test reads. The lifecycle methods are
+    defined explicitly (the with statement looks dunder methods up on
+    the type, and the appliable protocol names apply and remove);
+    everything else falls through to the binding.
+    """
 
     __slots__ = ()
 
@@ -826,14 +841,47 @@ class _BaseNamespace:
         self._binding._clear_behaviour(self._operation)
         return self._binding
 
+    def apply(self, *, suspended: bool = False) -> Binding:
+        """Apply the binding this namespace configures."""
 
-class CallBehaviour(_BaseNamespace, _CallVerbs["Binding"]):
+        return self._binding.apply(suspended=suspended)
+
+    def remove(self, *, missing_ok: bool = True) -> Binding:
+        """Remove the binding this namespace configures."""
+
+        return self._binding.remove(missing_ok=missing_ok)
+
+    def __enter__(self) -> Binding:
+        return self._binding.__enter__()
+
+    def __exit__(self, *exc: object) -> None:
+        self._binding.__exit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        # Underscore names are the namespace's own business: delegating
+        # them could recurse before _binding is set, and nothing private
+        # to the binding is part of the stand-in surface.
+
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        return getattr(self._binding, name)
+
+    def __repr__(self) -> str:
+        # The namespace comes back from every verb, so its repr is what
+        # a REPL shows after configuring: name the channel type and show
+        # the binding's own state inside.
+
+        return f"<{type(self).__name__} of {self._binding!r}>"
+
+
+class CallBehaviour(_BaseNamespace, _CallVerbs["CallBehaviour"]):
     """`binding.on_call`: behaviour for calls to a wrapped callable."""
 
     __slots__ = ()
 
-    def _done(self) -> Binding:
-        return self._binding
+    def _done(self) -> CallBehaviour:
+        return self
 
 
 class CallPhase(_CallVerbs["CallPhase"]):
@@ -845,13 +893,13 @@ class CallPhase(_CallVerbs["CallPhase"]):
         return self
 
 
-class GetBehaviour(_BaseNamespace, _GetVerbs["Binding"]):
+class GetBehaviour(_BaseNamespace, _GetVerbs["GetBehaviour"]):
     """`binding.on_get`: behaviour for attribute reads."""
 
     __slots__ = ()
 
-    def _done(self) -> Binding:
-        return self._binding
+    def _done(self) -> GetBehaviour:
+        return self
 
 
 class GetPhase(_GetVerbs["GetPhase"]):
@@ -863,13 +911,13 @@ class GetPhase(_GetVerbs["GetPhase"]):
         return self
 
 
-class SetBehaviour(_BaseNamespace, _SetVerbs["Binding"]):
+class SetBehaviour(_BaseNamespace, _SetVerbs["SetBehaviour"]):
     """`binding.on_set`: behaviour for attribute writes."""
 
     __slots__ = ()
 
-    def _done(self) -> Binding:
-        return self._binding
+    def _done(self) -> SetBehaviour:
+        return self
 
 
 class SetPhase(_SetVerbs["SetPhase"]):
@@ -881,13 +929,13 @@ class SetPhase(_SetVerbs["SetPhase"]):
         return self
 
 
-class DeleteBehaviour(_BaseNamespace, _DeleteVerbs["Binding"]):
+class DeleteBehaviour(_BaseNamespace, _DeleteVerbs["DeleteBehaviour"]):
     """`binding.on_delete`: behaviour for attribute deletes."""
 
     __slots__ = ()
 
-    def _done(self) -> Binding:
-        return self._binding
+    def _done(self) -> DeleteBehaviour:
+        return self
 
 
 class DeletePhase(_DeleteVerbs["DeletePhase"]):

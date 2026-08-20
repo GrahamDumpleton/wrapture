@@ -100,7 +100,17 @@ of three states: `unapplied`, `active` or `displaced`.
 ## Call behaviour: changing what a call does
 
 Behaviour for calls is configured through the `on_call` namespace. Every
-method returns the binding, so configuration chains with `apply()`.
+method returns the namespace itself, so several verbs chain on the
+channel without naming it again, and the namespace stands in for its
+binding everywhere one is expected: as a `with` target, passed to
+`timeline()`, applied with `apply()`, or asked for its `events`.
+
+```python
+charge = wrapture.binding(Gateway, "charge")
+
+with charge.on_call.transforms_args(fn).returns(None):
+    ...
+```
 
 ### Substituting results and failures
 
@@ -947,6 +957,15 @@ configured through its `on_item` namespace:
 ```python
 doubles = wrapture.iterator()
 doubles.on_item.transforms_item(lambda item: 2 * item)
+```
+
+As on a binding's namespaces, every verb hands the namespace back, so
+several verbs chain without naming the namespace again, and the
+namespace stands in for its factory, including being callable with an
+iterator:
+
+```python
+doubles = wrapture.iterator().on_item.transforms_item(lambda item: 2 * item)
 ```
 
 Unlike a binding, the factory has no target. It is applied by calling

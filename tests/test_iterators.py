@@ -511,3 +511,53 @@ def test_factory_composes_with_decorates_for_arguments() -> None:
         assert Sink().consume(iter([1, 2, 3])) == [1, 2, 3]
 
     assert seen == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# the chain continuation rule: verbs hand the namespace back
+# ---------------------------------------------------------------------------
+
+
+def test_item_verbs_chain_on_one_namespace() -> None:
+    staged = (
+        iterator()
+        .on_item.transforms_item(lambda item: 2 * item)
+        .transforms_item(lambda item: item + 1)
+    )
+
+    assert list(staged(numbers())) == [3, 5, 7]
+
+
+def test_chain_and_separate_statements_configure_identically() -> None:
+    chained = (
+        iterator()
+        .on_item.transforms_item(lambda item: 2 * item)
+        .transforms_item(lambda item: item + 1)
+    )
+
+    stated = iterator()
+    stated.on_item.transforms_item(lambda item: 2 * item)
+    stated.on_item.transforms_item(lambda item: item + 1)
+
+    assert list(chained(numbers())) == list(stated(numbers()))
+
+
+def test_the_namespace_stands_in_for_the_factory() -> None:
+    finished: list[Any] = []
+
+    watched = (
+        iterator()
+        .on_item.transforms_item(lambda item: -item)
+        .on_finish.validates(finished.append)
+    )
+
+    assert list(watched(numbers())) == [-1, -2, -3]
+    assert finished == [None]
+
+
+def test_the_iterator_namespace_repr_shows_the_factory() -> None:
+    watched = iterator().on_item.transforms_item(lambda item: item)
+
+    assert repr(watched) == (
+        "<IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>"
+    )

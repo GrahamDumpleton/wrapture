@@ -33,11 +33,13 @@ class Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_base_namespace_verbs_return_the_binding_and_phase_verbs_the_phase() -> None:
+def test_every_verb_returns_the_namespace_first_encountered() -> None:
     charge = binding(Gateway, "charge")
 
-    assert isinstance(charge.on_call, CallBehaviour)
-    assert charge.on_call.returns(1) is charge
+    ns = charge.on_call
+    assert isinstance(ns, CallBehaviour)
+    assert ns.returns(1) is ns
+    assert ns.returns(1).transforms_result(lambda r: r) is ns
 
     later = charge.on_call.then(after=1)
     assert isinstance(later, CallPhase)

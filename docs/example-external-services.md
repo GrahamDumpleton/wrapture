@@ -116,7 +116,7 @@ call with a canned receipt and never reaches the real method, so
 ```python
 >>> charge = wrapture.binding(PaymentClient, "charge")
 >>> charge.on_call.returns({"id": "ch_TEST", "amount": 500, "currency": "USD"})
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 
 >>> with charge:
 ...     service.place("o-1", 500)
@@ -153,7 +153,7 @@ raised, it is what the service does about it, and that code is real:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 
 >>> with charge:
 ...     service.place("o-2", 300)
@@ -205,7 +205,7 @@ down to the network edge, and the real `charge()` runs above it:
 ```python
 >>> post = wrapture.binding(PaymentClient, "_post")
 >>> post.on_call.returns({"id": "ch_LIVE_9f2"})
-<Binding 'PaymentClient._post' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient._post' callable unapplied>>
 
 >>> with post:
 ...     service.place("o-3", 250)
@@ -231,9 +231,9 @@ do not depend on what a live gateway happened to return:
 
 ```python
 >>> charge.on_call.transforms_args(lambda args, kwargs: (args, {**kwargs, "currency": "EUR"}))
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 >>> charge.on_call.transforms_result(lambda receipt: {**receipt, "id": "ch_TEST"})
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 
 >>> with post, charge:
 ...     service.client.charge(250)
@@ -253,7 +253,7 @@ as an event, with real arguments, real results and real nesting:
 
 ```python
 >>> charge.on_call.passes_through()
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 >>> refund = wrapture.binding(PaymentClient, "refund")
 
 >>> with wrapture.timeline(charge, refund, post) as tape:
@@ -298,7 +298,7 @@ so, printing the events it looked at if it is wrong:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 
 >>> with wrapture.timeline(charge, refund):
 ...     _ = service.place("o-7", 400)
@@ -318,7 +318,7 @@ cancelled paid order:
 
 ```python
 >>> charge.on_call.passes_through()
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 >>> _ = charge.expect_once()
 >>> _ = refund.expect_once()
 
@@ -338,7 +338,7 @@ block:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<Binding 'PaymentClient.charge' callable unapplied>
+<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
 
 >>> with wrapture.timeline(charge, refund, post):
 ...     _ = service.place("o-9", 900)

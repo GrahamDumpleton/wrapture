@@ -161,7 +161,14 @@ class Tape(Sink):
         return self._snapshot()
 
     def for_binding(self, bnd: Any) -> EventLog:
-        """A filterable view over this tape's events for one binding."""
+        """A filterable view over this tape's events for one binding.
+
+        Accepts the binding itself or a behaviour namespace standing in
+        for it, as a chain like `binding(...).on_call.returns(None)`
+        hands back.
+        """
+
+        bnd = getattr(bnd, "_binding", bnd)
 
         events = [event for event in self._snapshot() if event.binding is bnd]
 
@@ -330,9 +337,12 @@ class Tape(Sink):
 
         for step in steps:
             # An observed callable accessed as a bound method records
-            # under its parent wrapper; resolve to that identity.
+            # under its parent wrapper; resolve to that identity. A
+            # behaviour namespace stands in for its binding, so resolve
+            # that too.
 
             recorder = getattr(step, "_self_parent", None) or step
+            recorder = getattr(recorder, "_binding", recorder)
 
             if isinstance(step, EventLog):
                 matchers.append(accepts_log(step))
