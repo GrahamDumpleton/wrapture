@@ -139,6 +139,8 @@ class ObservedCallable(
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
         signature: Any = None,
         convention: str | None = None,
+        precheck: Callable[[Callable[..., Any], tuple[Any, ...], dict[str, Any]], None]
+        | None = None,
     ) -> None:
         # The wrapper function hands every call, bound or not, back to
         # the proxy with the target and instance wrapt resolved.
@@ -155,6 +157,7 @@ class ObservedCallable(
 
         self._self_path = path
         self._self_label = label
+        self._self_precheck = precheck
         self._self_capture_args = capture_args
         self._self_capture_result = capture_result
         self._self_stack_depth = stack
@@ -316,6 +319,14 @@ class ObservedCallable(
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> Any:
+        # A precheck (stub() strictness) rejects a call that does not
+        # fit before it is counted, recorded, or answered, suspended or
+        # not, exactly as a strict binding's signature check does.
+
+        precheck = self._self_precheck
+        if precheck is not None:
+            precheck(target, args, kwargs)
+
         if self._self_suspended:
             self._self_suspended_calls += 1
             return target(*args, **kwargs)

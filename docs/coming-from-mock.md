@@ -16,6 +16,10 @@ The quick translation, expanded below:
 | `side_effect=[a, b, exc]` (a sequence) | `on_call.returns_from([a, b])`, then `then().raises(exc)` |
 | `Mock(wraps=real)` | `on_call.transforms_args(fn)` / `transforms_result(fn)` / `decorates(fn)` |
 | `patch.multiple(C, a=..., b=...)` | `bindings(a=wrapture.binding(C, "a"), b=wrapture.binding(C, "b"))`, per-member behaviour |
+| `Mock()` supplied as a callable (a hook, a receiver, a callback) | `stub()`; `stub("label")` to name its events |
+| `Mock(return_value=v)` handed over as a callable | `stub(returns=v)`; `stub(raises=exc)` for `side_effect=exc` |
+| `create_autospec(fn)` supplied as a callable | `stub(mimics=fn)`: signature-checked, arguments by name |
+| `AsyncMock()` supplied as a coroutine callable | `stub(kind="coroutine")`, or `stub(mimics=fn)` with the kind inferred |
 | `m.assert_called_once_with(a=1)` | `events.with_args(a=1).assert_once()` |
 | `m.call_args_list` | `events` (filterable) or `tape.all` |
 | `m.assert_not_called()` | `events.assert_never()` or `expect_never()` |
