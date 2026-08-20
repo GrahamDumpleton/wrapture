@@ -77,6 +77,15 @@ New here? Start with the getting started page; everything on it can be
 pasted into an interpreter. Coming from `unittest.mock`? The comparison
 page maps each mock idiom to its wrapture counterpart.
 
+## How it was built
+
+wrapture's code and documentation were written by an AI assistant under
+the direction of Graham Dumpleton, the author of wrapt, through a long
+process of specification, layered implementation, and validation
+against real-world test suites. [How wrapture was built](how-wrapture-was-built.md)
+explains the process and the thinking, so you can judge the provenance
+with the facts in hand.
+
 ## Documentation
 
 The guides are organised by mechanism: bindings and behaviours, then
@@ -92,6 +101,7 @@ from the problem to a finished test or configuration.
 getting-started
 coming-from-mock
 design-philosophy
+how-wrapture-was-built
 ```
 
 ```{toctree}
