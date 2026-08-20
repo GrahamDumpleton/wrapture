@@ -125,12 +125,22 @@ testing assertion library, a tracing tool, or both at once.
 
 ## What it is not
 
-- **Not a replacement for `unittest.mock`.** It complements mocking where
-  code has seams; it exists for the code that doesn't.
+- **Not a fabrication tool.** There is no spec-less `Mock()` here by
+  design; stand-ins are strict and built from named specs, and
+  `unittest.mock` remains the tool for invented objects.
 - **Not a production APM.** It is a toolkit that APM-like things could be
   built on.
 - **Not an OpenTelemetry competitor.** It should emit to OTel, not replace
   it.
+
+## How it was built
+
+wrapture's code and documentation were written by an AI assistant under
+the direction of Graham Dumpleton, the author of wrapt, through a long
+process of specification, layered implementation, and validation against
+real-world test suites.
+[How wrapture was built](https://wrapture.readthedocs.io/en/latest/how-wrapture-was-built.html)
+explains the process and the thinking.
 
 ## Requirements
 
