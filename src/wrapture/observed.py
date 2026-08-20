@@ -22,7 +22,10 @@ signature introspection and equality all delegate to the wrapped
 callable, so registries that inspect what they are handed (a
 framework deriving an endpoint name, ensure_sync detecting a
 coroutine function, a duplicate-registration check comparing
-functions) behave as if the wrapper were not there.
+functions) behave as if the wrapper were not there. Placed on a
+class, the proxy binds as a method exactly as the wrapped function
+would: calls made through instances record the instance, and the
+bound signature drops self.
 
 observed() is observation only: there are no behaviour namespaces, so
 it cannot stub or fail-inject. Interventions want a removable home,
@@ -37,8 +40,14 @@ import warnings
 from collections.abc import Callable
 from typing import Any, cast
 
-from wrapt import CallableObjectProxy, wrapper_chain
+from wrapt import BoundFunctionWrapper, FunctionWrapper, wrapper_chain
 
+from ._wrappermixins import (
+    BoundConventionOverrideMixin,
+    BoundSignatureOverrideMixin,
+    ConventionOverrideMixin,
+    SignatureOverrideMixin,
+)
 from .behaviours import _named_after
 from .bindings import (
     _record_async_generator,
@@ -90,13 +99,33 @@ def _describe(fn: Any) -> tuple[str, str]:
     return f"{module}:{qualname}", f"{module}.{qualname}"
 
 
-class ObservedCallable(CallableObjectProxy[Any]):
+class BoundObservedCallable(
+    BoundConventionOverrideMixin,
+    BoundSignatureOverrideMixin,
+    BoundFunctionWrapper[Any, Any],
+):
+    """The bound form of an ObservedCallable placed on a class.
+
+    Produced by attribute access, exactly as a function becomes a bound
+    method; recording state, events and lifecycle all live on and
+    delegate to the parent proxy.
+    """
+
+
+class ObservedCallable(
+    ConventionOverrideMixin,
+    SignatureOverrideMixin,
+    FunctionWrapper[Any, Any],
+):
     """The recording proxy observed() returns.
 
     Calling it records one "call" event inside a recording scope and
-    otherwise calls straight through. Not created directly; see
-    observed().
+    otherwise calls straight through. Placed on a class it binds as a
+    method, recording the instance calls are made on. Not created
+    directly; see observed().
     """
+
+    __bound_function_wrapper__ = BoundObservedCallable
 
     def __init__(
         self,
@@ -108,8 +137,21 @@ class ObservedCallable(CallableObjectProxy[Any]):
         capture_result: CapturePolicy | None,
         stack: int | None,
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
+        signature: Any = None,
+        convention: str | None = None,
     ) -> None:
-        super().__init__(wrapped)
+        # The wrapper function hands every call, bound or not, back to
+        # the proxy with the target and instance wrapt resolved.
+
+        def invoke(
+            target: Callable[..., Any],
+            instance: Any,
+            args: tuple[Any, ...],
+            kwargs: dict[str, Any],
+        ) -> Any:
+            return self._invoke(target, instance, args, kwargs)
+
+        super().__init__(wrapped, invoke, signature=signature, convention=convention)
 
         self._self_path = path
         self._self_label = label
@@ -211,11 +253,19 @@ class ObservedCallable(CallableObjectProxy[Any]):
             )
 
     def _record_call(
-        self, active: tuple[Any, ...], args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        active: tuple[Any, ...],
+        target: Callable[..., Any],
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> Event:
         # Mirrors the callable binding's argument capture: NONE skips
         # signature binding entirely; at REFERENCE the raw call shape
         # rides along; above it, capture through the normalized form.
+        # The target is what wrapt resolved for this call, the bound
+        # method when the proxy sits on a class, so normalization never
+        # sees self.
 
         policy = self._self_capture_args
         if policy is None:
@@ -226,6 +276,7 @@ class ObservedCallable(CallableObjectProxy[Any]):
             "call",
             self._self_path,
             label=self._self_label,
+            instance=instance,
             binding=self,
             capture=level,
         )
@@ -234,9 +285,9 @@ class ObservedCallable(CallableObjectProxy[Any]):
             event.stack = _capture_stack(self._self_stack_depth)
 
         if level > NONE:
-            arguments = normalized_arguments(self.__wrapped__, args, kwargs)
+            arguments = normalized_arguments(target, args, kwargs)
             if arguments is not None:
-                event.var_keyword = var_keyword_name(self.__wrapped__)
+                event.var_keyword = var_keyword_name(target)
 
             if not callable(policy) and level == REFERENCE:
                 event.args = args
@@ -258,39 +309,45 @@ class ObservedCallable(CallableObjectProxy[Any]):
 
         return event
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def _invoke(
+        self,
+        target: Callable[..., Any],
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         if self._self_suspended:
             self._self_suspended_calls += 1
-            return self.__wrapped__(*args, **kwargs)
+            return target(*args, **kwargs)
 
         # when=False never records, counts nothing, and takes no part
         # in gap detection.
 
         if self._self_when is False:
-            return self.__wrapped__(*args, **kwargs)
+            return target(*args, **kwargs)
 
         active = _active_sinks()
 
         if not active or _in_recorder.get():
             if not active and not _in_recorder.get() and _timelines_active():
                 self._note_missed_call()
-            return self.__wrapped__(*args, **kwargs)
+            return target(*args, **kwargs)
 
         when = self._self_when
         if callable(when):
             guard = _in_recorder.set(True)
             try:
-                wanted = when(None, args, kwargs)
+                wanted = when(instance, args, kwargs)
             finally:
                 _in_recorder.reset(guard)
 
             if not wanted:
                 self._self_filtered_calls += 1
-                return self.__wrapped__(*args, **kwargs)
+                return target(*args, **kwargs)
 
         guard = _in_recorder.set(True)
         try:
-            event = self._record_call(active, args, kwargs)
+            event = self._record_call(active, target, instance, args, kwargs)
         finally:
             _in_recorder.reset(guard)
 
@@ -302,7 +359,7 @@ class ObservedCallable(CallableObjectProxy[Any]):
         event.started = started
 
         try:
-            outcome = self.__wrapped__(*args, **kwargs)
+            outcome = target(*args, **kwargs)
         except BaseException as exc:
             event.duration = time.perf_counter() - started
             event.exception = exc
@@ -361,9 +418,10 @@ def observed(
     from a binding.
 
     The keyword options are the uniform subset binding() takes, with
-    the same meanings. `when=` receives (None, args, kwargs), there
-    being no bound instance to report, and accepts a boolean in place
-    of the predicate as binding() does.
+    the same meanings. `when=` receives (instance, args, kwargs), the
+    instance being None for a free-standing callable and the bound
+    object when the proxy sits on a class, and accepts a boolean in
+    place of the predicate as binding() does.
 
     The label identifies the observation, and that is what makes
     dynamic application safe. The callable's full wrapper chain is
