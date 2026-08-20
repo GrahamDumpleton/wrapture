@@ -135,19 +135,19 @@ collector.
 
 ```python
 >>> with wrapture.window(collect=[wrapture.Aggregate()]) as run:
-...     traffic(shop, 500)
+...     traffic(shop, 2000)
 
 >>> run
 <Run 1 of 'window', closed>
 >>> report = run.reports[0]
 >>> print(report.text)  # doctest: +NORMALIZE_WHITESPACE
 aggregate "aggregate" run 1, ... to ... (...s), pid ...
-3 paths, 1,500 operations begun, 1,500 completed, 300 raised
+3 paths, 6,000 operations begun, 6,000 completed, 1,200 raised
 <BLANKLINE>
 calls  total   self  per-call    min    max  errors  path
-  500    ...    ...       ...    ...    ...     100  __main__:Shop.handle
-  500    ...    ...       ...    ...    ...     100  __main__:Pricing.quote
-  500    ...    ...       ...    ...    ...     100  __main__:Catalog.lookup
+2,000    ...    ...       ...    ...    ...     400  __main__:Shop.handle
+2,000    ...    ...       ...    ...    ...     400  __main__:Pricing.quote
+2,000    ...    ...       ...    ...    ...     400  __main__:Catalog.lookup
 <BLANKLINE>
 
 ```
@@ -166,9 +166,9 @@ without parsing the table:
 >>> report.kind, report.window, report.run, report.cut_short
 ('aggregate', 'window', 1, False)
 >>> report.data["begun"], report.data["raised"]
-(1500, 300)
+(6000, 1200)
 >>> report.data["paths"]["__main__:Shop.handle"]["errors"]
-100
+400
 
 ```
 
