@@ -102,8 +102,8 @@ from the problem to a finished test or configuration.
 :caption: Start here
 
 getting-started
-coming-from-mock
 design-philosophy
+coming-from-mock
 how-wrapture-was-built
 ```
 
