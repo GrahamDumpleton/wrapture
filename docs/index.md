@@ -12,10 +12,12 @@ the safe monkey-patching machinery wrapt provides.
 
 ```{note}
 wrapture is stabilising ahead of 1.0.0. The feature set is complete
-for a first release and development previews are published to
-[PyPI](https://pypi.org/project/wrapture/). The API is being exercised
-and tidied rather than extended, so small changes are still possible
-before 1.0.0.
+for a first release and pre-releases are published to
+[PyPI](https://pypi.org/project/wrapture/). Until 1.0.0 is final, a
+plain `pip install wrapture` picks up the latest pre-release
+automatically, so there is no need to pin a specific version. The API
+is being exercised and tidied rather than extended, so small changes
+are still possible before 1.0.0.
 ```
 
 ## What it does
