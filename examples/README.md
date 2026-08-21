@@ -182,6 +182,51 @@ $ uv run --with flask python -m wrapture -m flask --app myapp run
 $ curl http://127.0.0.1:5000/quote/widget
 ```
 
+### Exporting to OpenTelemetry
+
+The directory carries a second config, `wrapture-otel.toml`, that
+adds an OpenTelemetry sink alongside the printer: the same request
+trees, exported as OTel traces. Each request becomes a SERVER span
+named access-log style with the usual HTTP attributes, the view
+handler and its helpers become INTERNAL spans beneath it, and the
+failing request's tree arrives with error status and the recorded
+`KeyError`.
+
+The sink lives in `wrapture_local/otel_support.py`, the stand-in for
+what a wrapture-otel package would ship. Its factory stands up a
+`TracerProvider` from the standard OTel environment variables, so
+where the spans go is decided entirely outside the config. For a
+collector listening for OTLP over http/protobuf:
+
+```console
+$ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+$ export OTEL_TRACES_EXPORTER="otlp"
+$ export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+    python -m wrapture --config wrapture-otel.toml main.py
+```
+
+For OTLP over gRPC, point at the gRPC port and switch the protocol;
+nothing else changes:
+
+```console
+$ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+$ export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
+```
+
+With no collector at hand, `OTEL_TRACES_EXPORTER=console` dumps the
+spans to standard output instead, for which the sdk alone suffices:
+
+```console
+$ OTEL_TRACES_EXPORTER=console uv run --with flask --with opentelemetry-sdk \
+    python -m wrapture --config wrapture-otel.toml main.py
+```
+
+If the application had already configured its own provider, the
+factory would leave it alone and the spans would flow through the
+application's exporter; here the app knows nothing of OTel, so the
+factory's zero-code path applies.
+
 ## fastapi-app
 
 The same out-of-box APM experience for the async world: the same

@@ -1,0 +1,24 @@
+# The flask-app demo again, exporting to OpenTelemetry as well as
+# printing. Same observation as wrapture.toml; the extra sink turns
+# each request tree into OTel spans and sends them wherever the
+# standard OTel environment variables point. Pass this file to the
+# runner explicitly:
+#
+#   python -m wrapture --config wrapture-otel.toml main.py
+
+pythonpath = "."
+
+[[observe]]
+target = "myapp"
+name = "quote"
+
+[[setup]]
+module = "flask"
+call = "wrapture_local.flask_support:instrument"
+
+[[sink]]
+type = "printer"
+
+[[sink]]
+type = "wrapture_local.otel_support:sink"
+service_name = "flask-shop"

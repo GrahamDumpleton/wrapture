@@ -969,6 +969,9 @@ live inside a test or long after the fact from a file the runner
 produced; `load_events(path)` reads such a file back. From a shell,
 `python -m wrapture.tools convert` does the same without writing any
 code (bare `python -m wrapture.tools` lists the available commands).
+A tracing backend with a span model of its own is fed live by a sink
+instead; the OpenTelemetry bridge closing this section is the worked
+case.
 
 ### A timeline in Perfetto: chrome_trace
 
@@ -1033,3 +1036,117 @@ sequenceDiagram
     P2-->>-P1: TimeoutError
     P1-->>-caller: return
 ```
+
+### Live traces in OpenTelemetry: a sink
+
+The converters above render a trace after the fact, from a tape or a
+file. Feeding a tracing backend while the application runs is instead
+a job for [a sink of your own](#writing-your-own-sink), and
+OpenTelemetry makes the worked case: the `examples/flask-app`
+directory of the source checkout carries a complete OTel sink
+(`wrapture_local/otel_support.py`), the stand-in for what a
+wrapture-otel package would ship, exporting the demo's request trees
+over OTLP to whatever backend the standard OTel environment variables
+name. The pattern is the same for any backend with a span model; only
+the API names change.
+
+Most of the mapping writes itself, because the two models are close:
+
+- One event becomes one span, opened at `on_enter` and closed at
+  exactly one of `on_exit` or `on_error`, the error close recording
+  the event's exception on the span and marking its status.
+- `"request"` events become SERVER spans named access-log style
+  (`GET /quote/widget`), carrying the method, path and status code
+  under their semantic-convention attribute names; `"call"` events
+  become INTERNAL spans named by the binding. Attribute events are
+  skipped as too fine-grained for a trace, the same judgement the
+  `kind` filter spells in a config file.
+- Captured arguments and results become span attributes. The sink
+  declares `"summary"` capture on both axes, so the values reaching
+  it are already bounded text and scalars, safe to hand to an
+  exporter and impossible to retain live objects through.
+- `flush()` forwards to the provider's `force_flush()`, so the flush
+  wrapture gives process sinks at interpreter exit also drains OTel's
+  batch processor, and the tail of a trace is not lost in its buffer.
+
+Two moves are less obvious, and they are the part worth copying into
+a bridge to any other backend. The first is parenting. OTel normally
+parents spans through ambient context, but sink notifications arrive
+on whatever thread ran the observed operation, and a generator or a
+streamed response body can close on a different thread than it
+started on, so the ambient context at the close is not reliably the
+one from the start. The event's `parent_id` is correct in all of
+those cases, so the sink parents explicitly through a map of open
+spans:
+
+```python
+def on_enter(self, event):
+    context = None
+    if event.parent_id is not None:
+        with self._lock:
+            entry = self._spans.get(event.parent_id)
+        if entry is not None:
+            context = trace.set_span_in_context(entry[0])
+
+    span = self._tracer.start_span(
+        name=event.label or event.path,
+        context=context,
+        start_time=self._to_epoch_ns(event.started),
+        ...
+    )
+
+    with self._lock:
+        self._spans[event.seq] = (span, time.monotonic())
+```
+
+The close pops the entry by `event.seq` and ends the span, so the map
+holds only what is in flight. Children close before the operation
+that contains them, which is what makes the lookup safe.
+
+The second is time. Events are stamped on the `perf_counter` clock,
+which has an arbitrary zero; OTel wants absolute epoch nanoseconds.
+Sampling both clocks once, in the same breath at construction, pins
+them together, and every event time then converts by one addition:
+
+```python
+self._epoch_offset_ns = time.time_ns() - int(time.perf_counter() * 1e9)
+
+def _to_epoch_ns(self, perf_seconds):
+    return self._epoch_offset_ns + int(perf_seconds * 1e9)
+```
+
+Passing `start_time` and `end_time` through this conversion means the
+span timings are the event timings, not the moments the exporter
+heard about them.
+
+Wired into a config file, the sink is one more `[[sink]]` table
+naming its factory, alongside the printer or instead of it:
+
+```toml
+[[sink]]
+type = "wrapture_local.otel_support:sink"
+service_name = "flask-shop"
+```
+
+The factory stands up a `TracerProvider` from the standard OTel
+environment, so where the spans go is decided entirely outside the
+config: `OTEL_EXPORTER_OTLP_ENDPOINT` names the collector,
+`OTEL_EXPORTER_OTLP_PROTOCOL` picks http/protobuf or grpc, and
+`OTEL_TRACES_EXPORTER=console` dumps spans to standard output for a
+look without a collector. An application that already configures its
+own provider is left alone, and the sink's spans flow through the
+exporter the application chose. The examples README carries the run
+commands:
+
+```console
+$ cd examples/flask-app
+$ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+    python -m wrapture --config wrapture-otel.toml main.py
+```
+
+Each request then arrives in the backend as one trace: a SERVER root
+span named for the request line, the view handler and its helpers
+nested beneath it with their captured arguments and results, and the
+failing request's tree marked as an error with the `KeyError`
+recorded on the span that raised it.
