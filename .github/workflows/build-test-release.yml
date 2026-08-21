@@ -9,6 +9,8 @@ on:
       - develop
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+a[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+b[0-9]+"
       - "[0-9]+.[0-9]+.[0-9]+rc[0-9]+"
       - "[0-9]+.[0-9]+.[0-9]+.dev[0-9]+"
 
@@ -106,9 +108,9 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG}"
-          BASE_VERSION="$(echo "$VERSION" | sed -E 's/\.?(dev|rc)[0-9]+$//')"
+          BASE_VERSION="$(echo "$VERSION" | sed -E 's/\.?(dev|a|b|rc)[0-9]+$//')"
           ANCHOR="version-$(echo "$BASE_VERSION" | tr '.' '-')"
-          if [[ "$VERSION" == *dev* || "$VERSION" == *rc* ]]; then
+          if [[ "$VERSION" != "$BASE_VERSION" ]]; then
               PRERELEASE="true"
           else
               PRERELEASE="false"
