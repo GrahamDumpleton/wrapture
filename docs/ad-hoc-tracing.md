@@ -1061,10 +1061,14 @@ Most of the mapping writes itself, because the two models are close:
   become INTERNAL spans named by the binding. Attribute events are
   skipped as too fine-grained for a trace, the same judgement the
   `kind` filter spells in a config file.
-- Captured arguments and results become span attributes. The sink
-  declares `"summary"` capture on both axes, so the values reaching
-  it are already bounded text and scalars, safe to hand to an
-  exporter and impossible to retain live objects through.
+- Captured arguments, results and `annotate()` data become span
+  attributes, flattened onto dotted names (`wrapture.arg.item`,
+  `wrapture.data.rows`) because OTel attributes hold only scalars and
+  lists of scalars. The data dict is read again when the event
+  closes, since annotations merge in while the operation runs. The
+  sink declares `"summary"` capture on both axes, so the values
+  reaching it are already bounded text and scalars, safe to hand to
+  an exporter and impossible to retain live objects through.
 - `flush()` forwards to the provider's `force_flush()`, so the flush
   wrapture gives process sinks at interpreter exit also drains OTel's
   batch processor, and the tail of a trace is not lost in its buffer.

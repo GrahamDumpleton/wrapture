@@ -5,7 +5,8 @@ turns wrapture events into OTel spans, so the request trees this demo
 prints also land in whatever OTLP backend is listening. Requests
 become SERVER spans named access-log style ("GET /quote/widget"),
 the view handlers and helpers beneath them become INTERNAL spans, and
-the captured arguments and results ride along as span attributes.
+the captured arguments, results and annotate() data ride along as
+span attributes.
 
 The `sink` factory at the bottom is what wrapture-otel.toml names. It
 stands up a TracerProvider driven by the standard OTel environment
@@ -35,6 +36,11 @@ from wrapture import Event
 # Attribute values OTel accepts natively. Anything else is stringified.
 
 _PRIMITIVES = (bool, int, float, str)
+
+# Request data fields already exported under their semantic-convention
+# names, so the close-time sweep does not repeat them as wrapture.data.*.
+
+_SEMCONV_DATA = frozenset({"method", "path", "query"})
 
 
 class OpenTelemetrySink(wrapture.Sink):
@@ -149,6 +155,7 @@ class OpenTelemetrySink(wrapture.Sink):
         if event.body_duration is not None:
             span.set_attribute(f"{self._prefix}.body_duration", event.body_duration)
 
+        self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
 
     def on_error(self, event: Event) -> None:
@@ -164,6 +171,7 @@ class OpenTelemetrySink(wrapture.Sink):
         else:
             span.set_status(Status(StatusCode.ERROR))
 
+        self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
 
     def flush(self) -> None:
@@ -223,6 +231,19 @@ class OpenTelemetrySink(wrapture.Sink):
         if event.started is None or event.duration is None:
             return None
         return self._to_epoch_ns(event.started + event.duration)
+
+    def _sweep_data(self, span: trace.Span, event: Event) -> None:
+        # annotate() merges into the in-flight event's data dict, after
+        # on_enter has already read it, and a request gains fields
+        # (bytes, app_duration) as its body streams, so the dict is
+        # swept again at close. Re-setting a key exported at enter is
+        # fine: the last write before end() wins.
+
+        skip = _SEMCONV_DATA if event.kind == "request" else frozenset()
+
+        for name, value in event.data.items():
+            if name not in skip:
+                span.set_attribute(f"{self._prefix}.data.{name}", self._coerce(value))
 
     def _name(self, event: Event) -> str:
         # Requests read access-log style, the way HTTP spans usually
