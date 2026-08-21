@@ -58,7 +58,8 @@ what the substitute recorded; wrapture wraps the real code and
 intervenes or observes in flight, strictly and recorded, with
 substitution available as a deliberate opt-in (`stub()` for one
 callable, `mock(Spec)` for one collaborator) rather than the silent
-baseline. The two coexist happily in one suite. The "Coming from
-unittest.mock" page walks the comparison case by case, with the same
-test written both ways, and ends with the one kind of double wrapture
-deliberately does not provide.
+baseline. The two coexist happily in one suite. The
+[Coming from unittest.mock](coming-from-mock.md) page walks the
+comparison case by case, with the same test written both ways, and
+ends with the one kind of double wrapture deliberately does not
+provide.
