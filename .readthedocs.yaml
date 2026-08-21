@@ -8,6 +8,10 @@ build:
 sphinx:
   configuration: docs/conf.py
 
+# Also build a downloadable PDF, offered in the docs flyout menu.
+formats:
+  - pdf
+
 python:
   install:
     - method: pip
