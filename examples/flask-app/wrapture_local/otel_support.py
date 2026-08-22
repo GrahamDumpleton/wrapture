@@ -89,7 +89,7 @@ class OpenTelemetrySink(wrapture.Sink):
         self,
         *,
         tracer_name: str = "wrapture",
-        kinds: Sequence[str] = ("call", "request"),
+        kinds: Sequence[str] = ("call", "request", "block"),
         max_value_length: int = 512,
         attribute_prefix: str = "wrapture",
     ) -> None:

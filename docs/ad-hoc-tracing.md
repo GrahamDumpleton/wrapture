@@ -527,6 +527,58 @@ notifications arrive from whatever thread ran the observed operation,
 so a sink shared across threads must protect its own state if it
 mutates anything more compound than the example's per-key counter.
 
+## Instrumenting your own code
+
+wrapture's config route exists for code you do not own: the wrapping
+is declared outside, the observed code never imports wrapture, and
+nothing needs to be redeployed differently. For your own code the
+calculus flips. An author happy to mark up their source finds a
+separate config file friction, because the declaration lives apart
+from the code it describes; for them wrapture has an embedded
+surface, four pieces that read as one:
+
+- **`@wrapture.observed`** is the def-site decorator: the function's
+  calls record as `"call"` events wherever it ends up, near-free when
+  nothing listens. Bare on a def, or
+  `@wrapture.observed(label="charge", capture="summary")` with
+  options; everything but the callable is keyword-only. The
+  [unit testing guide](unit-testing.md#observing-a-bare-callable)
+  covers the proxy's full character, including the callables no
+  binding could reach anyway (closures, partials, callbacks).
+- **`wrapture.block(name, **data)`** marks what is smaller than a
+  function: a with statement declaring the enclosed stretch as one
+  `"block"` event, children nesting under it, the body's wall time as
+  its duration, an escaping exception recorded and still propagated.
+  Like a log statement, it is inert when nothing listens, so the
+  marker stays in production code permanently.
+- **`wrapture.annotate(**data)`** attaches what the code knows and no
+  generic capture can infer (a row count, a cache hit) to the
+  in-flight event, and is unconditionally safe to call. The number an
+  aggregating sink wants is an annotation on an event: count inside
+  the loop, annotate the total onto the enclosing block on the way
+  out, one event rather than ten thousand.
+- **`WSGIMiddleware` and `ASGIMiddleware`** wrap the application
+  object at the edge in code,
+  `application = wrapture.WSGIMiddleware(application)`, grouping
+  events per request exactly as the config-declared `mode = "wsgi"`
+  binding does, since both are the same class.
+
+Sinks complete the all-in-code deployment: a CLI tool or worker that
+configures its observability from command line options calls
+`add_sink()` programmatically and never touches a config file.
+Tracing needs nothing at all, since it is on by default: a root
+block or observed call mints a trace identity, and `trace_headers()`
+carries it outward. Deliberately, no code surface can force a trace
+on: the `[trace]` table's `enabled = false` is an operator's
+decision, and the per-entry `trace = true` exception lives in the
+same file, written by the same hand. Code that wants its blocks
+traced simply leaves tracing enabled.
+
+The two postures are a choice, not a default and a workaround, and
+they mix: a service can decorate its own critical paths and still be
+swept by an operator's config, the events landing on the same tape
+and the same sinks either way.
+
 ## Configuring from a file
 
 The dev-server example above still edits the application's entry
@@ -1023,12 +1075,18 @@ header of outbound requests, so two services both observed by
 wrapture join their trace files on one id, with or without any
 tracing backend involved.
 
-**Every tree is a trace.** The mechanism is on by default: a root
-event that inherited no context mints a fresh identity, one random
-id per tree, only while events are being recorded at all, so the
-cost when nothing listens stays nothing. Children share their tree's
-context, readable in code as `event.trace`, and every JSONLines line
-carries the identity under its `trace` key:
+**Every tree rooted in an operation is a trace.** The mechanism is
+on by default: a root call, request or block event that inherited no
+context mints a fresh identity, one random id per tree, only while
+events are being recorded at all, so the cost when nothing listens
+stays nothing. Traces start at declared operation boundaries, a
+function invoked, a request arriving or a block entered, not at
+accesses or messages: a tree rooted in an attribute event carries no
+identity, and a log message never starts a trace, though one
+recorded inside a traced tree shares its identity like any other
+child. Children share their tree's context, readable in code as
+`event.trace`, and every JSONLines line carries the identity under
+its `trace` key:
 
 ```json
 {"seq": 3, "path": "backend:quote", "trace": {"w3c": {"trace_id": "1f4c24c6b0e14f6a9d2c8e5a7b3f9d10", "sampled": true}}}
@@ -1042,6 +1100,17 @@ request with no recognised headers mints as any root does. A
 boundary inside an already-traced tree keeps the enclosing identity
 unless it receives headers of its own, which start a fresh scope for
 its subtree.
+
+Processes with no HTTP ingress get their trace root from a block: a
+cron job, CLI command or queue worker wraps its operation in
+`with wrapture.block("process-batch"):` and the root block mints,
+`trace_headers()` supplying the identity for whatever it sends
+outward. The block's name can even be keyed dynamically
+(`block(f"deploy {target}")`) where a function name is fixed, which
+is why blocks mint rather than deferring to an `@observed` function
+at the top; a request with incoming headers nested under such a root
+still joins its own trace, since ingress parsing at the boundary is
+independent of root minting.
 
 On the way out, instrumentation injects the identity into outbound
 traffic. The whole public surface such a probe needs is two
@@ -1087,7 +1156,10 @@ codec registry built for others to join. `trace = true` on an
 observe entry is the case-by-case re-enable under a global disable:
 that entry's roots, a background job wanting an identity for its
 outbound calls, say, mint even while the mechanism is off elsewhere.
-With no `[trace]` table at all, the defaults stand: enabled, w3c.
+Because only operations mint, the flag lands on the entry's call and
+request bindings; an entry that binds nothing but attributes is
+rejected, since the flag could never act there. With no `[trace]`
+table at all, the defaults stand: enabled, w3c.
 
 ## Exporting traces to other tools
 
@@ -1187,9 +1259,12 @@ Most of the mapping writes itself, because the two models are close:
 - `"request"` events become SERVER spans named access-log style
   (`GET /quote/widget`), carrying the method, path and status code
   under their semantic-convention attribute names; `"call"` events
-  become INTERNAL spans named by the binding. Attribute events are
-  skipped as too fine-grained for a trace, the same judgement the
-  `kind` filter spells in a config file.
+  become INTERNAL spans named by the binding, and `"block"` events
+  become INTERNAL spans named by the block, which is how an embedded
+  `with wrapture.block("render-invoice"):` shows up as a span with
+  no OTel API in the code. Attribute events are skipped as too
+  fine-grained for a trace, the same judgement the `kind` filter
+  spells in a config file.
 - Captured arguments, results and `annotate()` data become span
   attributes, flattened onto dotted names (`wrapture.arg.item`,
   `wrapture.data.rows`) because OTel attributes hold only scalars and

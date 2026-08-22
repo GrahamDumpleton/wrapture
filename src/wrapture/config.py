@@ -151,7 +151,9 @@ class ObserveEntry:
 
     `trace = true` makes this entry's bindings mint a trace identity
     at roots even when the `[trace]` table disables the mechanism
-    process-wide: the case-by-case re-enable.
+    process-wide: the case-by-case re-enable. Only operations mint,
+    so the mark lands on the entry's call and request bindings, and
+    an entry that binds nothing but attributes is rejected.
     """
 
     target: str
@@ -814,10 +816,24 @@ def _bindings_for(
 
     # trace = true marks each binding as a trace root, consulted when
     # a root event decides whether to mint an identity, so the entry
-    # re-enables tracing under a process-wide disable.
+    # re-enables tracing under a process-wide disable. Minting is
+    # gated by kind: traces start at declared operation boundaries
+    # (calls and requests), never at attribute accesses, so the mark
+    # goes only on bindings that can produce those events, and an
+    # entry whose bindings are all attribute accesses carries a flag
+    # that can never act, which is rejected rather than ignored.
 
     if entry.trace:
-        for each in bound:
+        minting = [each for each in bound if each.mode in ("callable", "wsgi", "asgi")]
+
+        if bound and not minting:
+            raise ConfigError(
+                f"{where}: trace = true can never act here; the entry"
+                f" binds only attribute accesses, and traces start at"
+                f" declared operation boundaries, not attribute accesses"
+            )
+
+        for each in minting:
             each._trace_root = True
 
     return bound

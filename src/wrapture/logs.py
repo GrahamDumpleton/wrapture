@@ -375,6 +375,13 @@ def _record_log(record: logging.LogRecord) -> None:
         event.depth = len(stack)
         event.started = time.perf_counter()
 
+        # A log belongs to the enclosing tree's trace but never starts
+        # one: traces begin at declared operation boundaries, not at
+        # messages, so a root log line carries no trace identity.
+
+        if parent is not None:
+            event.trace = parent.trace
+
         # Enter, then close immediately: a log is instantaneous, and
         # the close is what makes it stream from sinks that write on
         # completion.

@@ -385,6 +385,32 @@ def test_tree_of_an_empty_tape_is_empty() -> None:
     assert tape.tree() == ""
 
 
+def test_an_event_under_an_unheard_parent_is_a_root_not_dropped() -> None:
+    # A timeline entered mid-operation hears events whose parent_id
+    # names an event recorded before the tape existed (a generator
+    # created earlier and consumed inside the scope, say). Such an
+    # event stands as a root of this view, children in tow, rather
+    # than vanishing from roots() and tree().
+
+    tape = Tape()
+
+    orphan = Event("call", "svc:inner", label="inner")
+    orphan.seq = 100
+    orphan.parent_id = 41
+    orphan.depth = 3
+
+    child = Event("call", "svc:leaf", label="leaf")
+    child.seq = 101
+    child.parent_id = 100
+    child.depth = 4
+
+    tape.on_enter(orphan)
+    tape.on_enter(child)
+
+    assert tape.roots() == [orphan]
+    assert tape.tree() == "inner()\n  leaf()"
+
+
 def test_assert_order_checks_a_subsequence_not_an_exact_match() -> None:
     process = binding(Processor, "process")
     charge = binding(Gateway, "charge")

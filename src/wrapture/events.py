@@ -2,10 +2,11 @@
 
 One record type covers every kind of observation: a call to a wrapped
 callable, a read, write or delete of a wrapped attribute, an HTTP
-request through wrapped middleware, and a log message the observed
-code emitted. The kinds share the fields that describe where and when
-the event happened and how events nest; each kind then populates the
-fields that make sense for it.
+request through wrapped middleware, a log message the observed code
+emitted, and a block of code the observed code declared. The kinds
+share the fields that describe where and when the event happened and
+how events nest; each kind then populates the fields that make sense
+for it.
 
 Nothing in this module records anything by itself. Events are created by
 the recording machinery when a binding fires inside a timeline, and are
@@ -25,7 +26,7 @@ from wrapt import MISSING
 from .capture import REFERENCE
 from .trace import TraceContext
 
-EventKind = Literal["call", "get", "set", "delete", "request", "log"]
+EventKind = Literal["call", "get", "set", "delete", "request", "log", "block"]
 
 
 @dataclass(eq=False)
@@ -35,7 +36,8 @@ class Event:
     The `kind` field says what happened: "call" for an invocation of a
     wrapped callable, "get", "set" or "delete" for attribute access,
     "request" for an HTTP request through a wrapped WSGI application,
-    and "log" for a log message the observed code emitted.
+    "log" for a log message the observed code emitted, and "block" for
+    a stretch of code the observed code declared with block().
     Fields that were not observed hold the MISSING sentinel (for values,
     so that a recorded None stays distinguishable) or None (for the
     optional descriptive fields). Events compare by identity: two events
@@ -184,6 +186,12 @@ class Event:
             level = self.data.get("level", "?")
             message = self.data.get("message", "")
             return f"log {where} {level} {message!r}"
+
+        # A block's name is free-form and may contain spaces, so the
+        # colon delimits it from the kind word.
+
+        if self.kind == "block":
+            return f"block: {where}"
 
         if self.kind == "get":
             if self.result is not MISSING:

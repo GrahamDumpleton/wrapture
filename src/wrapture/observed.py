@@ -38,7 +38,7 @@ import inspect
 import time
 import warnings
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, cast, overload
 
 from wrapt import BoundFunctionWrapper, FunctionWrapper, wrapper_chain
 
@@ -406,16 +406,42 @@ class ObservedCallable(
         return outcome
 
 
+@overload
 def observed(
     fn: Callable[..., Any],
-    label: str | None = None,
     *,
+    label: str | None = None,
     capture: CapturePolicy | str | None = None,
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
-) -> ObservedCallable:
+) -> ObservedCallable: ...
+
+
+@overload
+def observed(
+    fn: None = None,
+    *,
+    label: str | None = None,
+    capture: CapturePolicy | str | None = None,
+    capture_args: CapturePolicy | str | None = None,
+    capture_result: CapturePolicy | str | None = None,
+    stack: int | str | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+) -> Callable[[Callable[..., Any]], ObservedCallable]: ...
+
+
+def observed(
+    fn: Callable[..., Any] | None = None,
+    *,
+    label: str | None = None,
+    capture: CapturePolicy | str | None = None,
+    capture_args: CapturePolicy | str | None = None,
+    capture_result: CapturePolicy | str | None = None,
+    stack: int | str | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+) -> ObservedCallable | Callable[[Callable[..., Any]], ObservedCallable]:
     """Wrap a bare callable so its calls record, wherever it ends up.
 
     For callables no binding can reach because they live at no
@@ -430,6 +456,12 @@ def observed(
     Place it wherever the original was going; putting the original
     back is equally the caller's job, which is the whole difference
     from a binding.
+
+    Works as a decorator in both spellings: bare `@observed` directly
+    on a def, and `@observed(label=..., capture=...)` when options are
+    wanted, where the call with no callable returns the decorator that
+    captures the function below it. Everything but the callable itself
+    is keyword-only.
 
     The keyword options are the uniform subset binding() takes, with
     the same meanings. `when=` receives (instance, args, kwargs), the
@@ -455,6 +487,25 @@ def observed(
     under different labels cannot be told from intent, so it is not an
     error; it shows up honestly as double counting in the results.
     """
+
+    # Called with only options, hand back the decorator that captures
+    # the function defined below it: the standard optional-argument
+    # decorator pattern.
+
+    if fn is None:
+
+        def apply(target: Callable[..., Any]) -> ObservedCallable:
+            return observed(
+                target,
+                label=label,
+                capture=capture,
+                capture_args=capture_args,
+                capture_result=capture_result,
+                stack=stack,
+                when=when,
+            )
+
+        return apply
 
     if not callable(fn):
         raise TypeError(f"observed() wraps a callable, got {fn!r}")
