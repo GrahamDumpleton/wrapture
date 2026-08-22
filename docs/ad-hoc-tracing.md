@@ -1330,6 +1330,28 @@ Passing `start_time` and `end_time` through this conversion means the
 span timings are the event timings, not the moments the exporter
 heard about them.
 
+The sink also completes the
+[trace identity](#trace-identity-and-propagation) story by claiming
+the tree's w3c slot. There are two id generators in the
+room, wrapture's minting (which must work with no OTel installed)
+and the SDK's, and the sink makes them agree. For an identity that
+arrived in headers, the root span is created with a remote parent
+built from the slot, so the exported tree continues the caller's
+trace rather than starting a detached one, and the arrived sampled
+flag rides along for the SDK's parent-based sampler to honour: an
+upstream "do not sample" exports nothing. For an identity wrapture
+minted locally, the root span is created normally, the SDK
+generating its own trace id, and the slot takes the whole identity
+at that moment, before the operation's body runs, so serialised
+files, outbound headers and exported spans all read one id and the
+backend shows a clean native root. In both cases the slot's span-id
+register then tracks the innermost exported span as spans open and
+close, so `trace_headers()` carries a live parent at any moment
+inside the tree, and downstream services attach to spans that
+really got exported. When wrapture's own `sample =` gate drops a
+tree, the sink never hears it: the minted id stands unclaimed and
+outbound headers carry it, which is what "not sampled" means.
+
 In a config file, OpenTelemetry export is first-class: the
 top-level `[otel]` table, sibling to `[trace]`, is the one
 registration covering every signal. Its presence opts in (export

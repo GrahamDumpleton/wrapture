@@ -8,12 +8,21 @@ from collections.abc import Sequence
 from typing import Any
 
 from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
+from opentelemetry.context import Context
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    SpanKind,
+    Status,
+    StatusCode,
+    TraceFlags,
+)
 from opentelemetry.util.types import AttributeValue
 
 import wrapture
 from wrapture import Event
 
+from ..trace import TraceSlot
 from .common import _PRIMITIVES, _SEMCONV_DATA, _status_code
 
 
@@ -28,6 +37,19 @@ class OpenTelemetrySink(wrapture.Sink):
     reliably the one that was current at the start. wrapture's parent
     link is a process-wide sequence number that is correct in all of
     those cases.
+
+    The sink also claims the tree's trace identity, writing into the
+    w3c slot per the TraceSlot contract so that files, outbound
+    headers and exported spans agree. An identity that arrived in
+    headers is continued: the root span gets a remote parent built
+    from the slot, and only the span-id register and the claimed flag
+    are written. An identity wrapture minted locally is replaced
+    wholesale at the root event's delivery, before the operation's
+    body runs: the SDK generates its own trace id, and the slot takes
+    it, so the backend shows a clean native root. As spans open and
+    close, the register tracks the innermost exported span, so
+    `trace_headers()` carries a live parent at any moment inside the
+    tree.
     """
 
     # "summary" is the right declaration for an exporting sink: enough
@@ -89,6 +111,15 @@ class OpenTelemetrySink(wrapture.Sink):
             else:
                 self.orphaned += 1
 
+        # A root whose identity arrived in headers continues the
+        # caller's trace: the span gets a remote parent built from the
+        # slot, with the sampled flag riding along for the parent-based
+        # sampler to honour, instead of starting a detached trace.
+
+        slot = self._slot(event)
+        if context is None and slot is not None and slot.headers and not slot.claimed:
+            context = self._remote_parent(slot)
+
         span = self._tracer.start_span(
             name=self._name(event),
             context=context,
@@ -98,6 +129,9 @@ class OpenTelemetrySink(wrapture.Sink):
             record_exception=False,
             set_status_on_exception=False,
         )
+
+        if slot is not None:
+            self._claim(slot, span)
 
         with self._lock:
             self._spans[event.seq] = (span, time.monotonic())
@@ -131,6 +165,7 @@ class OpenTelemetrySink(wrapture.Sink):
 
         self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
+        self._restore_register(event)
 
     def on_error(self, event: Event) -> None:
         """Close the event's span as failed, recording the exception."""
@@ -147,6 +182,7 @@ class OpenTelemetrySink(wrapture.Sink):
 
         self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
+        self._restore_register(event)
 
     def flush(self) -> None:
         """Push batched spans to the exporter; called by wrapture at
@@ -195,6 +231,63 @@ class OpenTelemetrySink(wrapture.Sink):
         with self._lock:
             entry = self._spans.pop(seq, None)
         return entry[0] if entry is not None else None
+
+    def _slot(self, event: Event) -> TraceSlot | None:
+        if event.trace is None:
+            return None
+        return event.trace.slots.get("w3c")
+
+    def _remote_parent(self, slot: TraceSlot) -> Context:
+        # The caller's identity as a remote parent SpanContext, so the
+        # exported root continues the upstream trace and the sampler
+        # sees the upstream sampling decision.
+
+        sampled = TraceFlags.SAMPLED if slot.sampled else TraceFlags.DEFAULT
+        parent = SpanContext(
+            trace_id=int(slot.trace_id, 16),
+            span_id=int(slot.span_id, 16),
+            is_remote=True,
+            trace_flags=TraceFlags(sampled),
+        )
+
+        return trace.set_span_in_context(NonRecordingSpan(parent))
+
+    def _claim(self, slot: TraceSlot, span: trace.Span) -> None:
+        # Write the exported span into the slot, per the TraceSlot
+        # contract: the register takes the new span's id so outbound
+        # injection parents downstream services onto a span that
+        # really got exported. A minted identity is replaced wholesale
+        # at its first (root) claim, trace id and all, so files,
+        # headers and spans agree on the SDK's id; an identity that
+        # arrived in headers keeps its trace id, which the remote
+        # parenting above already made the span's own.
+
+        span_context = span.get_span_context()
+
+        if not slot.claimed and not slot.headers:
+            slot.trace_id = format(span_context.trace_id, "032x")
+            slot.sampled = bool(span_context.trace_flags.sampled)
+
+        slot.span_id = format(span_context.span_id, "016x")
+        slot.claimed = True
+
+    def _restore_register(self, event: Event) -> None:
+        # A span just closed, so point the register back at the
+        # enclosing exported span, keeping trace_headers() live for
+        # whatever the operation's continuation sends next. At the
+        # root's close nothing is enclosing and nothing is in flight,
+        # so the register is left at the root's own id.
+
+        slot = self._slot(event)
+        if slot is None or not slot.claimed or event.parent_id is None:
+            return
+
+        with self._lock:
+            entry = self._spans.get(event.parent_id)
+
+        if entry is not None:
+            parent_context = entry[0].get_span_context()
+            slot.span_id = format(parent_context.span_id, "016x")
 
     def _to_epoch_ns(self, perf_seconds: float | None) -> int | None:
         if perf_seconds is None:

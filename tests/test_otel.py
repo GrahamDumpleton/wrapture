@@ -29,21 +29,39 @@ pytestmark = pytest.mark.filterwarnings("ignore::wrapture.ConfigWarning")
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _providers() -> Iterator[None]:
+def _providers() -> Iterator[Any]:
     # Install SDK providers once for the module, so building the sink
     # under test never stands up real exporters with their network
     # endpoints and worker threads: the factory finds a provider
-    # already configured and defers to it.
+    # already configured and defers to it. Spans land synchronously
+    # in an in-memory exporter, so the trace tests can assert on what
+    # was actually exported.
 
     from opentelemetry import trace as otel_trace
     from opentelemetry.metrics import set_meter_provider
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
 
-    otel_trace.set_tracer_provider(TracerProvider())
+    exported = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exported))
+
+    otel_trace.set_tracer_provider(provider)
     set_meter_provider(MeterProvider())
 
-    yield
+    yield exported
+
+
+@pytest.fixture
+def exported(_providers: Any) -> Any:
+    # The module's in-memory span exporter, cleared for this test.
+
+    _providers.clear()
+    return _providers
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +288,187 @@ def test_no_meter_provider_stands_one_up(monkeypatch: pytest.MonkeyPatch) -> Non
     (provider,) = installed
     assert isinstance(provider, MeterProvider)
     assert provider._sdk_config.resource.attributes["service.name"] == "shop"
+
+
+# ---------------------------------------------------------------------------
+# trace completion: claiming, parenting, sampling
+# ---------------------------------------------------------------------------
+
+TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+
+def _apply_traces(tmp_path: Path) -> Any:
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["traces"]\n')
+    return load_config(source).apply()
+
+
+def _parent_id(headers: dict[str, str]) -> str:
+    return headers["traceparent"].split("-")[2]
+
+
+def _serve(app: Any, environ: dict[str, Any]) -> None:
+    body = app(environ, lambda status, headers: None)
+    list(body)
+    body.close()
+
+
+def test_a_minted_identity_is_replaced_with_the_sdk_id(
+    tmp_path: Path, exported: Any
+) -> None:
+    # Claim-time identity replacement: the root span is created
+    # normally, the SDK generating its own trace id, and the slot
+    # takes the whole identity, so the serialised record, outbound
+    # headers and the exported span all read one id and the backend
+    # shows a clean native root.
+
+    from wrapture.sinks import _event_record
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.timeline() as tape:
+            with wrapture.block("outer"):
+                headers = wrapture.trace_headers()
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+    event = tape.all[0]
+    assert event.trace is not None
+    slot = event.trace.slots["w3c"]
+
+    assert slot.claimed
+    assert slot.trace_id == format(span.context.trace_id, "032x")
+    assert headers["traceparent"].split("-")[1] == slot.trace_id
+    assert _parent_id(headers) == format(span.context.span_id, "016x")
+    assert span.parent is None
+
+    record = _event_record(event)
+    assert record["trace"]["w3c"]["trace_id"] == slot.trace_id
+
+
+def test_an_arrived_identity_continues_the_callers_trace(
+    tmp_path: Path, exported: Any
+) -> None:
+    # Remote root parenting: an identity that arrived in headers is
+    # never replaced; the root span continues the caller's trace with
+    # a remote parent, and inside the request outbound headers parent
+    # downstream services onto the exported request span.
+
+    captured: dict[str, Any] = {}
+
+    def app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        captured["headers"] = wrapture.trace_headers()
+        start_response("200 OK", [])
+        return [b"ok"]
+
+    applied = _apply_traces(tmp_path)
+    try:
+        _serve(
+            wrapture.WSGIMiddleware(app),
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": "/x",
+                "HTTP_TRACEPARENT": TRACEPARENT,
+            },
+        )
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+
+    assert format(span.context.trace_id, "032x") == ("0af7651916cd43dd8448eb211c80319c")
+    assert span.parent is not None and span.parent.is_remote
+    assert format(span.parent.span_id, "016x") == "b7ad6b7169203331"
+
+    assert captured["headers"]["traceparent"].split("-")[1] == (
+        "0af7651916cd43dd8448eb211c80319c"
+    )
+    assert _parent_id(captured["headers"]) == format(span.context.span_id, "016x")
+
+
+def test_the_register_tracks_the_innermost_open_span(
+    tmp_path: Path, exported: Any
+) -> None:
+    # The register takes each span's id as it opens and is restored
+    # to the enclosing span's as it closes, so trace_headers() always
+    # names a live exported parent.
+
+    seen: list[dict[str, str]] = []
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.block("outer"):
+            seen.append(wrapture.trace_headers())
+            with wrapture.block("inner"):
+                seen.append(wrapture.trace_headers())
+            seen.append(wrapture.trace_headers())
+    finally:
+        applied.revert()
+
+    inner_span, outer_span = exported.get_finished_spans()
+
+    assert _parent_id(seen[0]) == format(outer_span.context.span_id, "016x")
+    assert _parent_id(seen[1]) == format(inner_span.context.span_id, "016x")
+    assert _parent_id(seen[2]) == _parent_id(seen[0])
+
+    assert len({headers["traceparent"].split("-")[1] for headers in seen}) == 1
+
+
+def test_an_unsampled_upstream_decision_is_honoured(
+    tmp_path: Path, exported: Any
+) -> None:
+    # The parent-based sampler sees the arrived sampled flag on the
+    # remote parent: flags 00 means the upstream said do not sample,
+    # and no span is exported for the tree.
+
+    unsampled = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"
+
+    def app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        start_response("200 OK", [])
+        return [b"ok"]
+
+    applied = _apply_traces(tmp_path)
+    try:
+        _serve(
+            wrapture.WSGIMiddleware(app),
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": "/x",
+                "HTTP_TRACEPARENT": unsampled,
+            },
+        )
+    finally:
+        applied.revert()
+
+    assert exported.get_finished_spans() == ()
+
+
+def test_a_wrapture_sampled_out_tree_keeps_the_minted_id(
+    tmp_path: Path, exported: Any
+) -> None:
+    # wrapture's own sample gate drops the tree before the sink hears
+    # it, so the minted identity stands unclaimed and outbound
+    # headers carry it, which is what "not sampled" means.
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["traces"]\n\n[otel.traces]\nsample = 0.0\n')
+
+    applied = load_config(source).apply()
+    try:
+        with wrapture.timeline() as tape:
+            with wrapture.block("outer"):
+                headers = wrapture.trace_headers()
+    finally:
+        applied.revert()
+
+    assert exported.get_finished_spans() == ()
+
+    event = tape.all[0]
+    assert event.trace is not None
+    slot = event.trace.slots["w3c"]
+    assert not slot.claimed
+    assert headers["traceparent"].split("-")[1] == slot.trace_id
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,11 @@ def _configure_provider(service_name: str | None) -> None:
     stdout exporter for a look without a collector. A provider the
     application already installed wins as the failsafe, with a
     warning naming what is lost.
+
+    The provider's sampler is the SDK default, parentbased_always_on,
+    so an upstream "do not sample" decision carried in a remote
+    parent is honoured; the standard OTEL_TRACES_SAMPLER variables,
+    in the environment table or the real environment, override it.
     """
 
     from opentelemetry.sdk.trace import TracerProvider
