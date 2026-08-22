@@ -389,6 +389,13 @@ instances record the instance (so `with_instance()` applies), the
 bound signature drops `self`, and the normalized arguments never
 contain it.
 
+It is equally the decorator for functions you own, in both the usual
+spellings: bare `@wrapture.observed` directly on a def, and
+`@wrapture.observed(label="charge", capture="summary")` when options
+are wanted, where the call with only keyword arguments returns the
+decorator that captures the function below it. Everything but the
+callable itself is keyword-only.
+
 The division of responsibility is the inverse of a binding's. A
 binding owns installation and removal; `observed()` owns neither:
 there is no `apply()` or `remove()`, you place the proxy wherever the
@@ -452,7 +459,7 @@ works well; it is a constant compared against stored labels, so it
 survives introspection loss as long as the chain is walkable at all:
 
 ```python
-registry[key] = wrapture.observed(registry[key], f"myagent:{key}")
+registry[key] = wrapture.observed(registry[key], label=f"myagent:{key}")
 ```
 
 A wrapper that hides `__wrapped__` entirely blinds the walk, and no
@@ -468,13 +475,16 @@ def has_observer(fn, label):
     )
 ```
 
-Two boundaries. `observed()` is observation only: there are no
+One boundary. `observed()` is observation only: there are no
 behaviour namespaces, so it cannot stub or fail-inject; an
 intervention wants a removable home, and a free-floating callable has
-none, so use `binding()` for those. And while a decorator spelling
-works, its home is operator glue and tests: writing it inside the
-application would cross the line the rest of the library holds, that
-the observed code never imports wrapture.
+none, so use `binding()` for those. Writing `@observed` inside the
+application, by contrast, is a posture wrapture supports on purpose:
+authors who prefer their instrumentation next to the code it marks
+decorate their own functions, with the config route as the
+counterpart for code they do not own. The
+[embedded instrumentation story](ad-hoc-tracing.md#instrumenting-your-own-code)
+gathers that surface in one place.
 
 ## Supplying a stand-in with stub()
 
@@ -1414,6 +1424,97 @@ patterns that are dropped at capture, before any tape or sink hears
 them, the safety valve for messages carrying secrets. Every other
 selection by content belongs at query time, as above, where dropping
 a message costs nothing but a filter.
+
+## Declaring blocks of code
+
+The third event producer, alongside bindings (calls observed from
+outside) and log capture (messages the code emitted), is a
+declaration the code makes itself: `wrapture.block(name, **data)` is
+a context manager that records the enclosed stretch of code as one
+event of kind `"block"`. The with body's wall time becomes the
+event's duration, an exception escaping the body is recorded and
+still propagates, keyword arguments seed the event's `data`, and
+everything recorded inside (bound calls, log events, nested blocks)
+nests under it. Like a log statement, the marker is embedded by the
+author and inert when nothing listens: with no sinks active, nothing
+is built at all, so it can stay in production code permanently.
+
+Two distinct uses matter in tests. The first is assertable phases in
+application code: once the code declares "this is the render phase",
+a test asserts on the phase instead of reverse-engineering it from
+call patterns. `tape.blocks(name)` selects block events by name (an
+fnmatch pattern, like the config filters), returning an `EventLog`
+with the whole filter and assertion surface:
+
+```python
+def process(invoice):
+    with wrapture.block("render-invoice", customer=invoice.customer_id):
+        pages = render(invoice)
+        wrapture.annotate(pages=pages)
+
+
+def test_render_annotates_page_count():
+    with wrapture.timeline() as tape:
+        process(invoice)
+
+    render = tape.blocks("render-invoice").assert_once().first
+    assert render.data["pages"] == 4
+```
+
+The context manager yields None; code inside the block reaches the
+event through the ambient surface, `annotate()` and
+`current_event()`, exactly as anywhere else.
+
+The second use lives in the test body itself: an integration test
+that performs several acts otherwise leaves one flat tape, and "the
+events during the second request" means parent-chasing. Blocks give
+the phases names, and `tape.within(event)` scopes the whole query
+surface to one block's contents:
+
+```python
+def test_second_request_hits_cache():
+    render = wrapture.binding(Renderer, "render")
+
+    with wrapture.timeline(render) as tape:
+        with wrapture.block("first request"):
+            client.get("/invoice/1")
+        with wrapture.block("second request"):
+            client.get("/invoice/1")
+
+    second = tape.blocks("second request").assert_once().first
+    tape.within(second).for_binding(render).assert_never()
+```
+
+The view `within()` returns is tape-like and live: `all`,
+`for_binding()`, `blocks()`, `roots()`, `tree()` and
+`assert_order()` all work scoped to the block's descendants, so an
+ordering assertion on the view never sees an event outside it. The
+block event is not a member of its own view (within means contents);
+the view exposes it as `.root`, its `roots()` are the block's direct
+children, and views nest, `within()` on a view scoping further down.
+`within()` works for any event, but a block is the one you name.
+
+Ordering assertions mix blocks with everything else, since
+`tape.blocks()` returns an event log and `assert_order()` accepts
+event logs as steps; a block takes its position at entry. Blocks of
+one name count as one recorder to the `consecutive`/`exact`
+strictness flags, the way one binding's calls do. And `tape.tree()`
+gains narrative structure for free:
+
+```text
+block: first request
+  GET /invoice/1 (app)
+    Renderer.render(invoice=1)
+block: second request
+  GET /invoice/1 (app)
+```
+
+There is deliberately no decorator form of `block()`. The
+whole-function case already has a first-class answer: decorate the
+function with `@observed` (or address it from config), and it
+records a `"call"` event, which is what a whole function is.
+`block()` marks what is smaller than a function, the stretches
+inside one that no callable boundary covers.
 
 ## The pytest plugin
 

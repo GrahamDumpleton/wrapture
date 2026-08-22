@@ -200,20 +200,22 @@ tree. The same events flow to sinks, so a config file's `[[log]]`
 entries put an application's log messages into its trace with no
 code changes.
 
-## Trace identity: one trace across processes
+## Block events: phases the code declares
 
-Event linkage is process local; a **trace identity** extends it. On
-by default, every tree of events carries a W3C trace id, minted at
-the root or joined from an arriving request's `traceparent` header,
-shared by every event in the tree and stamped on every serialised
-line, so two services both observed by wrapture join their trace
-files on one id with no tracing backend involved. Instrumentation
-injects the identity into outbound requests through a two-function
-public surface, `current_trace()` and `trace_headers()`, and formats
-wrapture parses but nothing claims pass through verbatim: it never
-breaks a trace it does not understand. The `[trace]` config table
-switches identities off process-wide, with `trace = true` on an
-observe entry as the case-by-case re-enable.
+The third event producer, after bindings (calls observed from
+outside) and log capture (messages the code emitted), is a
+declaration the code makes itself: `wrapture.block(name)` is a
+context manager recording the enclosed stretch of code as one event
+of kind `"block"`, with the body's duration, an escaping exception,
+and keyword arguments plus `annotate()` filling its data. Everything
+recorded inside nests under it, so blocks name the phases of an
+operation that no callable boundary covers, assertable in tests with
+`tape.blocks(name)` and scoped views from `tape.within(event)`, and
+rendered as spans by a tracing sink. Like a log statement, the
+marker is inert when nothing listens, so it can live in production
+code permanently. There is no decorator form: a whole function is a
+`"call"` event, via `@observed` or a binding; `block()` marks what
+is smaller than a function.
 
 ## From tests to tracing
 
@@ -238,6 +240,22 @@ schedule or trigger, feeding **collectors** that turn a slice of
 events into a report. The [ad-hoc tracing](ad-hoc-tracing.md) guide
 is the reference for all of it.
 
+## Trace identity: one trace across processes
+
+Event linkage is process local; a **trace identity** extends it. On
+by default, every tree of events rooted in an operation, a call, a
+request or a block, carries a W3C trace id, minted at the root or
+joined from an arriving request's `traceparent` header, shared by
+every event in the tree and stamped on every serialised line, so two
+services both observed by wrapture join their trace files on one id
+with no tracing backend involved. Instrumentation injects the
+identity into outbound requests through a two-function public
+surface, `current_trace()` and `trace_headers()`, and formats
+wrapture parses but nothing claims pass through verbatim: it never
+breaks a trace it does not understand. The `[trace]` config table
+switches identities off process-wide, with `trace = true` on an
+observe entry as the case-by-case re-enable.
+
 ## The map
 
 | Concept | In one line | Where |
@@ -255,10 +273,11 @@ is the reference for all of it.
 | `mock(Spec)` | A made-up collaborator, strictly shaped by its spec | [Unit testing](unit-testing.md) |
 | `bound()` / `taped()` | The with-block's meaning as decorators, handles injected | [Unit testing](unit-testing.md) |
 | Log capture | Log messages as events, nested in the call that emitted them | [Unit testing](unit-testing.md), [Ad-hoc tracing](ad-hoc-tracing.md) |
-| Trace identity | Every tree carries a distributed trace id, propagated over HTTP | [Ad-hoc tracing](ad-hoc-tracing.md) |
+| Block events | `block()` declares a stretch of code as an event, children nested under it | [Unit testing](unit-testing.md), [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Sinks | Where events go outside a test: print, stream, count, compose | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Config and injection | `wrapture.toml` plus a launcher or autowrapt: tracing without code changes | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Request tracing | Events grouped per WSGI/ASGI request | [WSGI](wsgi-tracing.md), [ASGI](asgi-tracing.md) |
+| Trace identity | Every operation-rooted tree carries a distributed trace id, propagated over HTTP | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Windows and collectors | Scheduled slices of observation turned into reports | [Scheduled tracing](scheduled-tracing.md) |
 
 If you are new, read [getting started](getting-started.md) next; it

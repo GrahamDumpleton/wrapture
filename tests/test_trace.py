@@ -1,13 +1,14 @@
 """Tests for distributed trace identity.
 
 These cover the W3C codec, minting and inheritance in the recording
-path (every tree is a trace), the WSGI and ASGI ingress parse, the
-public egress surface (current_trace and trace_headers), the verbatim
-pass-through invariant for unclaimed formats, serialisation of the
-identity fields, and the [trace] config table with its per-entry
-re-enable.
+path (every tree rooted in a declared operation is a trace), the kind
+gate on minting, the WSGI and ASGI ingress parse, the public egress
+surface (current_trace and trace_headers), the verbatim pass-through
+invariant for unclaimed formats, serialisation of the identity
+fields, and the [trace] config table with its per-entry re-enable.
 """
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from typing import Any
 import pytest
 
 import wrapture
-from wrapture import observed, timeline
+from wrapture import capture_logs, observed, timeline
 from wrapture.sinks import _event_record
 from wrapture.trace import (
     _configure,
@@ -179,6 +180,73 @@ def test_a_flagged_binding_mints_under_a_global_disable(
         Jobs().run()
 
     assert tape.all[0].trace is not None
+
+
+# ---------------------------------------------------------------------------
+# the minting kind gate
+# ---------------------------------------------------------------------------
+
+
+class Settings:
+    limit = 10
+
+
+def test_a_root_attribute_access_never_mints() -> None:
+    limit = wrapture.binding(Settings, "limit", mode="attribute")
+
+    with timeline(limit) as tape:
+        _ = Settings().limit
+
+    event = tape.all[0]
+    assert event.kind == "get"
+    assert event.trace is None
+
+
+def test_an_attribute_access_nested_in_a_call_inherits() -> None:
+    limit = wrapture.binding(Settings, "limit", mode="attribute")
+
+    @observed
+    def read() -> int:
+        return Settings().limit
+
+    with timeline(limit) as tape:
+        read()
+
+    call, get = tape.all
+    assert call.trace is not None
+    assert get.trace is call.trace
+
+
+def test_a_root_log_event_carries_no_trace() -> None:
+    log = logging.getLogger("tracegate.root")
+    log.setLevel(logging.DEBUG)
+    log.propagate = False
+    logs = capture_logs("tracegate.*")
+
+    with timeline(logs) as tape:
+        log.warning("standalone line")
+
+    event = tape.all[0]
+    assert event.kind == "log"
+    assert event.trace is None
+
+
+def test_a_nested_log_event_shares_the_tree_trace() -> None:
+    log = logging.getLogger("tracegate.nested")
+    log.setLevel(logging.DEBUG)
+    log.propagate = False
+    logs = capture_logs("tracegate.*")
+
+    @observed
+    def emit() -> None:
+        log.warning("inside")
+
+    with timeline(logs) as tape:
+        emit()
+
+    call, line = tape.all
+    assert call.trace is not None
+    assert line.trace is call.trace
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +516,64 @@ def test_an_observe_entry_re_enables_under_a_disable(tmp_path: Path) -> None:
         import sys as _sys
 
         _sys.modules.pop("cfgtrace_jobs", None)
+
+
+def test_trace_true_on_an_attribute_only_entry_is_rejected(tmp_path: Path) -> None:
+    module = tmp_path / "cfgtrace_attrs.py"
+    module.write_text("threshold = 5\n")
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text(
+        '[[observe]]\ntarget = "cfgtrace_attrs"\nname = "threshold"\ntrace = true\n'
+    )
+
+    import sys
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        __import__("cfgtrace_attrs")
+
+        with pytest.raises(wrapture.ConfigError, match="can never act"):
+            wrapture.load_config(str(source)).apply()
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("cfgtrace_attrs", None)
+
+
+def test_trace_true_on_a_mixed_entry_marks_the_operations(tmp_path: Path) -> None:
+    # An entry naming both a function and a data attribute is fine:
+    # the mark lands on the binding that can mint, and the attribute
+    # binding is simply not marked rather than the entry rejected.
+
+    module = tmp_path / "cfgtrace_mixed.py"
+    module.write_text("def run():\n    return 'done'\n\nthreshold = 5\n")
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text(
+        "[trace]\nenabled = false\n\n"
+        '[[observe]]\ntarget = "cfgtrace_mixed"\n'
+        'name = ["run", "threshold"]\ntrace = true\n'
+    )
+
+    import sys
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        __import__("cfgtrace_mixed")
+
+        applied = wrapture.load_config(str(source)).apply()
+        try:
+            cfgtrace_mixed = sys.modules["cfgtrace_mixed"]
+
+            with timeline() as tape:
+                cfgtrace_mixed.run()
+
+            assert tape.all[0].trace is not None
+        finally:
+            applied.revert()
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("cfgtrace_mixed", None)
 
 
 def test_a_bad_trace_table_fails_the_load(tmp_path: Path) -> None:

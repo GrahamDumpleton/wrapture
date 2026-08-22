@@ -18,10 +18,14 @@ records its own correctly nested tree.
 from __future__ import annotations
 
 import contextvars
+import fnmatch
 import functools
+import sys
 import threading
+import time
+import weakref
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, Self, runtime_checkable
 
 from wrapt import MISSING
 
@@ -29,7 +33,15 @@ from . import trace as _trace
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
 from .events import Event, _format_time, _own_time
-from .sinks import Sink, _in_recorder, _scoped_sinks
+from .sinks import (
+    Sink,
+    _active_sinks,
+    _in_recorder,
+    _notify_error,
+    _notify_exit,
+    _record_event,
+    _scoped_sinks,
+)
 
 
 @runtime_checkable
@@ -43,7 +55,333 @@ class _Appliable(Protocol):
     def remove(self) -> Any: ...
 
 
-class Tape(Sink):
+class _EventQueries:
+    """The query face shared by the tape and its subtree views.
+
+    Every reader here is written against one primitive, _snapshot(),
+    a consistent list of the view's member events in sequence order;
+    a concrete class supplies it (the tape from its retained entries,
+    a subtree view by walking down from its root event), and
+    membership is what scopes every filter, tree and assertion.
+    """
+
+    def _snapshot(self) -> list[Event]:
+        raise NotImplementedError
+
+    @property
+    def all(self) -> list[Event]:
+        """Every recorded event, in sequence order."""
+
+        return self._snapshot()
+
+    def for_binding(self, bnd: Any) -> EventLog:
+        """A filterable view over this tape's events for one binding.
+
+        Accepts the binding itself or a behaviour namespace standing in
+        for it, as a chain like `binding(...).on_call.returns(None)`
+        hands back.
+        """
+
+        bnd = getattr(bnd, "_binding", bnd)
+
+        events = [event for event in self._snapshot() if event.binding is bnd]
+
+        return EventLog(getattr(bnd, "label", repr(bnd)), events)
+
+    def blocks(self, name: str = "*") -> EventLog:
+        """A filterable view over this tape's block events, selected by
+        name.
+
+        `name` is an fnmatch-style pattern matched case-sensitively
+        against each block's name, the same pattern language the config
+        filters use; the default selects every block. The result is an
+        EventLog, so the whole filter and assertion surface applies,
+        and it feeds assert_order() steps, where a block orders by its
+        entry.
+        """
+
+        events = [
+            event
+            for event in self._snapshot()
+            if event.kind == "block"
+            and event.label is not None
+            and fnmatch.fnmatchcase(event.label, name)
+        ]
+
+        return EventLog(f"block: {name}", events)
+
+    def within(self, event: Event) -> Subtree:
+        """A tape-like view over the events recorded inside the given
+        one: its descendants, not the event itself.
+
+        The whole query face applies, scoped: for_binding() and
+        blocks() select among the contents, assert_order() never sees
+        an event outside them, roots() lists the direct children, and
+        tree() draws the branch from the margin. The view is live,
+        like the tape it came from, and views nest: within() on a
+        view scopes further down.
+        """
+
+        return Subtree(self, event)
+
+    def roots(self) -> list[Event]:
+        """The top-level events of this view: those whose parent is
+        not a member.
+
+        On the whole tape that means events recorded with no observed
+        caller, plus any recorded under a parent the tape never heard
+        of (an operation already in flight when the timeline was
+        entered); on a subtree view it means the root event's direct
+        children.
+        """
+
+        entries = self._snapshot()
+        members = {event.seq for event in entries}
+
+        return [
+            event
+            for event in entries
+            if event.parent_id is None or event.parent_id not in members
+        ]
+
+    def parent_of(self, event: Event) -> Event | None:
+        """The event the given one was recorded inside, or None for a
+        root.
+
+        Events link to their parent by sequence number rather than by
+        reference; this resolves the link back to the event object.
+        """
+
+        if event.parent_id is None:
+            return None
+
+        for entry in self._snapshot():
+            if entry.seq == event.parent_id:
+                return entry
+
+        return None
+
+    def children_of(self, event: Event) -> list[Event]:
+        """The events recorded directly inside the given one, in
+        recording order."""
+
+        return [entry for entry in self._snapshot() if entry.parent_id == event.seq]
+
+    def self_time(self, event: Event) -> float | None:
+        """The time spent in the operation itself: its execution time
+        minus its observed children's, the figure profilers rank by.
+
+        The basis is the event's duration, except for a generator,
+        whose wall duration includes the consumer's time between
+        yields; its accumulated body time is used instead, and the
+        same rule applies to the children being subtracted. Returns
+        None when the event has not closed with a time.
+        """
+
+        own = _own_time(event)
+        if own is None:
+            return None
+
+        spent = 0.0
+        for child in self.children_of(event):
+            child_time = _own_time(child)
+            if child_time is not None:
+                spent += child_time
+
+        return max(0.0, own - spent)
+
+    def tree(self, *, times: bool = False) -> str:
+        """The call graph as it actually ran, one event per line,
+        indented by nesting depth.
+
+        A completed event shows its result after `->`; one that raised
+        shows `!!` and the exception type; one still in progress shows
+        neither. With times=True a timed event also shows its
+        execution time and, where observed children account for part
+        of it, its self time.
+        """
+
+        entries = self._snapshot()
+
+        # Rebuild the nesting from the id links: events whose parent
+        # is not in the view are the roots, in recording order, and
+        # each event's children are grouped under its seq. Indentation
+        # comes from the traversal rather than the recorded depth, so
+        # a subtree view starts at the margin and an event whose
+        # parent was never heard of lines up as the root it stands as.
+
+        members = {event.seq for event in entries}
+
+        roots: list[Event] = []
+        children: dict[int, list[Event]] = {}
+
+        for event in entries:
+            if event.parent_id is None or event.parent_id not in members:
+                roots.append(event)
+            else:
+                children.setdefault(event.parent_id, []).append(event)
+
+        lines: list[str] = []
+
+        def timing(event: Event) -> str:
+            own = _own_time(event)
+            if own is None:
+                return ""
+
+            spent = 0.0
+            for child in children.get(event.seq, []):
+                child_time = _own_time(child)
+                if child_time is not None:
+                    spent += child_time
+
+            if spent > 0.0:
+                self_time = max(0.0, own - spent)
+                return f"  [{_format_time(own)}, self {_format_time(self_time)}]"
+            return f"  [{_format_time(own)}]"
+
+        def emit(event: Event, level: int) -> None:
+            injected = " (injected)" if event.injected else ""
+
+            # A get event's str() already carries its value, so only the
+            # injected mark is added to it.
+
+            if event.exception is not None:
+                marker = f"  !! {type(event.exception).__name__}{injected}"
+            elif event.kind == "get":
+                marker = injected
+            elif event.result is not MISSING:
+                marker = f"  -> {event.result!r}{injected}"
+            else:
+                marker = ""
+
+            line = "  " * level + str(event) + marker
+            if times:
+                line += timing(event)
+
+            lines.append(line)
+
+            for child in children.get(event.seq, []):
+                emit(child, level + 1)
+
+        for root in roots:
+            emit(root, 0)
+
+        return "\n".join(lines)
+
+    def assert_order(
+        self, *steps: Any, consecutive: bool = False, exact: bool = False
+    ) -> Self:
+        """Assert the tape recorded events matching the steps, in order.
+
+        Each step is a binding or an observed callable (stub() and
+        mock() methods included), accepting any event it recorded, or
+        an EventLog, accepting exactly the events it holds, so a filtered
+        log is the way to say which call: `charge.events.with_args(
+        amount=500)`, `tape.for_binding(record).raising(TimeoutError)`.
+        The kinds mix freely, and repeating a step requires that
+        many matching events in order.
+
+        By default this is a subsequence check: other events may appear
+        before, between and after, and only the relative order matters.
+        The flags tighten it, each about the bindings the steps name
+        (events of any other binding are invisible to the assertion):
+        `consecutive=True` requires the steps to match a consecutive run
+        of those bindings' events, nothing of theirs between;
+        `exact=True` requires those bindings' events to be exactly the
+        steps, nothing before or after either, and implies consecutive.
+        Raises AssertionError saying where the expectation stalled or
+        which event broke it, with the actual timeline. Returns this
+        tape or view, so it chains.
+        """
+
+        matchers: list[Callable[[Event], bool]] = []
+        labels: list[str] = []
+        named: set[int] = set()
+
+        def accepts_log(log: EventLog) -> Callable[[Event], bool]:
+            wanted = {id(event) for event in log}
+            return lambda event: id(event) in wanted
+
+        def accepts_binding(wanted: Any) -> Callable[[Event], bool]:
+            return lambda event: event.binding is wanted
+
+        for step in steps:
+            # An observed callable accessed as a bound method records
+            # under its parent wrapper; resolve to that identity. A
+            # behaviour namespace stands in for its binding, so resolve
+            # that too.
+
+            recorder = getattr(step, "_self_parent", None) or step
+            recorder = getattr(recorder, "_binding", recorder)
+
+            if isinstance(step, EventLog):
+                matchers.append(accepts_log(step))
+                labels.append(step.label)
+                named.update(id(event.binding) for event in step)
+            elif hasattr(step, "apply") or hasattr(recorder, "_self_path"):
+                matchers.append(accepts_binding(recorder))
+                labels.append(getattr(step, "label", repr(step)))
+                named.add(id(recorder))
+            else:
+                raise TypeError(
+                    f"assert_order() steps are bindings or event logs, got {step!r}"
+                )
+
+        consecutive = consecutive or exact
+        entries = self._snapshot()
+        total = len(steps)
+
+        def actual() -> str:
+            return "\n".join(f"    {event}" for event in entries) or "    (no events)"
+
+        def step_name(index: int) -> str:
+            return f"{labels[index]} (position {index + 1} of {total})"
+
+        # One pass in record order. An event the current step accepts
+        # advances the cursor; any other event is skipped, unless it
+        # belongs to a named binding and the flags make it count.
+
+        position = 0
+        started = False
+
+        for event in entries:
+            if position < total and matchers[position](event):
+                position += 1
+                started = True
+                continue
+
+            if id(event.binding) not in named:
+                continue
+
+            if exact and not started:
+                raise AssertionError(
+                    f"expected exactly the given events; saw {event} before"
+                    f" {step_name(0)}\n  actual timeline:\n{actual()}"
+                )
+
+            if consecutive and started and position < total:
+                raise AssertionError(
+                    f"expected consecutive events; after {step_name(position - 1)}"
+                    f" saw {event} where {step_name(position)} was expected\n"
+                    f"  actual timeline:\n{actual()}"
+                )
+
+            if exact and position == total:
+                raise AssertionError(
+                    f"expected exactly the given events; saw {event} after"
+                    f" {step_name(total - 1)}\n  actual timeline:\n{actual()}"
+                )
+
+        if position != total:
+            raise AssertionError(
+                f"expected order not satisfied; stalled waiting for"
+                f" {step_name(position)}\n  actual timeline:\n{actual()}"
+            )
+
+        return self
+
+
+class Tape(_EventQueries, Sink):
     """The retained record of events for one timeline.
 
     The tape is the sink the testing workflow is built on: it keeps
@@ -155,261 +493,67 @@ class Tape(Sink):
         with self._lock:
             return sorted(self._entries, key=lambda event: event.seq)
 
+
+class Subtree(_EventQueries):
+    """A tape-like view over the events recorded inside one event,
+    created by within().
+
+    The container event is not a member of its own view (within means
+    contents): the view's roots are its direct children, the container
+    itself is exposed as `root`, and parent_of() on a direct child
+    returns the real container event, honest at the boundary rather
+    than clipped to membership. The view is live, recomputing its
+    membership from the underlying tape per access, and carries only
+    the query face; the recording-scope facts (closed, discarded,
+    pending) belong to the tape.
+    """
+
+    def __init__(self, source: _EventQueries, root: Event) -> None:
+        self._source = source
+        self._root = root
+
     @property
-    def all(self) -> list[Event]:
-        """Every recorded event, in sequence order."""
+    def root(self) -> Event:
+        """The container event this view holds the contents of."""
 
-        return self._snapshot()
+        return self._root
 
-    def for_binding(self, bnd: Any) -> EventLog:
-        """A filterable view over this tape's events for one binding.
+    def _snapshot(self) -> list[Event]:
+        # Take the source's snapshot, index children by parent, and
+        # walk down from the root; sorting restores one sequence order
+        # across branches.
 
-        Accepts the binding itself or a behaviour namespace standing in
-        for it, as a chain like `binding(...).on_call.returns(None)`
-        hands back.
-        """
+        entries = self._source._snapshot()
 
-        bnd = getattr(bnd, "_binding", bnd)
-
-        events = [event for event in self._snapshot() if event.binding is bnd]
-
-        return EventLog(getattr(bnd, "label", repr(bnd)), events)
-
-    def roots(self) -> list[Event]:
-        """The top-level events: those recorded with no observed caller."""
-
-        return [event for event in self._snapshot() if event.parent_id is None]
-
-    def parent_of(self, event: Event) -> Event | None:
-        """The event the given one was recorded inside, or None for a
-        root.
-
-        Events link to their parent by sequence number rather than by
-        reference; this resolves the link back to the event object.
-        """
-
-        if event.parent_id is None:
-            return None
-
-        with self._lock:
-            for entry in self._entries:
-                if entry.seq == event.parent_id:
-                    return entry
-
-        return None
-
-    def children_of(self, event: Event) -> list[Event]:
-        """The events recorded directly inside the given one, in
-        recording order."""
-
-        return [entry for entry in self._snapshot() if entry.parent_id == event.seq]
-
-    def self_time(self, event: Event) -> float | None:
-        """The time spent in the operation itself: its execution time
-        minus its observed children's, the figure profilers rank by.
-
-        The basis is the event's duration, except for a generator,
-        whose wall duration includes the consumer's time between
-        yields; its accumulated body time is used instead, and the
-        same rule applies to the children being subtracted. Returns
-        None when the event has not closed with a time.
-        """
-
-        own = _own_time(event)
-        if own is None:
-            return None
-
-        spent = 0.0
-        for child in self.children_of(event):
-            child_time = _own_time(child)
-            if child_time is not None:
-                spent += child_time
-
-        return max(0.0, own - spent)
-
-    def tree(self, *, times: bool = False) -> str:
-        """The call graph as it actually ran, one event per line,
-        indented by nesting depth.
-
-        A completed event shows its result after `->`; one that raised
-        shows `!!` and the exception type; one still in progress shows
-        neither. With times=True a timed event also shows its
-        execution time and, where observed children account for part
-        of it, its self time.
-        """
-
-        entries = self._snapshot()
-
-        # Rebuild the nesting from the id links: roots in recording
-        # order, and each event's children grouped under its seq.
-
-        roots: list[Event] = []
         children: dict[int, list[Event]] = {}
-
         for event in entries:
-            if event.parent_id is None:
-                roots.append(event)
-            else:
+            if event.parent_id is not None:
                 children.setdefault(event.parent_id, []).append(event)
 
-        lines: list[str] = []
+        descendants: list[Event] = []
+        queue: list[int] = [self._root.seq]
 
-        def timing(event: Event) -> str:
-            own = _own_time(event)
-            if own is None:
-                return ""
+        while queue:
+            seq = queue.pop()
+            for child in children.get(seq, []):
+                descendants.append(child)
+                queue.append(child.seq)
 
-            spent = 0.0
-            for child in children.get(event.seq, []):
-                child_time = _own_time(child)
-                if child_time is not None:
-                    spent += child_time
+        return sorted(descendants, key=lambda event: event.seq)
 
-            if spent > 0.0:
-                self_time = max(0.0, own - spent)
-                return f"  [{_format_time(own)}, self {_format_time(self_time)}]"
-            return f"  [{_format_time(own)}]"
+    def parent_of(self, event: Event) -> Event | None:
+        """The event the given one was recorded inside; for a direct
+        child of the view's root this is the root event itself."""
 
-        def emit(event: Event) -> None:
-            injected = " (injected)" if event.injected else ""
+        if event.parent_id is not None and event.parent_id == self._root.seq:
+            return self._root
 
-            # A get event's str() already carries its value, so only the
-            # injected mark is added to it.
+        return super().parent_of(event)
 
-            if event.exception is not None:
-                marker = f"  !! {type(event.exception).__name__}{injected}"
-            elif event.kind == "get":
-                marker = injected
-            elif event.result is not MISSING:
-                marker = f"  -> {event.result!r}{injected}"
-            else:
-                marker = ""
-
-            line = "  " * event.depth + str(event) + marker
-            if times:
-                line += timing(event)
-
-            lines.append(line)
-
-            for child in children.get(event.seq, []):
-                emit(child)
-
-        for root in roots:
-            emit(root)
-
-        return "\n".join(lines)
-
-    def assert_order(
-        self, *steps: Any, consecutive: bool = False, exact: bool = False
-    ) -> Tape:
-        """Assert the tape recorded events matching the steps, in order.
-
-        Each step is a binding or an observed callable (stub() and
-        mock() methods included), accepting any event it recorded, or
-        an EventLog, accepting exactly the events it holds, so a filtered
-        log is the way to say which call: `charge.events.with_args(
-        amount=500)`, `tape.for_binding(record).raising(TimeoutError)`.
-        The kinds mix freely, and repeating a step requires that
-        many matching events in order.
-
-        By default this is a subsequence check: other events may appear
-        before, between and after, and only the relative order matters.
-        The flags tighten it, each about the bindings the steps name
-        (events of any other binding are invisible to the assertion):
-        `consecutive=True` requires the steps to match a consecutive run
-        of those bindings' events, nothing of theirs between;
-        `exact=True` requires those bindings' events to be exactly the
-        steps, nothing before or after either, and implies consecutive.
-        Raises AssertionError saying where the expectation stalled or
-        which event broke it, with the actual timeline. Returns the
-        tape, so it chains.
-        """
-
-        matchers: list[Callable[[Event], bool]] = []
-        labels: list[str] = []
-        named: set[int] = set()
-
-        def accepts_log(log: EventLog) -> Callable[[Event], bool]:
-            wanted = {id(event) for event in log}
-            return lambda event: id(event) in wanted
-
-        def accepts_binding(wanted: Any) -> Callable[[Event], bool]:
-            return lambda event: event.binding is wanted
-
-        for step in steps:
-            # An observed callable accessed as a bound method records
-            # under its parent wrapper; resolve to that identity. A
-            # behaviour namespace stands in for its binding, so resolve
-            # that too.
-
-            recorder = getattr(step, "_self_parent", None) or step
-            recorder = getattr(recorder, "_binding", recorder)
-
-            if isinstance(step, EventLog):
-                matchers.append(accepts_log(step))
-                labels.append(step.label)
-                named.update(id(event.binding) for event in step)
-            elif hasattr(step, "apply") or hasattr(recorder, "_self_path"):
-                matchers.append(accepts_binding(recorder))
-                labels.append(getattr(step, "label", repr(step)))
-                named.add(id(recorder))
-            else:
-                raise TypeError(
-                    f"assert_order() steps are bindings or event logs, got {step!r}"
-                )
-
-        consecutive = consecutive or exact
-        entries = self._snapshot()
-        total = len(steps)
-
-        def actual() -> str:
-            return "\n".join(f"    {event}" for event in entries) or "    (no events)"
-
-        def step_name(index: int) -> str:
-            return f"{labels[index]} (position {index + 1} of {total})"
-
-        # One pass in record order. An event the current step accepts
-        # advances the cursor; any other event is skipped, unless it
-        # belongs to a named binding and the flags make it count.
-
-        position = 0
-        started = False
-
-        for event in entries:
-            if position < total and matchers[position](event):
-                position += 1
-                started = True
-                continue
-
-            if id(event.binding) not in named:
-                continue
-
-            if exact and not started:
-                raise AssertionError(
-                    f"expected exactly the given events; saw {event} before"
-                    f" {step_name(0)}\n  actual timeline:\n{actual()}"
-                )
-
-            if consecutive and started and position < total:
-                raise AssertionError(
-                    f"expected consecutive events; after {step_name(position - 1)}"
-                    f" saw {event} where {step_name(position)} was expected\n"
-                    f"  actual timeline:\n{actual()}"
-                )
-
-            if exact and position == total:
-                raise AssertionError(
-                    f"expected exactly the given events; saw {event} after"
-                    f" {step_name(total - 1)}\n  actual timeline:\n{actual()}"
-                )
-
-        if position != total:
-            raise AssertionError(
-                f"expected order not satisfied; stalled waiting for"
-                f" {step_name(position)}\n  actual timeline:\n{actual()}"
-            )
-
-        return self
+    def __repr__(self) -> str:
+        count = len(self._snapshot())
+        plural = "" if count == 1 else "s"
+        return f"<Subtree of {self._root}: {count} event{plural}>"
 
 
 # The in-progress stack: the events currently open in this context,
@@ -482,12 +626,17 @@ def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
     # request boundary that parsed incoming headers) keeps it, shading
     # its subtree; otherwise a nested event shares its parent's by
     # reference, and a root mints one when the mechanism is enabled,
-    # process-wide or by this root's binding. Every tree is a trace.
+    # process-wide or by this root's binding. Minting is gated by
+    # kind: traces start at declared operation boundaries (a function
+    # invoked, a request arriving, a block entered), so a root
+    # attribute access never starts one.
 
     if event.trace is None:
         if parent is not None:
             event.trace = parent.trace
-        elif _trace._active() or getattr(event.binding, "_trace_root", False):
+        elif event.kind in ("call", "request", "block") and (
+            _trace._active() or getattr(event.binding, "_trace_root", False)
+        ):
             event.trace = _trace.mint()
 
     return _stack.set(stack + (event,))
@@ -576,6 +725,159 @@ def annotate(**data: Any) -> None:
     event = current_event()
     if event is not None:
         event.data.update(data)
+
+
+class _BlockRecorder:
+    """The identity a block event carries in its binding slot: one
+    shared object per block name, so blocks of the same name read as
+    one recorder to assert_order()'s strictness flags, the way calls
+    of one binding do.
+
+    Interned weakly and kept alive by the events that carry it, so a
+    process using dynamically named blocks (`block(f"deploy
+    {target}")`) accumulates no per-name registry entries beyond the
+    lives of the events themselves.
+    """
+
+    __slots__ = ("label", "__weakref__")
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __repr__(self) -> str:
+        return f"<block {self.label!r}>"
+
+
+_block_recorders: weakref.WeakValueDictionary[str, _BlockRecorder] = (
+    weakref.WeakValueDictionary()
+)
+_block_recorders_lock = threading.Lock()
+
+
+def _block_recorder(name: str) -> _BlockRecorder:
+    with _block_recorders_lock:
+        recorder = _block_recorders.get(name)
+
+        if recorder is None:
+            recorder = _BlockRecorder(name)
+            _block_recorders[name] = recorder
+
+        return recorder
+
+
+class Block:
+    """The context manager block() returns, recording one "block" event
+    per use of the with statement.
+
+    The recording work all happens on entry and exit; the object holds
+    only what exit needs to close the event entry opened.
+    """
+
+    def __init__(self, name: str, data: dict[str, Any]) -> None:
+        if not isinstance(name, str) or not name:
+            raise TypeError(f"block() needs a non-empty name string, got {name!r}")
+
+        self._name = name
+        self._data = data
+
+        self._event: Event | None = None
+        self._token: contextvars.Token[tuple[Event, ...]] | None = None
+        self._active: tuple[Sink, ...] = ()
+        self._started = 0.0
+
+    def __enter__(self) -> None:
+        # Recording gate first: with nobody listening, or inside the
+        # recording machinery itself, the marker does nothing at all,
+        # not even the frame inspection.
+
+        active = _active_sinks()
+        if not active or _in_recorder.get():
+            return None
+
+        if self._event is not None:
+            raise RuntimeError(
+                "this block is already active; each with statement needs"
+                " its own block()"
+            )
+
+        # Synthesise the path from the caller's frame, so the event
+        # locates its call site the way a bound call would.
+
+        frame = sys._getframe(1)
+        module = frame.f_globals.get("__name__", "?")
+        path = f"{module}:{frame.f_code.co_qualname}"
+
+        event = Event(
+            "block", path, label=self._name, binding=_block_recorder(self._name)
+        )
+        if self._data:
+            event.data.update(self._data)
+
+        # Push before delivery, as every producer does: the event is
+        # the innermost in-flight event from the moment sinks hear of
+        # it, so everything recorded inside the body nests under it.
+
+        self._token = _push(event)
+        self._active = active
+        self._event = event
+
+        _record_event(event, active)
+
+        self._started = time.perf_counter()
+        event.started = self._started
+
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
+        event = self._event
+        if event is None:
+            return
+
+        # Close with duration and outcome, then restore the enclosing
+        # scope. An exception is recorded and still propagates.
+
+        self._event = None
+        event.duration = time.perf_counter() - self._started
+
+        try:
+            if exc is not None:
+                event.exception = exc
+                _notify_error(event, self._active)
+            else:
+                _notify_exit(event, self._active)
+        finally:
+            token = self._token
+            self._token = None
+            if token is not None:
+                _pop(token)
+
+
+def block(name: str, **data: Any) -> Block:
+    """Declare the enclosed stretch of code as one recorded event.
+
+    A named unit smaller than a function: the with body's wall time
+    becomes the event's duration, an exception escaping the body is
+    recorded and still propagates, keyword arguments seed the event's
+    data, and everything recorded inside the body (bound calls, log
+    events, nested blocks) nests under it. The event's kind is
+    "block", its label is the given name, and its path locates the
+    call site as module:qualname of the function the with statement
+    sits in. A block entered with nothing in flight above it roots
+    its own tree and mints a trace identity like any operation root.
+
+    Like a log statement, a marker left permanently in code is inert
+    when nothing is listening: with no sinks active, nothing is built
+    at all. The context manager yields None; code inside the block
+    reaches the event through the ambient surface, annotate() and
+    current_event().
+    """
+
+    return Block(name, data)
 
 
 class Timeline:

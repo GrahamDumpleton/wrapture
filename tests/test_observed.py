@@ -51,12 +51,56 @@ def test_calls_record_with_a_derived_path_and_label() -> None:
 
 
 def test_label_can_be_overridden() -> None:
-    wrapped = observed(greet, "greeter")
+    wrapped = observed(greet, label="greeter")
 
     with timeline() as tape:
         wrapped("world")
 
     assert tape.all[0].label == "greeter"
+
+
+def test_the_factory_form_captures_the_function_below() -> None:
+    # Called with only options, observed() returns the decorator, so
+    # both spellings work: bare @observed on a def, and
+    # @observed(label=...) when options are wanted.
+
+    @observed(label="quiet greeter", capture=redact("name"))
+    def whisper(name: str) -> str:
+        return f"psst {name}"
+
+    assert isinstance(whisper, ObservedCallable)
+
+    with timeline() as tape:
+        whisper("secret")
+
+    event = tape.all[0]
+    assert event.label == "quiet greeter"
+    assert event.arguments is not None
+    assert event.arguments["name"] != "secret"
+
+
+def test_the_factory_form_options_apply() -> None:
+    @observed(when=False)
+    def silent() -> str:
+        return "s"
+
+    @observed
+    def bare() -> str:
+        return "b"
+
+    with timeline() as tape:
+        assert silent() == "s"
+        assert bare() == "b"
+
+    (event,) = tape.all
+    assert event.label is not None and event.label.endswith(".bare")
+
+
+def test_the_factory_form_dedupes_by_label() -> None:
+    wrapped = observed(greet, label="agent:greet")
+    again = observed(label="agent:greet")(wrapped)
+
+    assert again is wrapped
 
 
 def test_events_nest_around_observed_calls() -> None:
@@ -207,8 +251,8 @@ def test_the_same_label_is_applied_only_once() -> None:
     # Re-applying an existing label returns the callable unchanged;
     # the second call's options do not reconfigure the observation.
 
-    wrapped = observed(greet, "agent:greet")
-    again = observed(wrapped, "agent:greet", when=False)
+    wrapped = observed(greet, label="agent:greet")
+    again = observed(wrapped, label="agent:greet", when=False)
 
     assert again is wrapped
 
@@ -224,13 +268,13 @@ def test_dedupe_sees_through_foreign_wrappers() -> None:
     # a later decorator buries it, and what was given is returned
     # unchanged, the outer wrapper intact.
 
-    inner = observed(greet, "agent:greet")
+    inner = observed(greet, label="agent:greet")
 
     @functools.wraps(inner)
     def decorated(*args: Any, **kwargs: Any) -> Any:
         return inner(*args, **kwargs)
 
-    unchanged: Any = observed(decorated, "agent:greet")
+    unchanged: Any = observed(decorated, label="agent:greet")
     assert unchanged is decorated
 
 
@@ -240,8 +284,8 @@ def test_distinct_labels_stack_and_both_record() -> None:
     # labels is indistinguishable from this, so it is not an error;
     # the double counting is the visible symptom.
 
-    first = observed(greet, "apm:greet")
-    second = observed(first, "audit:greet")
+    first = observed(greet, label="apm:greet")
+    second = observed(first, label="audit:greet")
 
     assert second is not first
 
@@ -256,7 +300,7 @@ def test_distinct_labels_stack_and_both_record() -> None:
 
 def test_observed_requires_a_callable() -> None:
     with pytest.raises(TypeError, match="wraps a callable"):
-        observed(42)  # type: ignore[arg-type]
+        observed(42)  # type: ignore[call-overload]
 
 
 def test_the_proxy_type_is_exported() -> None:
@@ -274,7 +318,7 @@ def task_hook(self: Any, task_id: str, args: tuple[Any, ...]) -> None:
 
 
 def test_placed_on_a_class_the_proxy_binds_and_records_the_instance() -> None:
-    hook = observed(task_hook, "before_start")
+    hook = observed(task_hook, label="before_start")
 
     class Task:
         before_start: Any = hook
@@ -289,7 +333,7 @@ def test_placed_on_a_class_the_proxy_binds_and_records_the_instance() -> None:
 
 
 def test_bound_access_reaches_the_proxy_state_and_events() -> None:
-    hook = observed(task_hook, "state_hook")
+    hook = observed(task_hook, label="state_hook")
 
     class Task:
         before_start: Any = hook
@@ -306,7 +350,7 @@ def test_bound_access_reaches_the_proxy_state_and_events() -> None:
 
 
 def test_bound_signature_drops_self() -> None:
-    hook = observed(task_hook, "signature_hook")
+    hook = observed(task_hook, label="signature_hook")
 
     class Task:
         before_start: Any = hook
@@ -328,7 +372,7 @@ def test_when_receives_the_bound_instance() -> None:
         seen.append(instance)
         return getattr(instance, "flagged", True)
 
-    hook = observed(task_hook, "when_hook", when=only_flagged)
+    hook = observed(task_hook, label="when_hook", when=only_flagged)
 
     class Task:
         flagged: bool
@@ -367,5 +411,5 @@ def test_wrapping_a_bound_method_records_its_instance() -> None:
 def test_the_proxy_stays_weak_referenceable() -> None:
     import weakref
 
-    proxy = observed(task_hook, "weak_hook")
+    proxy = observed(task_hook, label="weak_hook")
     assert weakref.ref(proxy)() is proxy
