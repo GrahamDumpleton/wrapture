@@ -158,8 +158,8 @@ def _request_data(environ: Mapping[str, Any], policy: CapturePolicy) -> dict[str
 
 
 def _trace_environ(environ: Mapping[str, Any]) -> dict[str, str]:
-    # The propagation headers the configured trace formats want,
-    # lifted off the environ under their casefolded names.
+    # The trace propagation headers, lifted off the environ under
+    # their casefolded names.
 
     headers: dict[str, str] = {}
 

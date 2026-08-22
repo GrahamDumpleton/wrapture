@@ -1127,14 +1127,20 @@ setup hook plus one behaviour stage; the trace-propagation example's
 `urllib_support.py` is the complete pattern, a client and a server
 in two processes sharing ids through nothing but the header.
 
-One invariant governs formats wrapture parses but nothing claims:
-**never break a trace you do not understand**. A request can carry
-several products' trace headers at once (services mid-migration
-send W3C and vendor formats side by side); each configured format
-parses into its own slot, and on egress a slot no tracing sink has
-claimed forwards its headers verbatim, so that product sees this
-service as a transparent hop and its trace stays connected, while a
-claimed slot is rewritten with span ids that really get exported.
+W3C trace context is the one wire format wrapture speaks. The
+ecosystem has converged on it, and vendor baggage rides inside the
+standard's own `tracestate` header, so there is nothing left for a
+second convention to carry. One invariant governs an identity
+wrapture parses but nothing claims: **never break a trace you do
+not understand**. An arriving identity keeps its raw headers on the
+slot, and on egress a slot no tracing sink has claimed forwards
+those headers verbatim, so the upstream product sees this service
+as a transparent hop and its trace stays connected, while a claimed
+slot is rewritten with span ids that really get exported. Headers
+wrapture does not parse are never touched at all: a request
+carrying a vendor format alongside `traceparent` (services
+mid-migration send both) flows through the application with no
+wrapture involvement in the vendor headers whatsoever.
 
 Configuration is the top-level `[trace]` table, and the noun is
 deliberate: this switches trace *identities*, never observation,
@@ -1143,7 +1149,6 @@ recording or sinks:
 ```toml
 [trace]
 enabled = false        # ids and propagation off process-wide
-formats = ["w3c"]      # the formats to parse at ingress
 
 [[observe]]
 target = "myapp.jobs"
@@ -1151,15 +1156,13 @@ match = "run_*"
 trace = true           # these roots mint identities anyway
 ```
 
-`formats` names the wire formats to recognise, w3c today, with the
-codec registry built for others to join. `trace = true` on an
-observe entry is the case-by-case re-enable under a global disable:
-that entry's roots, a background job wanting an identity for its
-outbound calls, say, mint even while the mechanism is off elsewhere.
-Because only operations mint, the flag lands on the entry's call and
-request bindings; an entry that binds nothing but attributes is
-rejected, since the flag could never act there. With no `[trace]`
-table at all, the defaults stand: enabled, w3c.
+`trace = true` on an observe entry is the case-by-case re-enable
+under a global disable: that entry's roots, a background job wanting
+an identity for its outbound calls, say, mint even while the
+mechanism is off elsewhere. Because only operations mint, the flag
+lands on the entry's call and request bindings; an entry that binds
+nothing but attributes is rejected, since the flag could never act
+there. With no `[trace]` table at all, the default stands: enabled.
 
 ## Exporting traces to other tools
 

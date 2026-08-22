@@ -18,11 +18,15 @@ changes afterwards, the span-id register a tracing sink maintains, is
 runtime plumbing for outbound injection, never serialised.
 
 This module holds the vocabulary: the context and slot types, the
-wire-format codecs (W3C trace context first), minting, and the
-header rendering outbound injection uses. It deliberately knows no
-vendor SDK: formats here are public wire protocols, the same kind of
-boundary knowledge the WSGI middleware embeds. The process-wide
-switches live here too, configured by the `[trace]` config table.
+W3C trace context codec, minting, and the header rendering outbound
+injection uses. W3C trace context is the one wire format wrapture
+speaks; the ecosystem has converged on it, and vendor baggage rides
+inside its own `tracestate` header, so other conventions pass
+through the application without wrapture's involvement at all. It
+deliberately knows no vendor SDK: the codec is a public wire
+protocol, the same kind of boundary knowledge the WSGI middleware
+embeds. The process-wide switch lives here too, configured by the
+`[trace]` config table.
 
 The contract has two tiers. Instrumentation packages, which inject
 headers into outbound requests, use only `wrapture.current_trace()`
@@ -36,7 +40,7 @@ from __future__ import annotations
 
 import secrets
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -66,10 +70,11 @@ class TraceSlot:
 class TraceContext:
     """The distributed trace identity a tree of events carries.
 
-    One slot per wire format present or minted, keyed by format name
-    ("w3c"). Every event in a tree shares one TraceContext by
-    reference; a nested boundary that receives its own headers starts
-    a fresh one for its subtree.
+    One slot, keyed by format name with "w3c" the only occupant: the
+    keyed shape is deliberate, keeping the serialised form stable,
+    but w3c is the one format wrapture speaks. Every event in a tree
+    shares one TraceContext by reference; a nested boundary that
+    receives its own headers starts a fresh one for its subtree.
     """
 
     slots: dict[str, TraceSlot] = field(default_factory=dict)
@@ -153,67 +158,37 @@ def _mint_w3c() -> TraceSlot:
     )
 
 
-# The codec registry: format name to (parse, render, header names).
-# Datadog and B3 are additions here, not redesigns; the header names
-# are what the middleware lifts off a request, so a new codec needs
-# no middleware changes.
-
-_CODECS: dict[str, tuple[object, object, tuple[str, ...]]] = {
-    "w3c": (_parse_w3c, _render_w3c, (_W3C_TRACEPARENT, _W3C_TRACESTATE)),
-}
-
-
 def wanted_headers() -> tuple[str, ...]:
-    """The casefolded request header names the configured formats
-    parse, for the middleware to lift off a request."""
+    """The casefolded request header names the trace parse reads,
+    for the middleware to lift off a request."""
 
-    names: list[str] = []
-    for fmt in _formats:
-        for header in _CODECS[fmt][2]:
-            if header not in names:
-                names.append(header)
-
-    return tuple(names)
+    return (_W3C_TRACEPARENT, _W3C_TRACESTATE)
 
 
-# -- process-wide switches, configured by the [trace] config table ----------
+# -- the process-wide switch, configured by the [trace] config table --------
 
 _state_lock = threading.Lock()
 _enabled = True
-_formats: tuple[str, ...] = ("w3c",)
 
 
-def _check_formats(formats: Sequence[str]) -> None:
-    """Reject any format name no codec exists for."""
+def _configure(enabled: bool) -> bool:
+    """Set the process-wide trace switch, returning the previous
+    value so a reverted config can restore it."""
 
-    for name in formats:
-        if name not in _CODECS:
-            raise ValueError(
-                f"unknown trace format {name!r}; known formats are {sorted(_CODECS)}"
-            )
-
-
-def _configure(enabled: bool, formats: Sequence[str]) -> tuple[bool, tuple[str, ...]]:
-    """Set the process-wide trace switches, returning the previous
-    pair so a reverted config can restore them."""
-
-    global _enabled, _formats
-
-    _check_formats(formats)
+    global _enabled
 
     with _state_lock:
-        previous = (_enabled, _formats)
+        previous = _enabled
         _enabled = enabled
-        _formats = tuple(formats)
 
     return previous
 
 
-def _restore(previous: tuple[bool, tuple[str, ...]]) -> None:
-    global _enabled, _formats
+def _restore(previous: bool) -> None:
+    global _enabled
 
     with _state_lock:
-        _enabled, _formats = previous
+        _enabled = previous
 
 
 def _active() -> bool:
@@ -225,27 +200,18 @@ def _active() -> bool:
 
 def from_headers(headers: Mapping[str, str]) -> TraceContext | None:
     """Parse incoming request headers into a TraceContext, or None
-    when no configured format is present.
+    when no `traceparent` is present.
 
     `headers` maps casefolded header names to values; the middleware
-    builds it from the environ or the scope. Each configured format
-    parses into its own slot, raw headers kept for verbatim
-    re-injection, so a request carrying several products' headers at
-    once keeps them all.
+    builds it from the environ or the scope. The raw headers are kept
+    on the slot for verbatim re-injection.
     """
 
-    slots: dict[str, TraceSlot] = {}
-
-    for name in _formats:
-        parse = _CODECS[name][0]
-        slot = parse(headers)  # type: ignore[operator]
-        if slot is not None:
-            slots[name] = slot
-
-    if not slots:
+    slot = _parse_w3c(headers)
+    if slot is None:
         return None
 
-    return TraceContext(slots=slots)
+    return TraceContext(slots={"w3c": slot})
 
 
 def mint() -> TraceContext:
@@ -267,12 +233,11 @@ def headers_for(context: TraceContext) -> dict[str, str]:
 
     headers: dict[str, str] = {}
 
-    for name, slot in context.slots.items():
+    for slot in context.slots.values():
         if not slot.claimed and slot.headers:
             headers.update(slot.headers)
         else:
-            render = _CODECS[name][1]
-            headers.update(render(slot))  # type: ignore[operator]
+            headers.update(_render_w3c(slot))
 
     return headers
 

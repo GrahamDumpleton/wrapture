@@ -694,9 +694,10 @@ def trace_headers() -> dict[str, str]:
     request headers foremost, and equally message-queue headers or
     gRPC metadata; a probe calls this and merges the result into
     whatever it is sending. Claimed and minted identities render from
-    their current ids; formats that arrived in headers and were never
-    claimed forward verbatim, so a product wrapture has no sink for
-    sees a transparent hop rather than a broken trace. Empty when
+    their current ids; an identity that arrived in headers and was
+    never claimed forwards verbatim, so a product wrapture has no
+    sink for sees a transparent hop rather than a broken trace. Empty
+    when
     nothing is being recorded or the tree carries no identity, so
     injection is always safe to attempt.
 

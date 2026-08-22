@@ -244,15 +244,17 @@ is the reference for all of it.
 
 Event linkage is process local; a **trace identity** extends it. On
 by default, every tree of events rooted in an operation, a call, a
-request or a block, carries a W3C trace id, minted at the root or
-joined from an arriving request's `traceparent` header, shared by
-every event in the tree and stamped on every serialised line, so two
-services both observed by wrapture join their trace files on one id
-with no tracing backend involved. Instrumentation injects the
-identity into outbound requests through a two-function public
-surface, `current_trace()` and `trace_headers()`, and formats
-wrapture parses but nothing claims pass through verbatim: it never
-breaks a trace it does not understand. The `[trace]` config table
+request or a block, carries a W3C trace id (W3C trace context is
+the one wire format, the one the ecosystem converged on), minted at
+the root or joined from an arriving request's `traceparent` header,
+shared by every event in the tree and stamped on every serialised
+line, so two services both observed by wrapture join their trace
+files on one id with no tracing backend involved. Instrumentation
+injects the identity into outbound requests through a two-function
+public surface, `current_trace()` and `trace_headers()`, and an
+identity wrapture parses but nothing claims passes through
+verbatim: it never breaks a trace it does not understand. The
+`[trace]` config table
 switches identities off process-wide, with `trace = true` on an
 observe entry as the case-by-case re-enable.
 
