@@ -318,3 +318,58 @@ with the trees appearing in the server log as requests arrive:
 $ uv run --with fastapi --with uvicorn python -m wrapture -m uvicorn myapp:app
 $ curl http://127.0.0.1:8000/quote/widget
 ```
+
+## trace-propagation
+
+Two processes, one trace. A client places orders against a quote
+service over HTTP, both sides observed by wrapture, neither
+mentioning it, and the trace identity minted at each client tree's
+root travels in the `traceparent` header and reappears in the
+server's records: distributed tracing with no tracing backend
+anywhere, just wrapture on both ends.
+
+The moving parts are the mechanism's defaults plus one probe. Trace
+identity is on by default, so every client tree mints an id at its
+root. The setup hook in `wrapture_local/urllib_support.py`, the
+stand-in for what a wrapture-probe-urllib package would ship, binds
+urllib's opener so each outbound request records as a client-side
+call and carries `wrapture.trace_headers()` in its headers, the
+whole public surface a probe needs. On the server, the WSGI
+middleware parses the incoming header at the boundary, so that
+process's trees join the client's trace instead of minting their
+own.
+
+Everything is standard library, so no extra packages are involved.
+First terminal, the server:
+
+```console
+$ cd examples/trace-propagation
+$ rm -f client.jsonl server.jsonl
+$ uv run python -m wrapture --config server.toml server.py
+```
+
+Second terminal, the client:
+
+```console
+$ cd examples/trace-propagation
+$ uv run python -m wrapture --config client.toml client.py
+```
+
+Each order prints as one tree in each terminal. The join is in the
+files both configs also stream: every line carries its tree's trace
+id, and the same ids appear in both, client and server halves of one
+distributed trace:
+
+```console
+$ uv run python -c "
+import json
+for name in ('client.jsonl', 'server.jsonl'):
+    for line in open(name):
+        record = json.loads(line)
+        print(record['trace']['w3c']['trace_id'][:8], name, record['path'])
+" | sort
+```
+
+A request arriving with no `traceparent` (a plain `curl` at the
+server) mints a fresh id at the boundary instead, so the server's
+records are joinable per request either way.

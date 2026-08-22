@@ -1,0 +1,21 @@
+# The client half: observe the order flow, and instrument urllib so
+# every outbound request carries the trace identity minted at each
+# tree's root. The [trace] mechanism is on by default, so no [trace]
+# table appears here; every order is its own trace.
+
+pythonpath = "."
+
+[[observe]]
+target = "frontend"
+match = "*"
+
+[[setup]]
+module = "urllib.request"
+call = "wrapture_local.urllib_support:instrument"
+
+[[sink]]
+type = "printer"
+
+[[sink]]
+type = "jsonlines"
+path = "client.jsonl"

@@ -39,6 +39,7 @@ from typing import Any, cast
 
 import wrapt
 
+from . import trace as _trace
 from .bindings import Binding, _select_members, binding
 from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
@@ -147,6 +148,10 @@ class ObserveEntry:
     middleware; each requires `name`, since a pattern must never
     bulk-install middleware. For a wsgi or asgi entry, `redact` names
     query string parameters.
+
+    `trace = true` makes this entry's bindings mint a trace identity
+    at roots even when the `[trace]` table disables the mechanism
+    process-wide: the case-by-case re-enable.
     """
 
     target: str
@@ -155,6 +160,7 @@ class ObserveEntry:
     exclude: str | Sequence[str] = ()
     redact: str | Sequence[str] = ()
     mode: str = ""
+    trace: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -205,6 +211,11 @@ class ObserveEntry:
             raise ConfigError(
                 f"{where}: mode requires name; a pattern must never"
                 f" bulk-install middleware"
+            )
+
+        if not isinstance(self.trace, bool):
+            raise ConfigError(
+                f"{where}: trace must be true or false, got {self.trace!r}"
             )
 
 
@@ -285,6 +296,7 @@ class AppliedConfig:
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
         self._captures: list[LogCapture] = []
+        self._trace_previous: tuple[bool, tuple[str, ...]] | None = None
         self._sink = sink
         self._windows = tuple(windows)
         self._reverted = False
@@ -427,6 +439,10 @@ class AppliedConfig:
         for capture in reversed(captures):
             capture.remove()
 
+        if self._trace_previous is not None:
+            _trace._restore(self._trace_previous)
+            self._trace_previous = None
+
         for window in self._windows:
             window.stop()
 
@@ -463,6 +479,7 @@ class Config:
         windows: Sequence[Window] = (),
         setup: Sequence[SetupEntry] = (),
         log: Sequence[LogCapture] = (),
+        trace: Mapping[str, Any] | None = None,
         capture: CapturePolicy | str | None = None,
         inherit: bool = True,
     ) -> None:
@@ -475,7 +492,11 @@ class Config:
         the Window objects to start, whose contents listen or collect
         only while a run is open. `setup` is the
         SetupEntry callbacks to register. `log` is the LogCapture
-        selections to apply, as capture_logs() returns them.
+        selections to apply, as capture_logs() returns them. `trace`
+        is the trace identity settings, a mapping with `enabled`
+        (default True) and `formats` (default ["w3c"]) keys, applied
+        process-wide and restored on revert; None leaves the
+        process-wide settings alone.
         `capture` overrides the
         capture level on every binding the config creates, in the
         forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
@@ -524,6 +545,34 @@ class Config:
                 _resolve_policy(capture)
             except ValueError as exc:
                 raise ConfigError(f"capture: {exc}") from None
+
+        # The trace table normalises to its two settings now, so a
+        # bad table fails the load rather than the apply.
+
+        self._trace: tuple[bool, tuple[str, ...]] | None = None
+        if trace is not None:
+            if not isinstance(trace, Mapping):
+                raise ConfigError(f"trace must be a table, got {trace!r}")
+
+            unknown = sorted(set(trace) - {"enabled", "formats"})
+            if unknown:
+                raise ConfigError(f"trace: unknown keys {unknown}")
+
+            enabled = trace.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ConfigError(
+                    f"trace: enabled must be true or false, got {enabled!r}"
+                )
+
+            formats = _strings(
+                trace.get("formats", ["w3c"]), key="formats", where="trace"
+            )
+            try:
+                _trace._check_formats(formats)
+            except ValueError as exc:
+                raise ConfigError(f"trace: {exc}") from None
+
+            self._trace = (enabled, formats)
 
         self._observe = tuple(observe)
         self._sink = sink
@@ -623,6 +672,12 @@ class Config:
                 capture_entry.apply()
                 with record._lock:
                     record._captures.append(capture_entry)
+
+            # Trace settings apply process-wide, remembering what they
+            # replaced so revert can restore it.
+
+            if self._trace is not None:
+                record._trace_previous = _trace._configure(*self._trace)
         except BaseException:
             record.revert()
             raise
@@ -747,7 +802,7 @@ def _bindings_for(
         effective = _redact(*entry.redact, level=base)
 
     prefix = f"{path}." if path else ""
-    return [
+    bound = [
         binding(
             module_name,
             prefix + member,
@@ -756,6 +811,16 @@ def _bindings_for(
         )
         for member in members
     ]
+
+    # trace = true marks each binding as a trace root, consulted when
+    # a root event decides whether to mint an identity, so the entry
+    # re-enables tracing under a process-wide disable.
+
+    if entry.trace:
+        for each in bound:
+            each._trace_root = True
+
+    return bound
 
 
 def _fire_observe(
@@ -1323,6 +1388,7 @@ def _config_from(document: Any, location: str) -> Config:
         "window",
         "setup",
         "log",
+        "trace",
         "inherit",
     }
     unknown = sorted(set(document) - known)
@@ -1350,7 +1416,7 @@ def _config_from(document: Any, location: str) -> Config:
             raw,
             section="[[observe]]",
             required=("target",),
-            optional=("name", "match", "exclude", "redact", "mode"),
+            optional=("name", "match", "exclude", "redact", "mode", "trace"),
         )
         observe.append(ObserveEntry(**table))
 
@@ -1415,6 +1481,7 @@ def _config_from(document: Any, location: str) -> Config:
         windows=windows,
         setup=setup,
         log=log,
+        trace=document.get("trace"),
         capture=document.get("capture"),
         inherit=document.get("inherit", True),
     )

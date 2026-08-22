@@ -134,8 +134,14 @@ from .timeline import (
     Timeline,
     annotate,
     current_event,
+    current_trace,
     propagate,
     timeline,
+    trace_headers,
+)
+from .trace import (
+    TraceContext,
+    TraceSlot,
 )
 from .windows import (
     Collector,
@@ -205,6 +211,8 @@ __all__ = [
     "StubCallable",
     "Tape",
     "Timeline",
+    "TraceContext",
+    "TraceSlot",
     "WSGIMiddleware",
     "WrongModeError",
     "add_sink",
@@ -217,6 +225,7 @@ __all__ = [
     "chrome_trace",
     "clear_stacks",
     "current_event",
+    "current_trace",
     "discover",
     "find_config",
     "flush_sinks",
@@ -234,5 +243,6 @@ __all__ = [
     "stub",
     "taped",
     "timeline",
+    "trace_headers",
     "window",
 ]
