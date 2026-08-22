@@ -1,6 +1,8 @@
 # Watch the whole order flow live: every observed event prints to
 # stderr as it happens, indented by nesting, with -> for results and
-# !! for exceptions.
+# !! for exceptions. The [[log]] entry captures the shop's own log
+# messages as events too, so the declined order's warning prints in
+# place, nested inside the call that logged it.
 
 [[observe]]
 target = "shop:OrderService"
@@ -14,6 +16,9 @@ exclude = "_*"
 [[observe]]
 target = "shop:Ledger"
 name = "record"
+
+[[log]]
+name = "shop.*"
 
 [[sink]]
 type = "printer"

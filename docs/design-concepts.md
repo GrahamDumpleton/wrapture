@@ -184,6 +184,22 @@ plugin supplies an ambient `tape` fixture so test bodies read
 identically under any of the three. The forms mix freely; a target
 born inside the test body is bound in the body, with the with-block.
 
+## Log capture: messages as events
+
+A log message the observed code emits is an observation like any
+other, so `capture_logs()` records standard library logging as
+events of kind `"log"`, selected by logger-name pattern and level
+threshold. The capture applies like a binding, `timeline()` accepts
+it alongside them, and its `events` speak the usual filter-then-
+assert vocabulary, with `at_level()` and `with_message()` joining
+the family. What no logging fixture can offer comes from the tape's
+structure: each message nests inside the call that emitted it, so a
+test asserts "this call logged this warning", not "this warning
+appeared somewhere", and a trace shows messages in place in the
+tree. The same events flow to sinks, so a config file's `[[log]]`
+entries put an application's log messages into its trace with no
+code changes.
+
 ## From tests to tracing
 
 Take the same bindings, remove the test around them, and the
@@ -223,6 +239,7 @@ is the reference for all of it.
 | `stub()` | A made-up callable; the test dictates its outcome | [Unit testing](unit-testing.md) |
 | `mock(Spec)` | A made-up collaborator, strictly shaped by its spec | [Unit testing](unit-testing.md) |
 | `bound()` / `taped()` | The with-block's meaning as decorators, handles injected | [Unit testing](unit-testing.md) |
+| Log capture | Log messages as events, nested in the call that emitted them | [Unit testing](unit-testing.md), [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Sinks | Where events go outside a test: print, stream, count, compose | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Config and injection | `wrapture.toml` plus a launcher or autowrapt: tracing without code changes | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Request tracing | Events grouped per WSGI/ASGI request | [WSGI](wsgi-tracing.md), [ASGI](asgi-tracing.md) |

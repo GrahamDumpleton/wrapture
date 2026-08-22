@@ -66,7 +66,12 @@ the order flow (`name` for exact members, `match` with an exclude for
 the gateway) to a `printer` sink, so the call tree prints live to
 stderr while the orders run: one line as each call begins, indented
 by nesting, `->` lines for results and a `!!` line where the
-declined card raises.
+declined card raises. A `[[log]]` entry captures the shop's own log
+messages as events too, so the warning the service logs for the
+declined order prints in place, nested inside the call that logged
+it. (The same message also appears unindented, once: that is the
+logging module's own last-resort handler doing its normal job, since
+the demo configures no handlers; capture never disturbs delivery.)
 
 ```console
 $ cd examples/live-printer

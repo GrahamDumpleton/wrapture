@@ -104,6 +104,10 @@ from .iterators import (
 from .lifecycle import (
     shutdown,
 )
+from .logs import (
+    LogCapture,
+    capture_logs,
+)
 from .observed import (
     ObservedCallable,
     observed,
@@ -182,6 +186,7 @@ __all__ = [
     "IteratorItemBehaviour",
     "IteratorProxy",
     "JSONLines",
+    "LogCapture",
     "NeverAppliedError",
     "NotImplementedYetError",
     "ObserveEntry",
@@ -208,6 +213,7 @@ __all__ = [
     "bindings",
     "bound",
     "canonical",
+    "capture_logs",
     "chrome_trace",
     "clear_stacks",
     "current_event",
