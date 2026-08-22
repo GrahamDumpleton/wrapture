@@ -195,6 +195,15 @@ class OpenTelemetrySink(wrapture.Sink):
         if force_flush is not None:
             force_flush()
 
+    def on_fork(self) -> None:
+        """Reset for a child process after os.fork(): a fresh lock,
+        and the open-span table dropped, since the in-flight spans
+        belong to the parent, which will close them. The SDK's own
+        at-fork handling restarts the exporter worker threads."""
+
+        self._lock = threading.Lock()
+        self._spans = {}
+
     # -- housekeeping ----------------------------------------------------
 
     def reap(self, max_age: float = 300.0) -> int:

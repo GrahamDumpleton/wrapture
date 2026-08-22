@@ -609,6 +609,41 @@ def test_a_logged_exception_maps_to_exception_attributes(
 
 
 # ---------------------------------------------------------------------------
+# the fork story
+# ---------------------------------------------------------------------------
+
+
+def test_on_fork_drops_the_open_span_table(tmp_path: Path, exported: Any) -> None:
+    # In a child the in-flight spans belong to the parent, which will
+    # close them: on_fork drops the table, and the parent-side close
+    # arriving in the child (as it would never actually do) or the
+    # child's own close of a dropped span is simply not found, with
+    # nothing exported twice.
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["traces"]\n')
+
+    config = load_config(source)
+    sink: Any = config.sink
+
+    applied = config.apply()
+    try:
+        with wrapture.block("outer"):
+            assert sink.open_spans == 1
+
+            sink.on_fork()
+
+            assert sink.open_spans == 0
+    finally:
+        applied.revert()
+
+    # The close after on_fork found no span, so nothing was exported
+    # for the dropped one.
+
+    assert exported.get_finished_spans() == ()
+
+
+# ---------------------------------------------------------------------------
 # events reach the configured sink
 # ---------------------------------------------------------------------------
 

@@ -1065,6 +1065,41 @@ counted, and a pending entry firing while suspended arrives
 suspended too), and `revert()` takes the whole intervention down
 without restarting the application.
 
+## Forked worker processes
+
+A fork inherits the parent's memory, patches and sinks included, and
+wrapture keeps recording coherent across it. The first sink
+registration installs `os.register_at_fork` handlers, benign in a
+process that never forks. Before a fork the process sinks are
+flushed, so buffered output is not duplicated into the child, and
+the recording locks are taken, so the child does not inherit one
+held by a thread that no longer exists there; the parent releases
+them afterwards, and the child reinitialises them fresh.
+
+The child also discards the inherited in-flight stack, and with it
+any active trace. This is structural, not just policy: the in-flight
+events belong to the parent, which will run their bodies and close
+them, so a child that kept the stack would nest its first event
+under an operation completing in another process. Immediately after
+a fork, `current_event()` and `annotate()` are in the
+nothing-in-flight state until new work starts. The consequences fall
+out of the trace kind gate: the child's first operation is a genuine
+root, a daemon worker's next WSGI or ASGI request mints or joins a
+trace as any root request does, and a child wanting an immediate
+identity opens a block, which mints.
+
+Sinks hear about the fork through `on_fork()`, a notification
+delivered in the child only, with a do-nothing default; a sink
+overrides it to rebuild what fork broke, since worker threads do not
+survive into the child and inherited descriptors are shared with the
+parent. `JSONLines` restarts its writer lazily and expands its path
+template afresh, so a `{pid}` template gives each process a file of
+its own; the OpenTelemetry sink drops its open-span table (the
+parent's spans are the parent's) while the OTel SDK's own at-fork
+handling restarts the exporter threads. Children created by spawn or
+exec are a different case and need none of this: they start fresh
+and deliberately untraced, as the autowrapt section above describes.
+
 ## Trace identity and propagation
 
 wrapture's event linkage, sequence numbers and parent ids, is
