@@ -20,6 +20,12 @@ import pytest
 import wrapture
 from wrapture import load_config
 
+# On a plain install, without the wrapture[otel] extra, everything
+# here would fail on the missing packages; the plain-install face of
+# the import guard lives in test_otel_absent.py instead.
+
+pytest.importorskip("opentelemetry")
+
 # The module fixture below installs application providers, so every
 # sink built through the config path defers to them and warns; the
 # posture section asserts that warning deliberately, and the rest of
