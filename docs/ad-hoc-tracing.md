@@ -1330,39 +1330,52 @@ Passing `start_time` and `end_time` through this conversion means the
 span timings are the event timings, not the moments the exporter
 heard about them.
 
-Wired into a config file, one `[[sink]]` table covers every OTel
-signal, alongside the printer or instead of it. The `signals` key
-says which are enabled, shared facts sit at the top of the table,
-and each signal's own tuning nests beneath it:
+In a config file, OpenTelemetry export is first-class: the
+top-level `[otel]` table, sibling to `[trace]`, is the one
+registration covering every signal. Its presence opts in (export
+needs an endpoint to be useful, so no table means no export), and
+`enabled = false` is accepted so a stanza can be kept in the file
+but switched off, matching the `[trace]` style. The `signals` key
+says which signals are enabled, shared facts sit at the top of the
+table, and each signal's own tuning nests beneath it:
 
 ```toml
-[[sink]]
-type = "wrapture.otel:sink"
+[otel]
 service_name = "flask-shop"
 signals = ["traces", "metrics"]
 
-[sink.traces]
+[otel.traces]
 sample = 0.1
 
-[sink.metrics]
+[otel.metrics]
 export_interval = 5
 
-[sink.environment]
+[otel.environment]
 exporter_otlp_endpoint = "http://localhost:4318"
 exporter_otlp_protocol = "http/protobuf"
 ```
 
-The nested tables pass through wrapture's config machinery as plain
-dict keyword arguments; nothing was added to support them. The
-factory composes what the table asks for from the pieces this guide
-already covered: the span sink wrapped in `Sample` when
+The sink it builds always registers ahead of whatever the `[[sink]]`
+list builds, which then stacks in file order as usual; a tracing
+sink must hear a root event before any other sink can observe its
+trace identity, and the table's position makes that ordering true by
+construction rather than by convention. In code the same rule is the
+caller's, and simply stated: add the OTel sink before other sinks.
+The two neighbouring tables stay crisp: `[trace]` governs
+identities, `[otel]` governs export. Any other export destination
+remains a `[[sink]]` entry with a `module:attr` factory, which is
+also the escape hatch spelling (`type = "wrapture.otel:sink"`) for
+composing the OTel sink somewhere unusual, such as inside a window.
+
+The factory composes what the table asks for from the pieces this
+guide already covered: the span sink wrapped in `Sample` when
 `traces.sample` is given, so the trace export is sampled per tree
 while the metrics sink beside it still hears every event, the pair
 delivered through a `Fanout`, whose capture negotiation means a
 metrics-only registration stays at `"none"` while traces raise it to
 `"summary"`.
 
-`[sink.environment]` holds defaults for OTel's own environment
+`[otel.environment]` holds defaults for OTel's own environment
 variables: each key is uppercased, prefixed with `OTEL_` when not
 already, and applied with setdefault before the providers are
 built, so the file can name any of the SDK's documented variables
@@ -1406,7 +1419,7 @@ SDK. The bound path is safe as a metric attribute precisely because
 the config chose the bindings: the set of values is closed, where
 the raw request URL is not, so requests are attributed by method and
 status only. This pairing is also why `sample` lives under
-`[sink.traces]` rather than as the registration's own gating key: a
+`[otel.traces]` rather than as the registration's own gating key: a
 gate on the whole registration would starve the histograms, while
 sampling inside it drops only the span export, keeping the
 always-on cheap signal complete beside the sampled drill-down.

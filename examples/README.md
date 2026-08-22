@@ -203,14 +203,14 @@ out by exception type, and a counter of operations begun.
 
 Both sinks ship in wrapture itself, as the `wrapture.otel`
 subpackage, with the OpenTelemetry dependencies behind the
-`wrapture[otel]` extra, and one `[[sink]]`
-entry registers them: its `signals` key says which signals are on,
+`wrapture[otel]` extra, and the top-level `[otel]` table registers
+them: its `signals` key says which signals are on,
 shared facts like `service_name` sit at the top of the table, and
-per-signal tuning nests beneath it (`[sink.metrics]` sets
-`export_interval = 5`, seconds between metric exports; a
-`[sink.traces]` table would take `sample = 0.1` to sample the trace
+per-signal tuning nests beneath it (`[otel.metrics]` sets
+`export_interval = 5`, seconds between metric exports; an
+`[otel.traces]` table would take `sample = 0.1` to sample the trace
 export alone while the metrics still hear every event). The
-`[sink.environment]` table supplies defaults for OTel's own
+`[otel.environment]` table supplies defaults for OTel's own
 environment variables, each key uppercasing to its `OTEL_*` name and
 applied with setdefault. The shipped file defaults to a local
 collector on OTLP over http/protobuf, so the demo needs no

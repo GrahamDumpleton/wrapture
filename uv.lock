@@ -1061,6 +1061,8 @@ dev = [
     { name = "setuptools" },
 ]
 test = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
     { name = "pytest" },
 ]
 
@@ -1088,4 +1090,8 @@ dev = [
     { name = "ruff" },
     { name = "setuptools" },
 ]
-test = [{ name = "pytest" }]
+test = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+    { name = "pytest" },
+]

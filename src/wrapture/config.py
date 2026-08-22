@@ -1358,6 +1358,52 @@ def _build_sinks(value: Any, *, anchor: str | None = None) -> Sink:
     return Fanout(*built)
 
 
+def _build_otel(table: Any) -> Sink | None:
+    # The first-class [otel] table: its presence opts in to
+    # OpenTelemetry export, with enabled = false accepted so a stanza
+    # can be kept in the file but switched off. The nested per-signal
+    # tables carry the sink factory's vocabulary unchanged; there is
+    # exactly one export destination blessed with a table of its own,
+    # and every other destination remains a [[sink]] entry.
+
+    if not isinstance(table, dict):
+        raise ConfigError(f"otel must be a table, got {table!r}")
+
+    known = {"enabled", "service_name", "signals", "traces", "metrics", "environment"}
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise ConfigError(f"otel: unknown keys {unknown}")
+
+    enabled = table.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"otel: enabled must be true or false, got {enabled!r}")
+
+    if not enabled:
+        return None
+
+    # The import is deferred to here so base wrapture never touches
+    # the subpackage: a missing extra fails the load, where a broken
+    # sink already fails loudly, with the fix named rather than a
+    # bare ModuleNotFoundError.
+
+    try:
+        from . import otel
+    except ImportError as exc:
+        raise ConfigError(
+            f"the [otel] table needs the OpenTelemetry packages, which are"
+            f" not installed; install the wrapture[otel] extra ({exc})"
+        ) from exc
+
+    spec = {key: value for key, value in table.items() if key != "enabled"}
+
+    try:
+        built = otel.sink(**spec)
+    except Exception as exc:
+        raise ConfigError(f"otel: building the export sink failed: {exc}") from exc
+
+    return built
+
+
 def _entry_table(
     table: Any, *, section: str, required: tuple[str, ...], optional: tuple[str, ...]
 ) -> dict[str, Any]:
@@ -1392,6 +1438,7 @@ def _config_from(document: Any, location: str) -> Config:
         "capture",
         "observe",
         "sink",
+        "otel",
         "window",
         "setup",
         "log",
@@ -1467,6 +1514,21 @@ def _config_from(document: Any, location: str) -> Config:
     sink = None
     if "sink" in document:
         sink = _build_sinks(document["sink"], anchor=anchor)
+
+    # The [otel] table's export sink registers ahead of everything
+    # the [[sink]] list builds, which then stacks in file order: the
+    # OTel sink must hear a root event before any other sink can
+    # observe its trace identity.
+
+    if "otel" in document:
+        otel_sink = _build_otel(document["otel"])
+        if otel_sink is not None:
+            if sink is None:
+                sink = otel_sink
+            elif isinstance(sink, Fanout):
+                sink = Fanout(otel_sink, *sink._sinks)
+            else:
+                sink = Fanout(otel_sink, sink)
 
     windows: list[Window] = []
     if "window" in document:

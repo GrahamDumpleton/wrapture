@@ -10,14 +10,16 @@ same events into metrics: the semantic-convention duration histogram
 for requests, a per-path histogram for calls, and a counter of
 operations begun.
 
-The `sink` factory is one registration covering every signal, named
-from config as `type = "wrapture.otel:sink"`. Its `signals` key says
-which are enabled, shared facts like the service name sit at the top
-of the one table, per-signal tuning nests beneath it, and an
-`environment` table supplies defaults for OTel's own environment
-variables, so the same config reaches an http/protobuf collector or
-a gRPC one with the deployment environment always able to override
-the file.
+The `sink` factory is one registration covering every signal. In
+config it is the top-level `[otel]` table, whose keys are the
+factory's arguments and whose sink always registers ahead of the
+`[[sink]]` list; in code, call `sink()` and register the result
+before other sinks. The `signals` key says which are enabled, shared
+facts like the service name sit at the top of the one table,
+per-signal tuning nests beneath it, and an `environment` table
+supplies defaults for OTel's own environment variables, so the same
+config reaches an http/protobuf collector or a gRPC one with the
+deployment environment always able to override the file.
 
 The OpenTelemetry dependencies are not part of base wrapture; the
 `wrapture[otel]` extra installs them. The code ships in every wheel,

@@ -80,16 +80,17 @@ version = {attr = "wrapture.__version__"}
 [dependency-groups]
 test = [
     "pytest",
+    # The otel extra's packages, so the wrapture.otel subpackage and
+    # its tests run in every test environment (and, through the dev
+    # group, typecheck in the default one).
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
 ]
 dev = [
     {include-group = "test"},
     "mypy",
     "ruff",
     "setuptools",
-    # The otel extra's packages, so the wrapture.otel subpackage
-    # typechecks and its tests run in the default environment.
-    "opentelemetry-sdk",
-    "opentelemetry-exporter-otlp-proto-http",
 ]
 
 [tool.pytest.ini_options]
