@@ -1,8 +1,9 @@
 # The flask-app demo again, exporting to OpenTelemetry as well as
-# printing. Same observation as wrapture.toml; the extra sink turns
-# each request tree into OTel spans and sends them wherever the
-# standard OTel environment variables point. Pass this file to the
-# runner explicitly:
+# printing. Same observation as wrapture.toml; the one OTel sink
+# entry covers both signals, turning each request tree into OTel
+# spans and aggregating the same events into OTel metrics, sent
+# wherever the OTel environment points. Pass this file to the runner
+# explicitly:
 #
 #   python -m wrapture --config wrapture-otel.toml main.py
 
@@ -19,6 +20,35 @@ call = "wrapture_local.flask_support:instrument"
 [[sink]]
 type = "printer"
 
+# One registration for every OTel signal: shared facts at the top,
+# per-signal tuning nested beneath.
+
 [[sink]]
 type = "wrapture_local.otel_support:sink"
 service_name = "flask-shop"
+signals = ["traces", "metrics"]
+
+# Under [sink.traces], sample keeps that fraction of call trees in
+# the trace export, decided once per tree at its root, while the
+# metrics below still hear every event: the always-on cheap signal
+# stays complete beside the sampled drill-down. Commented out here
+# because the four-request demo wants all its traces; uncomment for
+# real traffic volumes.
+
+# [sink.traces]
+# sample = 0.1
+
+# export_interval is seconds between metric exports, the config
+# file's spelling of OTEL_METRIC_EXPORT_INTERVAL.
+
+[sink.metrics]
+export_interval = 5
+
+# Defaults for OTel's own environment variables: each key uppercases
+# to its OTEL_* name and applies with setdefault, so a variable set
+# in the real environment always wins. With these two, the demo runs
+# against a local collector with no environment setup at all.
+
+[sink.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+exporter_otlp_protocol = "http/protobuf"

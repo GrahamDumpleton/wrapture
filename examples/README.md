@@ -185,40 +185,81 @@ $ curl http://127.0.0.1:5000/quote/widget
 ### Exporting to OpenTelemetry
 
 The directory carries a second config, `wrapture-otel.toml`, that
-adds an OpenTelemetry sink alongside the printer: the same request
-trees, exported as OTel traces. Each request becomes a SERVER span
-named access-log style with the usual HTTP attributes, the view
-handler and its helpers become INTERNAL spans beneath it, and the
-failing request's tree arrives with error status and the recorded
-`KeyError`.
+adds two OpenTelemetry sinks alongside the printer: the same request
+trees, exported as OTel traces and aggregated into OTel metrics.
+Each request becomes a SERVER span named access-log style with the
+usual HTTP attributes, the view handler and its helpers become
+INTERNAL spans beneath it, and the failing request's tree arrives
+with error status and the recorded `KeyError`. The metrics sink
+feeds the same events into the semantic-convention
+`http.server.request.duration` histogram by method and status, a
+per-path `wrapture.call.duration` histogram whose error series split
+out by exception type, and a counter of operations begun.
 
-The sink lives in `wrapture_local/otel_support.py`, the stand-in for
-what a wrapture-otel package would ship. Its factory stands up a
-`TracerProvider` from the standard OTel environment variables, so
-where the spans go is decided entirely outside the config. For a
-collector listening for OTLP over http/protobuf:
+Both sinks live in `wrapture_local/otel_support.py`, the stand-in
+for what a wrapture-otel package would ship, and one `[[sink]]`
+entry registers them: its `signals` key says which signals are on,
+shared facts like `service_name` sit at the top of the table, and
+per-signal tuning nests beneath it (`[sink.metrics]` sets
+`export_interval = 5`, seconds between metric exports; a
+`[sink.traces]` table would take `sample = 0.1` to sample the trace
+export alone while the metrics still hear every event). The
+`[sink.environment]` table supplies defaults for OTel's own
+environment variables, each key uppercasing to its `OTEL_*` name and
+applied with setdefault. The shipped file defaults to a local
+collector on OTLP over http/protobuf, so the demo needs no
+environment setup at all:
 
 ```console
-$ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
-$ export OTEL_TRACES_EXPORTER="otlp"
-$ export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
 $ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
-For OTLP over gRPC, point at the gRPC port and switch the protocol;
-nothing else changes:
+Because the file's entries are only defaults, a variable set in the
+real environment always wins; pointing the same unchanged config at
+a gRPC collector is the demonstration:
 
 ```console
 $ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 $ export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
 ```
 
-With no collector at hand, `OTEL_TRACES_EXPORTER=console` dumps the
-spans to standard output instead, for which the sdk alone suffices:
+The four scripted requests make a short burst. For a sustained
+stream of metrics, run the development server under the same config
+and drive traffic at it from a second shell; the config's
+five-second `export_interval` means points arrive while the traffic
+runs. The explicit port stays clear of macOS AirPlay, which listens
+on 5000:
 
 ```console
-$ OTEL_TRACES_EXPORTER=console uv run --with flask --with opentelemetry-sdk \
+$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+    python -m wrapture --config wrapture-otel.toml -m flask --app myapp run --port 5001
+```
+
+Then, from the second shell, thirty seconds of mixed traffic,
+successes and the failing item alike, a few dozen requests a second:
+
+```console
+$ end=$((SECONDS + 30)); while [ "$SECONDS" -lt "$end" ]; do
+    for path in / /quote/widget /quote/gadget /export /quote/missing; do
+      curl -s -o /dev/null "http://127.0.0.1:5001$path"
+    done
+    sleep 0.2
+  done
+```
+
+Each interval then lands another point on the histograms: the
+request duration series by status code climbing in step, the
+per-path call durations beneath them, and the `KeyError` series
+growing at exactly the rate of the `/quote/missing` hits.
+
+With no collector at hand, `OTEL_TRACES_EXPORTER=console` and
+`OTEL_METRICS_EXPORTER=console` dump the spans and metrics to
+standard output instead, for which the sdk alone suffices:
+
+```console
+$ OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console \
+    uv run --with flask --with opentelemetry-sdk \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 

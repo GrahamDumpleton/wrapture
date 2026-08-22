@@ -1123,28 +1123,58 @@ Passing `start_time` and `end_time` through this conversion means the
 span timings are the event timings, not the moments the exporter
 heard about them.
 
-Wired into a config file, the sink is one more `[[sink]]` table
-naming its factory, alongside the printer or instead of it:
+Wired into a config file, one `[[sink]]` table covers every OTel
+signal, alongside the printer or instead of it. The `signals` key
+says which are enabled, shared facts sit at the top of the table,
+and each signal's own tuning nests beneath it:
 
 ```toml
 [[sink]]
 type = "wrapture_local.otel_support:sink"
 service_name = "flask-shop"
+signals = ["traces", "metrics"]
+
+[sink.traces]
+sample = 0.1
+
+[sink.metrics]
+export_interval = 5
+
+[sink.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+exporter_otlp_protocol = "http/protobuf"
 ```
 
-The factory stands up a `TracerProvider` from the standard OTel
-environment, so where the spans go is decided entirely outside the
-config: `OTEL_EXPORTER_OTLP_ENDPOINT` names the collector,
-`OTEL_EXPORTER_OTLP_PROTOCOL` picks http/protobuf or grpc, and
-`OTEL_TRACES_EXPORTER=console` dumps spans to standard output for a
-look without a collector. An application that already configures its
-own provider is left alone, and the sink's spans flow through the
-exporter the application chose. The examples README carries the run
-commands:
+The nested tables pass through wrapture's config machinery as plain
+dict keyword arguments; nothing was added to support them. The
+factory composes what the table asks for from the pieces this guide
+already covered: the span sink wrapped in `Sample` when
+`traces.sample` is given, so the trace export is sampled per tree
+while the metrics sink beside it still hears every event, the pair
+delivered through a `Fanout`, whose capture negotiation means a
+metrics-only registration stays at `"none"` while traces raise it to
+`"summary"`.
+
+`[sink.environment]` holds defaults for OTel's own environment
+variables: each key is uppercased, prefixed with `OTEL_` when not
+already, and applied with setdefault before the providers are
+built, so the file can name any of the SDK's documented variables
+without the factory knowing them individually, and a variable set in
+the real environment always wins. That gives the file three
+postures: self-contained (endpoint in the file, runs with no
+environment setup), deployment-owned (no environment table, the real
+environment decides everything), or mixed, defaults in the file with
+the deployment overriding what differs. Named keys such as
+`export_interval` are passed to constructors explicitly and beat
+both spellings. An application that already configures its own
+providers is left alone, and the telemetry flows through the
+exporters the application chose. `OTEL_TRACES_EXPORTER=console` and
+`OTEL_METRICS_EXPORTER=console` dump either signal to standard
+output for a look without a collector; the examples README carries
+the run commands:
 
 ```console
 $ cd examples/flask-app
-$ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
 $ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
@@ -1154,3 +1184,22 @@ span named for the request line, the view handler and its helpers
 nested beneath it with their captured arguments and results, and the
 failing request's tree marked as an error with the `KeyError`
 recorded on the span that raised it.
+
+The metrics signal aggregates the same events instead of exporting
+them individually: request durations into the semantic-convention
+`http.server.request.duration` histogram attributed by method and
+status code, call durations into a per-path histogram whose error
+series split out by exception type, and a counter of operations
+observed beginning. The sink protocol needs nothing added for this;
+the enter and close notifications are exactly the increment points
+instruments want, and the design is the `Aggregate` collector's
+(bounded memory, `"none"` capture on both axes, so nothing is ever
+retained or even captured) with the aggregation handed to the OTel
+SDK. The bound path is safe as a metric attribute precisely because
+the config chose the bindings: the set of values is closed, where
+the raw request URL is not, so requests are attributed by method and
+status only. This pairing is also why `sample` lives under
+`[sink.traces]` rather than as the registration's own gating key: a
+gate on the whole registration would starve the histograms, while
+sampling inside it drops only the span export, keeping the
+always-on cheap signal complete beside the sampled drill-down.

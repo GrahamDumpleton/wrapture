@@ -8,11 +8,17 @@ the view handlers and helpers beneath them become INTERNAL spans, and
 the captured arguments, results and annotate() data ride along as
 span attributes.
 
-The `sink` factory at the bottom is what wrapture-otel.toml names. It
-stands up a TracerProvider driven by the standard OTel environment
-variables, so the same config reaches an http/protobuf collector or a
-gRPC one depending on OTEL_EXPORTER_OTLP_PROTOCOL, with no changes
-here or in the config file.
+The `sink` factory at the bottom is what wrapture-otel.toml names:
+one registration covering every OTel signal. Its `signals` key says
+which are enabled, traces (the span sink above, optionally sampled)
+and metrics (a second sink that only counts and times, aggregating
+the same events into a semconv duration histogram for requests, a
+per-path histogram for calls, and a counter of operations begun).
+Shared facts like the service name sit at the top of the one table,
+per-signal tuning nests beneath it, and `[sink.environment]` supplies
+defaults for OTel's own environment variables, so the same config
+reaches an http/protobuf collector or a gRPC one with the deployment
+environment always able to override the file.
 
 Requires opentelemetry-sdk and opentelemetry-exporter-otlp; see the
 examples README for the run command.
@@ -27,6 +33,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from opentelemetry import trace
+from opentelemetry.metrics import get_meter, get_meter_provider, set_meter_provider
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from opentelemetry.util.types import AttributeValue
 
@@ -37,10 +44,25 @@ from wrapture import Event
 
 _PRIMITIVES = (bool, int, float, str)
 
+# The namespace wrapture-specific attribute names live under, for
+# spans and metrics alike.
+
+_PREFIX = "wrapture"
+
 # Request data fields already exported under their semantic-convention
 # names, so the close-time sweep does not repeat them as wrapture.data.*.
 
 _SEMCONV_DATA = frozenset({"method", "path", "query"})
+
+
+def _status_code(result: Any) -> int | None:
+    # A WSGI status line is "200 OK"; keep just the number.
+
+    if isinstance(result, str):
+        first = result.split(" ", 1)[0]
+        if first.isdigit():
+            return int(first)
+    return None
 
 
 class OpenTelemetrySink(wrapture.Sink):
@@ -139,7 +161,7 @@ class OpenTelemetrySink(wrapture.Sink):
         # way and mark server errors. Anything else is just a result.
 
         if event.kind == "request":
-            status = self._status_code(event.result)
+            status = _status_code(event.result)
             if status is not None:
                 span.set_attribute("http.response.status_code", status)
                 if status >= 500:
@@ -255,15 +277,6 @@ class OpenTelemetrySink(wrapture.Sink):
 
         return event.label or event.path
 
-    def _status_code(self, result: Any) -> int | None:
-        # A WSGI status line is "200 OK"; keep just the number.
-
-        if isinstance(result, str):
-            first = result.split(" ", 1)[0]
-            if first.isdigit():
-                return int(first)
-        return None
-
     def _enter_attributes(self, event: Event) -> dict[str, AttributeValue]:
         attributes: dict[str, AttributeValue] = {
             f"{self._prefix}.path": event.path,
@@ -318,18 +331,244 @@ class OpenTelemetrySink(wrapture.Sink):
         return text
 
 
-def sink(**options: Any) -> OpenTelemetrySink:
-    """Factory for the config's `type = "wrapture_local.otel_support:sink"`.
+class OpenTelemetryMetricsSink(wrapture.Sink):
+    """Aggregate wrapture events into OTel metrics.
 
-    Every other key on the `[[sink]]` table arrives here as a keyword
-    argument; `service_name` configures the provider and the rest pass
-    through to the sink itself.
+    Where the span sink exports each event individually, this one only
+    counts and times: request durations into the semantic-convention
+    HTTP histogram attributed by method and status, call durations
+    into a per-path histogram, and a counter of operations observed
+    beginning. The set of bound paths is closed, chosen by the config,
+    which is what makes the path a safe metric attribute; the raw
+    request URL is unbounded, so requests are attributed by method and
+    status only.
+
+    Declaring "none" capture on both axes keeps the sink near-free: a
+    metrics-only deployment records timings and outcomes without ever
+    capturing a value.
     """
 
-    service_name = options.pop("service_name", None)
-    _configure_provider(service_name)
+    capture_args = "none"
+    capture_result = "none"
 
-    return OpenTelemetrySink(**options)
+    def __init__(self, *, meter_name: str = "wrapture") -> None:
+        meter = get_meter(meter_name)
+
+        # The bucket boundaries are advisory: the semconv set for
+        # requests, and a finer set for calls, whose durations sit
+        # well below a network round trip.
+
+        self._request_duration = meter.create_histogram(
+            "http.server.request.duration",
+            unit="s",
+            description="Duration of HTTP server requests.",
+            explicit_bucket_boundaries_advisory=[
+                0.005,
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+                0.25,
+                0.5,
+                0.75,
+                1.0,
+                2.5,
+                5.0,
+                7.5,
+                10.0,
+            ],
+        )
+        self._call_duration = meter.create_histogram(
+            "wrapture.call.duration",
+            unit="s",
+            description="Duration of observed calls, by bound path.",
+            explicit_bucket_boundaries_advisory=[
+                0.0001,
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.05,
+                0.1,
+                0.5,
+                1.0,
+                5.0,
+            ],
+        )
+        self._operations = meter.create_counter(
+            "wrapture.operations",
+            unit="{operation}",
+            description="Operations observed beginning, by path and kind.",
+        )
+
+        self.skipped = 0
+
+    # -- wrapture.Sink protocol -----------------------------------------
+
+    def on_enter(self, event: Event) -> None:
+        """Count the operation as it begins."""
+
+        if event.kind not in ("call", "request"):
+            self.skipped += 1
+            return
+
+        self._operations.add(
+            1,
+            {f"{_PREFIX}.path": event.path, f"{_PREFIX}.kind": event.kind},
+        )
+
+    def on_exit(self, event: Event) -> None:
+        """Record the completed operation's duration."""
+
+        self._record(event, error=None)
+
+    def on_error(self, event: Event) -> None:
+        """Record the failed operation's duration, attributed by the
+        exception type."""
+
+        exception = event.exception
+        error = type(exception).__name__ if exception is not None else "error"
+        self._record(event, error=error)
+
+    def flush(self) -> None:
+        """Push the current aggregation out through the exporter."""
+
+        provider = get_meter_provider()
+        force_flush = getattr(provider, "force_flush", None)
+        if force_flush is not None:
+            force_flush()
+
+    # -- internals -------------------------------------------------------
+
+    def _record(self, event: Event, error: str | None) -> None:
+        if event.duration is None or event.kind not in ("call", "request"):
+            return
+
+        if event.kind == "request":
+            attributes: dict[str, AttributeValue] = {}
+
+            method = event.data.get("method")
+            if method:
+                attributes["http.request.method"] = str(method)
+            status = _status_code(event.result)
+            if status is not None:
+                attributes["http.response.status_code"] = status
+            if error is not None:
+                attributes["error.type"] = error
+
+            self._request_duration.record(event.duration, attributes)
+            return
+
+        attributes = {f"{_PREFIX}.path": event.path}
+        if error is not None:
+            attributes["error.type"] = error
+
+        self._call_duration.record(event.duration, attributes)
+
+
+_SIGNALS = ("traces", "metrics")
+
+
+def sink(
+    *,
+    service_name: str | None = None,
+    signals: Sequence[str] = _SIGNALS,
+    traces: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    environment: dict[str, Any] | None = None,
+) -> wrapture.Sink:
+    """Factory for the config's `type = "wrapture_local.otel_support:sink"`.
+
+    One registration covers every OTel signal. `signals` says which
+    are enabled (both by default), and each has an optional table of
+    its own tuning: `[sink.traces]` takes the span sink's options
+    plus `sample`, a keep rate applied to the trace export alone (the
+    metrics beside it still hear every event), and `[sink.metrics]`
+    takes the metrics sink's options plus `export_interval`, seconds
+    between metric exports.
+
+    `[sink.environment]` holds defaults for OTel's own environment
+    variables: each key is uppercased, prefixed with OTEL_ when not
+    already, and applied with setdefault, so a variable set in the
+    real environment always wins. Named options like
+    `export_interval` are passed to constructors explicitly and beat
+    both. `service_name` names the service for every enabled signal.
+    """
+
+    if isinstance(signals, str):
+        signals = [signals]
+    unknown = sorted(set(signals) - set(_SIGNALS))
+    if unknown or not signals:
+        raise ValueError(f"signals must name some of {list(_SIGNALS)}, got {signals!r}")
+
+    _apply_environment(environment or {})
+
+    sinks: list[wrapture.Sink] = []
+
+    # The trace export, optionally sampled inside this registration:
+    # Sample decides per tree at the root, so the span sink beneath it
+    # still sees whole, consistently paired trees, while the metrics
+    # sink alongside hears everything.
+
+    if "traces" in signals:
+        options = dict(traces or {})
+        sample = options.pop("sample", None)
+
+        _configure_provider(service_name)
+
+        span_sink: wrapture.Sink = OpenTelemetrySink(**options)
+        if sample is not None:
+            span_sink = wrapture.Sample(sample, span_sink)
+        sinks.append(span_sink)
+
+    if "metrics" in signals:
+        options = dict(metrics or {})
+        export_interval = options.pop("export_interval", None)
+
+        if export_interval is not None and (
+            not isinstance(export_interval, (int, float))
+            or isinstance(export_interval, bool)
+            or export_interval <= 0
+        ):
+            raise ValueError(
+                f"export_interval must be a positive number of seconds,"
+                f" got {export_interval!r}"
+            )
+
+        _configure_meter_provider(service_name, export_interval)
+        sinks.append(OpenTelemetryMetricsSink(**options))
+
+    # A lone signal is returned bare; several fan out. Either way the
+    # capture declarations negotiate through: metrics alone stays at
+    # "none", traces raise the fan-out to "summary".
+
+    if len(sinks) == 1:
+        return sinks[0]
+    return wrapture.Fanout(*sinks)
+
+
+def _apply_environment(environment: dict[str, Any]) -> None:
+    """Apply `[sink.environment]` keys as OTel environment defaults.
+
+    Mechanical mapping rather than named options: uppercase the key,
+    prefix OTEL_ when missing, stringify the value, setdefault. The
+    config file thereby supplies defaults for any of the SDK's
+    documented variables, while a variable set in the real
+    environment always wins.
+    """
+
+    for key, value in environment.items():
+        name = key.upper()
+        if not name.startswith("OTEL_"):
+            name = f"OTEL_{name}"
+
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        else:
+            text = str(value)
+
+        os.environ.setdefault(name, text)
 
 
 def _configure_provider(service_name: str | None) -> None:
@@ -342,7 +581,6 @@ def _configure_provider(service_name: str | None) -> None:
     already installed a provider, it is left alone.
     """
 
-    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
@@ -356,25 +594,89 @@ def _configure_provider(service_name: str | None) -> None:
     exporter: Any
     if os.environ.get("OTEL_TRACES_EXPORTER") == "console":
         exporter = ConsoleSpanExporter()
-    else:
-        protocol = os.environ.get(
-            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
-            os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+    elif _otlp_protocol("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL") == "grpc":
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
         )
 
-        if protocol == "grpc":
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter,
-            )
-        else:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter,
-            )
+        exporter = OTLPSpanExporter()
+    else:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
 
         exporter = OTLPSpanExporter()
 
-    resource = Resource.create({"service.name": service_name} if service_name else {})
-
-    provider = TracerProvider(resource=resource)
+    provider = TracerProvider(resource=_resource(service_name))
     provider.add_span_processor(BatchSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
+
+
+def _configure_meter_provider(
+    service_name: str | None, export_interval: float | None
+) -> None:
+    """Stand up a MeterProvider from the standard OTel environment.
+
+    The metrics half of what `_configure_provider` does for traces:
+    OTEL_EXPORTER_OTLP_PROTOCOL picks the exporter,
+    OTEL_EXPORTER_OTLP_ENDPOINT is read by the exporter itself, and
+    OTEL_METRICS_EXPORTER=console swaps in the stdout exporter. An
+    application's own provider is left alone. `export_interval` is
+    seconds between exports; left as None, the reader falls back to
+    OTEL_METRIC_EXPORT_INTERVAL and then its 60 second default.
+    """
+
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import (
+        ConsoleMetricExporter,
+        PeriodicExportingMetricReader,
+    )
+
+    if isinstance(get_meter_provider(), MeterProvider):
+        return
+
+    exporter: Any
+    if os.environ.get("OTEL_METRICS_EXPORTER") == "console":
+        exporter = ConsoleMetricExporter()
+    elif _otlp_protocol("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL") == "grpc":
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+            OTLPMetricExporter,
+        )
+
+        exporter = OTLPMetricExporter()
+    else:
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+            OTLPMetricExporter,
+        )
+
+        exporter = OTLPMetricExporter()
+
+    # An explicit interval given to the reader wins over the
+    # environment variable, matching the SDK's own precedence.
+
+    interval_millis = export_interval * 1000.0 if export_interval is not None else None
+    reader = PeriodicExportingMetricReader(
+        exporter, export_interval_millis=interval_millis
+    )
+
+    provider = MeterProvider(
+        resource=_resource(service_name),
+        metric_readers=[reader],
+    )
+    set_meter_provider(provider)
+
+
+def _otlp_protocol(signal_variable: str) -> str:
+    # The signal-specific protocol variable wins over the general one,
+    # matching the OTel SDK's own precedence.
+
+    return os.environ.get(
+        signal_variable,
+        os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+    )
+
+
+def _resource(service_name: str | None) -> Any:
+    from opentelemetry.sdk.resources import Resource
+
+    return Resource.create({"service.name": service_name} if service_name else {})
