@@ -2,10 +2,16 @@
 
 Nothing in this module knows wrapture exists. The wrapture.toml next
 to it names the members to observe, and the runner applies that
-config before main.py imports this module.
+config before main.py imports this module. The one warning logged
+here goes through ordinary stdlib logging; the config's [[log]] entry
+is what puts it into the trace.
 """
 
 from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger("shop.orders")
 
 
 class PaymentDeclinedError(Exception):
@@ -31,7 +37,12 @@ class OrderService:
         self.ledger = Ledger()
 
     def place(self, order_id: str, amount: int, card: str) -> str:
-        receipt = self.gateway.charge(amount, card)
+        try:
+            receipt = self.gateway.charge(amount, card)
+        except PaymentDeclinedError:
+            logger.warning("order %s declined", order_id)
+            raise
+
         self.ledger.record(order_id, amount)
 
         return receipt

@@ -380,6 +380,38 @@ with wrapture.timeline(send):
 And with wrapture the real `send` ran, or was stubbed in place with
 the rest of the code still real, per everything above.
 
+## Asserting on log messages
+
+The comparison extends one step past unittest.mock, to pytest's
+`caplog` fixture, because the shape is the same. `caplog` attaches a
+handler at the root logger and hands the test a flat list of
+records, so the strongest assertion it supports is "this message was
+logged at some point during the test". wrapture's `capture_logs()`
+records messages as events on the same tape as the calls, which
+keeps the flat assertion one line, and adds the one `caplog` cannot
+express, position:
+
+```python
+logs = wrapture.capture_logs("myapp.orders")
+
+with wrapture.timeline(charge, logs) as tape:
+    place_order(declined_card)
+
+    logs.events.at_level("WARNING").with_message("*declined*").assert_once()
+
+    # The assertion caplog has no words for: the warning was logged
+    # by this call, not merely somewhere during the test.
+    warning = logs.events.at_level("WARNING").first
+    assert tape.parent_of(warning) is charge.events.first
+```
+
+Capture also does not touch the handler configuration: it hears each
+record on the logger that emitted it, before propagation, so a
+library that sets `propagate = False` is captured the same as any
+other, with no fixture-side forcing. The
+[unit testing page](unit-testing.md#capturing-log-messages) covers
+the full selection and filtering surface.
+
 ## Where unittest.mock still fits
 
 Everything above follows one rule with one opt-out. The rule: wrap the

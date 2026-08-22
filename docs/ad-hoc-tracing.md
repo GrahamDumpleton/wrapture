@@ -185,6 +185,14 @@ come in, with no timeline and no changes to the code being observed.
 after the fact. In a test, both can run at once, since sinks compose:
 keep the timeline for assertions and add a `Printer` while debugging.
 
+A captured log message (a `"log"` event, from the `[[log]]` config
+entry or `capture_logs()`) prints as exactly one line in the tree,
+the message repr-escaped so an embedded newline cannot break the
+indentation, with the `!!` marker for a logged exception on the same
+line: `log myapp.orders ERROR 'charge failed' !! ConnectionError`.
+Tracebacks never print, here or anywhere in the printer; the
+exception object rides the event for the consumers built to hold it.
+
 ## Counting without retaining
 
 Not every question needs the events themselves; often a number is the
@@ -731,6 +739,51 @@ exist before events can flow. A relative `path` on a builtin sink is
 anchored to the config file's own directory, as `pythonpath` entries
 are, so the file says where its output goes whatever the process's
 working directory; a factory receives its keys as written.
+
+### Capturing log messages: the [[log]] list
+
+Each `[[log]]` entry is `capture_logs()` spelt as TOML: the log
+messages the application emits through the standard library logging
+module become events of kind `"log"`, flowing to the config's sinks
+beside the calls, nested under whatever observed operation emitted
+them. The keys are the function's arguments, all optional:
+
+```toml
+[[log]]
+name = "myapp.*"
+level = "INFO"
+exclude = "myapp.health*"
+exclude_message = "*password*"
+```
+
+`name` and `exclude` are fnmatch patterns (or lists) over logger
+names, and `level` is a threshold, name or number, meaning "at least
+this severe"; the default WARNING keeps volume deliberate. Repeat the
+entry for different patterns at different levels. Unlike an observe
+entry there is no target to wait for, so captures apply immediately
+when the config does, and `report()` lists them.
+
+Capture hears each record once, on the logger that emitted it,
+before propagation and regardless of the application's handler
+configuration, which it never touches; records suppressed by a
+logger's own level were never emitted and are not captured.
+`exclude_message` is the safety valve, dropping matching messages at
+capture so they reach no sink and no file, for content that must
+never be recorded anywhere. Selection any finer belongs to the
+sinks: a `filter` predicate on one `[[sink]]` sees the whole event,
+`data["message"]` included, so routing (say, structured messages to
+one file) is a predicate function away without blinding the other
+sinks.
+
+The recorded fields ride in `event.data` (`level`, `levelno`,
+`message`, `module`, `funcName`, `lineno`), and a record logged with
+`exc_info` carries its exception on the event's `exception` field,
+never in the message: the message-plus-traceback blob is a Formatter
+artifact of the logging module's own output path, and wrapture
+captures the record, not the output. One retention note for
+long-lived processes: a live exception keeps its traceback frames
+for the event's lifetime, so `logging.exception()` in a hot loop is
+a heavier capture than the message alone.
 
 ### Setup callbacks: running code at apply time
 

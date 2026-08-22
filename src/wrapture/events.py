@@ -1,9 +1,11 @@
 """The event record produced when a binding observes something happen.
 
-One record type covers all four kinds of observation: a call to a wrapped
-callable, and a read, write or delete of a wrapped attribute. The kinds
-share the fields that describe where and when the event happened and how
-events nest; each kind then populates the fields that make sense for it.
+One record type covers every kind of observation: a call to a wrapped
+callable, a read, write or delete of a wrapped attribute, an HTTP
+request through wrapped middleware, and a log message the observed
+code emitted. The kinds share the fields that describe where and when
+the event happened and how events nest; each kind then populates the
+fields that make sense for it.
 
 Nothing in this module records anything by itself. Events are created by
 the recording machinery when a binding fires inside a timeline, and are
@@ -22,7 +24,7 @@ from wrapt import MISSING
 
 from .capture import REFERENCE
 
-EventKind = Literal["call", "get", "set", "delete", "request"]
+EventKind = Literal["call", "get", "set", "delete", "request", "log"]
 
 
 @dataclass(eq=False)
@@ -30,8 +32,9 @@ class Event:
     """One recorded occurrence at a binding.
 
     The `kind` field says what happened: "call" for an invocation of a
-    wrapped callable, "get", "set" or "delete" for attribute access, and
-    "request" for an HTTP request through a wrapped WSGI application.
+    wrapped callable, "get", "set" or "delete" for attribute access,
+    "request" for an HTTP request through a wrapped WSGI application,
+    and "log" for a log message the observed code emitted.
     Fields that were not observed hold the MISSING sentinel (for values,
     so that a recorded None stays distinguishable) or None (for the
     optional descriptive fields). Events compare by identity: two events
@@ -162,6 +165,15 @@ class Event:
             if query:
                 target = f"{target}?{query}"
             return f"{method} {target} ({where})"
+
+        # A log message reads as one line: the logger, the level, and
+        # the message repr-escaped so an embedded newline can never
+        # break a tree's alignment.
+
+        if self.kind == "log":
+            level = self.data.get("level", "?")
+            message = self.data.get("message", "")
+            return f"log {where} {level} {message!r}"
 
         if self.kind == "get":
             if self.result is not MISSING:

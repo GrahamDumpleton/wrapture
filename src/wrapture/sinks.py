@@ -451,11 +451,26 @@ class Printer(Sink):
     def on_enter(self, event: Event) -> None:
         """Print the operation as it begins."""
 
-        self._write(self._prefix(event) + str(event))
+        line = self._prefix(event) + str(event)
+
+        # A log event's one line carries its exception marker itself,
+        # since no closing line follows to report it.
+
+        if event.kind == "log" and event.exception is not None:
+            line += f" !! {type(event.exception).__name__}"
+
+        self._write(line)
 
     def on_exit(self, event: Event) -> None:
         """Print the outcome: the result when one was captured, and the
         elapsed time when timing is on."""
+
+        # A log event is instantaneous and its opening line already
+        # says everything, message and exception marker included, so
+        # it never gets a closing line.
+
+        if event.kind == "log":
+            return
 
         suffix = self._suffix(event)
         if event.result is MISSING and not suffix:

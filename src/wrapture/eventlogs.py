@@ -10,12 +10,40 @@ show the events a filter discarded instead of a bare empty result.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator, Mapping
+from fnmatch import fnmatchcase
 from typing import Any
 
 from wrapt import MISSING
 
 from .events import Event
+
+
+def _levelno(level: int | str) -> int:
+    """Resolve a logging level given as either a name or a number.
+
+    Names resolve through the logging module's registered levels, so
+    custom levels added with logging.addLevelName() work; numbers pass
+    through as they are.
+    """
+
+    if isinstance(level, bool):
+        raise ValueError(f"level must be a logging level name or number, got {level!r}")
+    if isinstance(level, int):
+        return level
+
+    if isinstance(level, str):
+        mapping = logging.getLevelNamesMapping()
+        try:
+            return mapping[level.upper()]
+        except KeyError:
+            known = ", ".join(sorted(mapping))
+            raise ValueError(
+                f"unknown logging level {level!r}; known names are {known}"
+            ) from None
+
+    raise ValueError(f"level must be a logging level name or number, got {level!r}")
 
 
 class EventLog:
@@ -165,6 +193,49 @@ class EventLog:
             f"[value={value!r}]",
             lambda event: event.value is not MISSING and event.value == value,
         )
+
+    def at_level(self, level: int | str) -> EventLog:
+        """Log events at or above the given severity.
+
+        The level is a name ("WARNING") or a number (logging.WARNING),
+        and the comparison is by number, so at_level("WARNING") means
+        "at least this severe". Only log events carry a level, so
+        anything else never matches.
+        """
+
+        threshold = _levelno(level)
+
+        def keep(event: Event) -> bool:
+            levelno = event.data.get("levelno")
+            return isinstance(levelno, int) and levelno >= threshold
+
+        return self._narrow(f"[at_level={level}]", keep)
+
+    def with_message(self, pattern: str) -> EventLog:
+        """Log events whose message matches the fnmatch pattern.
+
+        Matching is case-sensitive fnmatch, the same convention config
+        filters use, so "*declined*" finds a substring. Only log
+        events carry a message, so anything else never matches.
+        """
+
+        def keep(event: Event) -> bool:
+            message = event.data.get("message")
+            return isinstance(message, str) and fnmatchcase(message, pattern)
+
+        return self._narrow(f"[message={pattern!r}]", keep)
+
+    def without_message(self, pattern: str) -> EventLog:
+        """Log events whose message does not match the fnmatch pattern:
+        the negation of with_message(), for asserting that noise aside,
+        nothing else was logged. Only log events carry a message, so
+        anything else never matches."""
+
+        def keep(event: Event) -> bool:
+            message = event.data.get("message")
+            return isinstance(message, str) and not fnmatchcase(message, pattern)
+
+        return self._narrow(f"[message!={pattern!r}]", keep)
 
     def injected(self, want: bool = True) -> EventLog:
         """Events whose outcome was supplied by returns(), raises() or

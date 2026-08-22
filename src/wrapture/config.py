@@ -45,6 +45,7 @@ from .capture import redact as _redact
 from .collectors import Aggregate, Counter
 from .events import Event
 from .exceptions import ConfigError, ConfigWarning
+from .logs import LogCapture, capture_logs
 from .outputs import OutputPath
 from .sinks import (
     Depth,
@@ -283,6 +284,7 @@ class AppliedConfig:
         self._lock = threading.Lock()
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
+        self._captures: list[LogCapture] = []
         self._sink = sink
         self._windows = tuple(windows)
         self._reverted = False
@@ -316,6 +318,13 @@ class AppliedConfig:
         with self._lock:
             return tuple(self._pending)
 
+    @property
+    def captures(self) -> tuple[LogCapture, ...]:
+        """The log captures the config applied."""
+
+        with self._lock:
+            return tuple(self._captures)
+
     def report(self) -> str:
         """A human-readable listing of what is installed: the sink,
         every binding applied so far, and the targets still waiting
@@ -328,6 +337,7 @@ class AppliedConfig:
         with self._lock:
             bindings = list(self._bindings)
             pending = list(self._pending)
+            captures = list(self._captures)
 
         lines = [f"sink: {self._sink!r}" if self._sink is not None else "sink: none"]
 
@@ -339,6 +349,11 @@ class AppliedConfig:
         lines.append("applied:" if bindings else "applied: none")
         for bound in bindings:
             lines.append(f"  {bound.path}")
+
+        if captures:
+            lines.append("log:")
+            for capture in captures:
+                lines.append(f"  {','.join(capture.names)} >={capture.level}")
 
         if pending:
             lines.append("pending:")
@@ -360,9 +375,13 @@ class AppliedConfig:
         with self._lock:
             self._suspended = True
             bindings = list(self._bindings)
+            captures = list(self._captures)
 
         for bound in bindings:
             bound.suspend()
+
+        for capture in captures:
+            capture.suspend()
 
     def resume(self) -> None:
         """Resume every binding this config applied, undoing
@@ -371,13 +390,18 @@ class AppliedConfig:
         with self._lock:
             self._suspended = False
             bindings = list(self._bindings)
+            captures = list(self._captures)
 
         for bound in bindings:
             bound.resume()
 
+        for capture in captures:
+            capture.resume()
+
     def revert(self) -> None:
         """Remove everything this record installed: the bindings, most
-        recent first, and the sink registration.
+        recent first, then the log captures, the windows, and the sink
+        registration.
 
         A post-import hook cannot be unregistered from wrapt, so a
         hook that has not fired yet is neutralised instead: when its
@@ -392,11 +416,16 @@ class AppliedConfig:
 
             self._reverted = True
             bindings = list(self._bindings)
+            captures = list(self._captures)
             self._bindings.clear()
             self._pending.clear()
+            self._captures.clear()
 
         for bound in reversed(bindings):
             bound.remove()
+
+        for capture in reversed(captures):
+            capture.remove()
 
         for window in self._windows:
             window.stop()
@@ -433,6 +462,7 @@ class Config:
         sink: Sink | None = None,
         windows: Sequence[Window] = (),
         setup: Sequence[SetupEntry] = (),
+        log: Sequence[LogCapture] = (),
         capture: CapturePolicy | str | None = None,
         inherit: bool = True,
     ) -> None:
@@ -444,7 +474,9 @@ class Config:
         combinators wrapped around the sink they gate. `windows` are
         the Window objects to start, whose contents listen or collect
         only while a run is open. `setup` is the
-        SetupEntry callbacks to register. `capture` overrides the
+        SetupEntry callbacks to register. `log` is the LogCapture
+        selections to apply, as capture_logs() returns them.
+        `capture` overrides the
         capture level on every binding the config creates, in the
         forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
         from the environment after a successful apply, so Python
@@ -457,6 +489,13 @@ class Config:
             if not isinstance(entry, ObserveEntry):
                 raise ConfigError(
                     f"observe entries must be ObserveEntry instances, got {entry!r}"
+                )
+
+        for capture_entry in log:
+            if not isinstance(capture_entry, LogCapture):
+                raise ConfigError(
+                    f"log entries must be LogCapture instances, as"
+                    f" capture_logs() returns them, got {capture_entry!r}"
                 )
 
         for setup_entry in setup:
@@ -490,6 +529,7 @@ class Config:
         self._sink = sink
         self._windows = tuple(windows)
         self._setup = tuple(setup)
+        self._log = tuple(log)
         self._capture = capture
         self._inherit = inherit
 
@@ -575,6 +615,14 @@ class Config:
 
             for setup_entry in self._setup:
                 _register_setup(setup_entry, record)
+
+            # Log captures apply immediately: the logging module is
+            # always importable, so there is nothing to defer on.
+
+            for capture_entry in self._log:
+                capture_entry.apply()
+                with record._lock:
+                    record._captures.append(capture_entry)
         except BaseException:
             record.revert()
             raise
@@ -1267,10 +1315,17 @@ def _config_from(document: Any, location: str) -> Config:
     if not isinstance(document, dict):
         raise ConfigError(f"{location}: config must be a TOML table")
 
-    unknown = sorted(
-        set(document)
-        - {"pythonpath", "capture", "observe", "sink", "window", "setup", "inherit"}
-    )
+    known = {
+        "pythonpath",
+        "capture",
+        "observe",
+        "sink",
+        "window",
+        "setup",
+        "log",
+        "inherit",
+    }
+    unknown = sorted(set(document) - known)
     if unknown:
         raise ConfigError(f"{location}: unknown config keys {unknown}")
 
@@ -1318,6 +1373,22 @@ def _config_from(document: Any, location: str) -> Config:
             )
         )
 
+    # A [[log]] entry is capture_logs() spelt as TOML: the keys are
+    # its arguments, all optional, and the defaults match.
+
+    log: list[LogCapture] = []
+    for raw in document.get("log", ()):
+        table = _entry_table(
+            raw,
+            section="[[log]]",
+            required=(),
+            optional=("name", "level", "exclude", "exclude_message"),
+        )
+        try:
+            log.append(capture_logs(**table))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"[[log]]: {exc}") from None
+
     anchor = os.path.dirname(os.path.abspath(location))
 
     sink = None
@@ -1343,6 +1414,7 @@ def _config_from(document: Any, location: str) -> Config:
         sink=sink,
         windows=windows,
         setup=setup,
+        log=log,
         capture=document.get("capture"),
         inherit=document.get("inherit", True),
     )

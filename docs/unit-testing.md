@@ -1316,6 +1316,105 @@ outcomes, with everything unstable between runs left out) made for
 golden-file and snapshot comparisons; see the exporters section of
 the ad-hoc tracing page.
 
+## Capturing log messages
+
+A log message the code under test emits is an observation like any
+other, and `capture_logs()` records standard library logging onto the
+tape as events of kind `"log"`. The capture applies like a binding,
+so `timeline()` accepts it alongside them, and its `events` property
+speaks the same vocabulary as everything else on this page:
+
+```python
+def test_declined_charge_warns():
+    charge = wrapture.binding(Gateway, "charge")
+    logs = wrapture.capture_logs("myapp.orders")
+
+    with wrapture.timeline(charge, logs):
+        place_order(declined_card)
+
+        logs.events.at_level("WARNING").with_message("*declined*").assert_once()
+        logs.events.at_level("ERROR").assert_never()
+```
+
+`capture_logs(name, level=...)` selects by logger name (an fnmatch
+pattern or a list of them, with `exclude=` subtracting) and by level,
+a name or a number meaning "at least this severe". The default is
+`"WARNING"`, so capture volume is a deliberate choice rather than an
+ambient flood; pass `level="DEBUG"` when a test genuinely asserts on
+fine detail. Three log-shaped filters join the family on the query
+side: `at_level()` (again "at least this severe"), `with_message()`
+(case-sensitive fnmatch, so `"*declined*"` finds a substring) and its
+negation `without_message()`, with `matching()` as the escape hatch
+for anything richer. The captured fields ride in `event.data`:
+`level` and `levelno` (both always present, whichever form the
+threshold was given in), `message`, `module`, `funcName` and
+`lineno`, with the logger name as the event's `path`.
+
+Capture sits at `logging.Logger.handle`, so it hears each record
+exactly once, on the logger that emitted it, before propagation and
+regardless of handler configuration: no handler is attached, nothing
+the application configured is touched, and delivery to the
+application's own handlers continues unchanged. Records a logger's
+own level suppresses were never emitted and are not captured.
+
+The reason to reach for this over pytest's `caplog` is position: log
+events nest inside the call that emitted them, so a test can pin a
+message to a specific call rather than to "somewhere during the
+test":
+
+```python
+def test_retry_warns_inside_the_first_attempt():
+    send = wrapture.binding(Publisher, "send")
+    logs = wrapture.capture_logs("myapp.publish")
+
+    with wrapture.timeline(send, logs) as tape:
+        publish_with_retry(message)
+
+        send.events.assert_times(2)
+
+        warning = logs.events.at_level("WARNING").assert_once().first
+        assert tape.parent_of(warning) is send.events.first
+```
+
+Ordering assertions mix logs with calls, since `assert_order()`
+accepts any event logs as steps:
+
+```python
+tape.assert_order(
+    send.events,
+    logs.events.with_message("*retrying*"),
+    send.events,
+)
+```
+
+A record logged with `logging.exception()` (or `exc_info=True`)
+splits cleanly: the message stays the message, msg-percent-args with
+no traceback attached, because the familiar message-plus-traceback
+blob is a Formatter artifact manufactured on output, not part of the
+record. The exception itself lands on the event's `exception` field,
+where the existing `raising()` filter finds it:
+
+```python
+logs.events.raising(ConnectionError).assert_once()
+```
+
+And `tape.tree()` shows messages in place, one line each, the message
+repr-escaped so an embedded newline can never break the alignment:
+
+```text
+publish_with_retry(message='hi')
+  Publisher.send(message='hi')  !! ConnectionError
+  log myapp.publish WARNING 'send failed, retrying'
+  Publisher.send(message='hi')  -> 'ok'
+```
+
+One capture argument exists for what must never be recorded rather
+than what a test wants to see: `exclude_message=` names message
+patterns that are dropped at capture, before any tape or sink hears
+them, the safety valve for messages carrying secrets. Every other
+selection by content belongs at query time, as above, where dropping
+a message costs nothing but a filter.
+
 ## The pytest plugin
 
 wrapture ships an opt-in pytest plugin. It is deliberately not
