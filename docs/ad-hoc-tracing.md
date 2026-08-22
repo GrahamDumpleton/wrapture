@@ -1386,9 +1386,16 @@ environment setup), deployment-owned (no environment table, the real
 environment decides everything), or mixed, defaults in the file with
 the deployment overriding what differs. Named keys such as
 `export_interval` are passed to constructors explicitly and beat
-both spellings. An application that already configures its own
-providers is left alone, and the telemetry flows through the
-exporters the application chose. `OTEL_TRACES_EXPORTER=console` and
+both spellings. The posture is wrapture-first: choosing wrapture
+means taking all it does, including standing up the SDK providers,
+which is what the zero-code story requires. An application that
+already configured its own providers wins as the failsafe, the
+telemetry flowing through the exporters the application chose, and
+wrapture warns (a `ConfigWarning` per signal) naming what is lost:
+the table's provider-level settings no longer apply, and behaviour
+wrapture relies on, such as the sampler honouring an upstream
+sampling decision, is whatever the application installed.
+`OTEL_TRACES_EXPORTER=console` and
 `OTEL_METRICS_EXPORTER=console` dump either signal to standard
 output for a look without a collector; the examples README carries
 the run commands:

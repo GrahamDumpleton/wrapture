@@ -269,10 +269,11 @@ $ OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
-If the application had already configured its own provider, the
-factory would leave it alone and the spans would flow through the
-application's exporter; here the app knows nothing of OTel, so the
-factory's zero-code path applies.
+If the application had already configured its own provider, it
+would win as the failsafe, the spans flowing through the
+application's exporter with a warning naming what of the `[otel]`
+table no longer applies; here the app knows nothing of OTel, so the
+zero-code path stands the providers up itself.
 
 ## fastapi-app
 

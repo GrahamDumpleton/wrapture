@@ -2,12 +2,15 @@
 
 These cover the top-level [otel] config table: presence opting in,
 the enabled switch, registration ahead of the [[sink]] list, the
-validation of the table's keys, and both faces of the import guard
+validation of the table's keys, both faces of the import guard
 (the packages present building the sink, their absence failing the
-load with the wrapture[otel] extra named).
+load with the wrapture[otel] extra named), and the SDK posture
+(wrapture standing up providers when none exist, an application's
+provider winning as the warned failsafe).
 """
 
 import sys
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,13 +20,20 @@ import pytest
 import wrapture
 from wrapture import load_config
 
+# The module fixture below installs application providers, so every
+# sink built through the config path defers to them and warns; the
+# posture section asserts that warning deliberately, and the rest of
+# the module ignores it as incidental.
+
+pytestmark = pytest.mark.filterwarnings("ignore::wrapture.ConfigWarning")
+
 
 @pytest.fixture(autouse=True, scope="module")
 def _providers() -> Iterator[None]:
     # Install SDK providers once for the module, so building the sink
     # under test never stands up real exporters with their network
     # endpoints and worker threads: the factory finds a provider
-    # already configured and leaves it alone.
+    # already configured and defers to it.
 
     from opentelemetry import trace as otel_trace
     from opentelemetry.metrics import set_meter_provider
@@ -192,6 +202,74 @@ def test_a_broken_factory_call_reports_the_cause(tmp_path: Path) -> None:
 
     with pytest.raises(wrapture.ConfigError, match="positive number of seconds"):
         load_config(source)
+
+
+# ---------------------------------------------------------------------------
+# the SDK posture: wrapture-first, app provider as the failsafe
+# ---------------------------------------------------------------------------
+
+
+def test_an_existing_tracer_provider_wins_with_a_warning(tmp_path: Path) -> None:
+    # The module fixture installed an application provider, so the
+    # factory defers to it and the warning names what is lost.
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["traces"]\n')
+
+    with pytest.warns(wrapture.ConfigWarning, match="tracer provider is already"):
+        load_config(source)
+
+
+def test_an_existing_meter_provider_wins_with_a_warning(tmp_path: Path) -> None:
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["metrics"]\n')
+
+    with pytest.warns(wrapture.ConfigWarning, match="meter provider is already"):
+        load_config(source)
+
+
+def test_no_tracer_provider_stands_one_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The wrapture-first path: nothing configured (the API's default
+    # proxy provider is not an SDK one), so the factory stands up a
+    # provider from its arguments and the environment, silently. The
+    # global setters are patched to observe rather than install.
+
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from wrapture.otel.providers import _configure_provider
+
+    installed: list[Any] = []
+    monkeypatch.setattr(otel_trace, "get_tracer_provider", lambda: object())
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", installed.append)
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", wrapture.ConfigWarning)
+        _configure_provider("shop")
+
+    (provider,) = installed
+    assert isinstance(provider, TracerProvider)
+    assert provider.resource.attributes["service.name"] == "shop"
+
+
+def test_no_meter_provider_stands_one_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider
+
+    from wrapture.otel import providers
+
+    installed: list[Any] = []
+    monkeypatch.setattr(providers, "get_meter_provider", lambda: object())
+    monkeypatch.setattr(providers, "set_meter_provider", installed.append)
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "console")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", wrapture.ConfigWarning)
+        providers._configure_meter_provider("shop", export_interval=5)
+
+    (provider,) = installed
+    assert isinstance(provider, MeterProvider)
+    assert provider._sdk_config.resource.attributes["service.name"] == "shop"
 
 
 # ---------------------------------------------------------------------------

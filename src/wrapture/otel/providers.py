@@ -1,14 +1,24 @@
 """SDK provider setup: standing up tracer and meter providers from
-config and the standard OTel environment, when the application has
-not installed its own."""
+config and the standard OTel environment.
+
+The posture is wrapture-first: choosing wrapture means taking all it
+does, including standing up the SDK providers, which is what the
+zero-code story requires, since in the config-driven case there is
+no application code to configure the SDK. A provider the application
+already installed wins as the failsafe, with a warning naming what
+is lost by deferring to it.
+"""
 
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.metrics import get_meter_provider, set_meter_provider
+
+import wrapture
 
 from .environment import _otlp_protocol
 
@@ -19,14 +29,24 @@ def _configure_provider(service_name: str | None) -> None:
     OTEL_EXPORTER_OTLP_PROTOCOL picks the exporter (http/protobuf by
     default, or grpc), OTEL_EXPORTER_OTLP_ENDPOINT is read by the
     exporter itself, and OTEL_TRACES_EXPORTER=console swaps in the
-    stdout exporter for a look without a collector. If the application
-    already installed a provider, it is left alone.
+    stdout exporter for a look without a collector. A provider the
+    application already installed wins as the failsafe, with a
+    warning naming what is lost.
     """
 
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
     if isinstance(trace.get_tracer_provider(), TracerProvider):
+        warnings.warn(
+            "an OpenTelemetry tracer provider is already configured, so"
+            " wrapture's traces flow through it: the [otel] table's"
+            " service_name and environment defaults do not apply to"
+            " traces, and honouring an upstream sampling decision"
+            " depends on the sampler that provider installed",
+            wrapture.ConfigWarning,
+            stacklevel=2,
+        )
         return
 
     # Pick the exporter the environment asks for. The OTLP exporters
@@ -63,7 +83,8 @@ def _configure_meter_provider(
     OTEL_EXPORTER_OTLP_PROTOCOL picks the exporter,
     OTEL_EXPORTER_OTLP_ENDPOINT is read by the exporter itself, and
     OTEL_METRICS_EXPORTER=console swaps in the stdout exporter. An
-    application's own provider is left alone. `export_interval` is
+    application's own provider wins as the failsafe, with a warning
+    naming what is lost. `export_interval` is
     seconds between exports; left as None, the reader falls back to
     OTEL_METRIC_EXPORT_INTERVAL and then its 60 second default.
     """
@@ -75,6 +96,14 @@ def _configure_meter_provider(
     )
 
     if isinstance(get_meter_provider(), MeterProvider):
+        warnings.warn(
+            "an OpenTelemetry meter provider is already configured, so"
+            " wrapture's metrics flow through it: the [otel] table's"
+            " service_name, export_interval and environment defaults"
+            " do not apply to metrics",
+            wrapture.ConfigWarning,
+            stacklevel=2,
+        )
         return
 
     exporter: Any
