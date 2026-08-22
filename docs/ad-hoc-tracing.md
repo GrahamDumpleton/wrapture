@@ -1364,7 +1364,7 @@ table, and each signal's own tuning nests beneath it:
 ```toml
 [otel]
 service_name = "flask-shop"
-signals = ["traces", "metrics"]
+signals = ["traces", "metrics", "logs"]
 
 [otel.traces]
 sample = 0.1
@@ -1452,3 +1452,16 @@ status only. This pairing is also why `sample` lives under
 gate on the whole registration would starve the histograms, while
 sampling inside it drops only the span export, keeping the
 always-on cheap signal complete beside the sampled drill-down.
+
+The logs signal exports the log events the `[[log]]` captures
+(described earlier in this guide) select, through the OTel logs
+bridge. Selection stays where it is: the
+captures decide which messages become events at all, and the sink
+only exports events that exist. The mapping is direct, severity from
+the record's level, body from the formatted message, the logger name
+and source location as attributes, the logged exception as the
+standard exception attributes. The payoff of log events inheriting
+their tree's trace is correlation: each record lands carrying the
+tree's trace id and the id of the exported span it happened inside,
+so opening a request's span in the backend shows its log lines,
+not just its timings.

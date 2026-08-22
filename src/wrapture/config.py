@@ -1369,7 +1369,15 @@ def _build_otel(table: Any) -> Sink | None:
     if not isinstance(table, dict):
         raise ConfigError(f"otel must be a table, got {table!r}")
 
-    known = {"enabled", "service_name", "signals", "traces", "metrics", "environment"}
+    known = {
+        "enabled",
+        "service_name",
+        "signals",
+        "traces",
+        "metrics",
+        "logs",
+        "environment",
+    }
     unknown = sorted(set(table) - known)
     if unknown:
         raise ConfigError(f"otel: unknown keys {unknown}")

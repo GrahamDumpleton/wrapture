@@ -1,4 +1,4 @@
-"""OpenTelemetry export: wrapture events as OTel spans and metrics.
+"""OpenTelemetry export: wrapture events as spans, metrics and logs.
 
 The sinks here turn the event stream into OpenTelemetry signals, so
 the trees wrapture records also land in whatever OTLP backend is
@@ -8,7 +8,9 @@ INTERNAL spans, and the captured arguments, results and annotate()
 data ride along as span attributes. A second sink aggregates the
 same events into metrics: the semantic-convention duration histogram
 for requests, a per-path histogram for calls, and a counter of
-operations begun.
+operations begun. A third exports the log events the [[log]]
+captures select, through the OTel logs bridge, each record
+correlated to the exported span it happened inside.
 
 The `sink` factory is one registration covering every signal. In
 config it is the top-level `[otel]` table, whose keys are the
@@ -35,11 +37,16 @@ from typing import Any
 import wrapture
 
 from .environment import _apply_environment
+from .logs import OpenTelemetryLogsSink
 from .metrics import OpenTelemetryMetricsSink
-from .providers import _configure_meter_provider, _configure_provider
+from .providers import (
+    _configure_logger_provider,
+    _configure_meter_provider,
+    _configure_provider,
+)
 from .spans import OpenTelemetrySink
 
-_SIGNALS = ("traces", "metrics")
+_SIGNALS = ("traces", "metrics", "logs")
 
 
 def sink(
@@ -48,16 +55,18 @@ def sink(
     signals: Sequence[str] = _SIGNALS,
     traces: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
     environment: dict[str, Any] | None = None,
 ) -> wrapture.Sink:
     """Build the OTel export sink: one registration for every signal.
 
-    `signals` says which are enabled (both by default), and each has
+    `signals` says which are enabled (all by default), and each has
     an optional table of its own tuning: `traces` takes the span
     sink's options plus `sample`, a keep rate applied to the trace
-    export alone (the metrics beside it still hear every event), and
+    export alone (the metrics beside it still hear every event),
     `metrics` takes the metrics sink's options plus
-    `export_interval`, seconds between metric exports.
+    `export_interval`, seconds between metric exports, and `logs`
+    takes the logs sink's options.
 
     `environment` holds defaults for OTel's own environment
     variables: each key is uppercased, prefixed with OTEL_ when not
@@ -80,15 +89,19 @@ def sink(
     # The trace export, optionally sampled inside this registration:
     # Sample decides per tree at the root, so the span sink beneath it
     # still sees whole, consistently paired trees, while the metrics
-    # sink alongside hears everything.
+    # sink alongside hears everything. The bare span sink is kept for
+    # the logs sink below, whose records correlate to open spans
+    # through its table.
 
+    spans: OpenTelemetrySink | None = None
     if "traces" in signals:
         options = dict(traces or {})
         sample = options.pop("sample", None)
 
         _configure_provider(service_name)
 
-        span_sink: wrapture.Sink = OpenTelemetrySink(**options)
+        spans = OpenTelemetrySink(**options)
+        span_sink: wrapture.Sink = spans
         if sample is not None:
             span_sink = wrapture.Sample(sample, span_sink)
         sinks.append(span_sink)
@@ -110,13 +123,24 @@ def sink(
         _configure_meter_provider(service_name, export_interval)
         sinks.append(OpenTelemetryMetricsSink(**options))
 
+    if "logs" in signals:
+        options = dict(logs or {})
+
+        _configure_logger_provider(service_name)
+        sinks.append(OpenTelemetryLogsSink(spans=spans, **options))
+
     # A lone signal is returned bare; several fan out. Either way the
-    # capture declarations negotiate through: metrics alone stays at
-    # "none", traces raise the fan-out to "summary".
+    # capture declarations negotiate through: metrics and logs alone
+    # stay at "none", traces raise the fan-out to "summary".
 
     if len(sinks) == 1:
         return sinks[0]
     return wrapture.Fanout(*sinks)
 
 
-__all__ = ["OpenTelemetryMetricsSink", "OpenTelemetrySink", "sink"]
+__all__ = [
+    "OpenTelemetryLogsSink",
+    "OpenTelemetryMetricsSink",
+    "OpenTelemetrySink",
+    "sink",
+]

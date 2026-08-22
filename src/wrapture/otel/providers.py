@@ -142,6 +142,56 @@ def _configure_meter_provider(
     set_meter_provider(provider)
 
 
+def _configure_logger_provider(service_name: str | None) -> None:
+    """Stand up a LoggerProvider from the standard OTel environment.
+
+    The logs half of what `_configure_provider` does for traces:
+    OTEL_EXPORTER_OTLP_PROTOCOL picks the exporter,
+    OTEL_EXPORTER_OTLP_ENDPOINT is read by the exporter itself, and
+    OTEL_LOGS_EXPORTER=console swaps in the stdout exporter. A
+    provider the application already installed wins as the failsafe,
+    with a warning naming what is lost.
+    """
+
+    from opentelemetry._logs import get_logger_provider, set_logger_provider
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        BatchLogRecordProcessor,
+        ConsoleLogExporter,
+    )
+
+    if isinstance(get_logger_provider(), LoggerProvider):
+        warnings.warn(
+            "an OpenTelemetry logger provider is already configured, so"
+            " wrapture's log records flow through it: the [otel] table's"
+            " service_name and environment defaults do not apply to"
+            " logs",
+            wrapture.ConfigWarning,
+            stacklevel=2,
+        )
+        return
+
+    exporter: Any
+    if os.environ.get("OTEL_LOGS_EXPORTER") == "console":
+        exporter = ConsoleLogExporter()
+    elif _otlp_protocol("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL") == "grpc":
+        from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
+            OTLPLogExporter,
+        )
+
+        exporter = OTLPLogExporter()
+    else:
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import (
+            OTLPLogExporter,
+        )
+
+        exporter = OTLPLogExporter()
+
+    provider = LoggerProvider(resource=_resource(service_name))
+    provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    set_logger_provider(provider)
+
+
 def _resource(service_name: str | None) -> Any:
     from opentelemetry.sdk.resources import Resource
 

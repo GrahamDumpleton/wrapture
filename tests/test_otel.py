@@ -29,16 +29,22 @@ pytestmark = pytest.mark.filterwarnings("ignore::wrapture.ConfigWarning")
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _providers() -> Iterator[Any]:
+def _providers() -> Iterator[dict[str, Any]]:
     # Install SDK providers once for the module, so building the sink
     # under test never stands up real exporters with their network
     # endpoints and worker threads: the factory finds a provider
-    # already configured and defers to it. Spans land synchronously
-    # in an in-memory exporter, so the trace tests can assert on what
-    # was actually exported.
+    # already configured and defers to it. Spans and log records land
+    # synchronously in in-memory exporters, so the trace and log
+    # tests can assert on what was actually exported.
 
     from opentelemetry import trace as otel_trace
+    from opentelemetry._logs import set_logger_provider
     from opentelemetry.metrics import set_meter_provider
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -46,22 +52,35 @@ def _providers() -> Iterator[Any]:
         InMemorySpanExporter,
     )
 
-    exported = InMemorySpanExporter()
+    spans = InMemorySpanExporter()
     provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exported))
-
+    provider.add_span_processor(SimpleSpanProcessor(spans))
     otel_trace.set_tracer_provider(provider)
+
+    logs = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
+    logger_provider = LoggerProvider()
+    logger_provider.add_log_record_processor(SimpleLogRecordProcessor(logs))
+    set_logger_provider(logger_provider)
+
     set_meter_provider(MeterProvider())
 
-    yield exported
+    yield {"spans": spans, "logs": logs}
 
 
 @pytest.fixture
-def exported(_providers: Any) -> Any:
+def exported(_providers: dict[str, Any]) -> Any:
     # The module's in-memory span exporter, cleared for this test.
 
-    _providers.clear()
-    return _providers
+    _providers["spans"].clear()
+    return _providers["spans"]
+
+
+@pytest.fixture
+def exported_logs(_providers: dict[str, Any]) -> Any:
+    # The module's in-memory log exporter, cleared for this test.
+
+    _providers["logs"].clear()
+    return _providers["logs"]
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +488,124 @@ def test_a_wrapture_sampled_out_tree_keeps_the_minted_id(
     slot = event.trace.slots["w3c"]
     assert not slot.claimed
     assert headers["traceparent"].split("-")[1] == slot.trace_id
+
+
+# ---------------------------------------------------------------------------
+# the logs signal
+# ---------------------------------------------------------------------------
+
+
+def test_a_log_inside_an_exported_span_correlates_to_it(
+    tmp_path: Path, exported: Any, exported_logs: Any
+) -> None:
+    # The payoff of the kind-gate trace inheritance: the record lands
+    # with the tree's trace id and the enclosing exported span's id,
+    # severity and body mapped from the captured logging record.
+
+    import logging
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text(
+        '[otel]\nsignals = ["traces", "logs"]\n\n[[log]]\nname = "otel_demo"\n'
+    )
+
+    applied = load_config(source).apply()
+    try:
+        with wrapture.block("outer"):
+            logging.getLogger("otel_demo").warning("boom %s", "x")
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+    (data,) = exported_logs.get_finished_logs()
+    record = data.log_record
+
+    assert record.trace_id == span.context.trace_id
+    assert record.span_id == span.context.span_id
+    assert record.body == "boom x"
+    assert record.severity_text == "WARNING"
+    assert record.severity_number is not None and record.severity_number.value == 13
+    assert record.attributes is not None
+    assert record.attributes["wrapture.logger"] == "otel_demo"
+    assert record.attributes["wrapture.lineno"] > 0
+
+
+def test_a_log_without_traces_carries_the_minted_trace_id(
+    tmp_path: Path, exported_logs: Any
+) -> None:
+    # With only the logs signal on, the tree still mints an identity,
+    # so the record carries the trace id with no span to point at.
+
+    import logging
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["logs"]\n\n[[log]]\nname = "otel_lone"\n')
+
+    applied = load_config(source).apply()
+    try:
+        with wrapture.timeline() as tape:
+            with wrapture.block("outer"):
+                logging.getLogger("otel_lone").error("alone")
+    finally:
+        applied.revert()
+
+    (data,) = exported_logs.get_finished_logs()
+    record = data.log_record
+
+    block = tape.all[0]
+    assert block.trace is not None
+    assert record.trace_id == int(block.trace.slots["w3c"].trace_id, 16)
+    assert not record.span_id
+    assert record.severity_number is not None and record.severity_number.value == 17
+
+
+def test_a_root_log_has_no_trace_correlation(
+    tmp_path: Path, exported_logs: Any
+) -> None:
+    # A log outside any operation carries no trace, per the kind
+    # gate, and the record says so.
+
+    import logging
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["logs"]\n\n[[log]]\nname = "otel_root"\n')
+
+    applied = load_config(source).apply()
+    try:
+        logging.getLogger("otel_root").warning("floating")
+    finally:
+        applied.revert()
+
+    (data,) = exported_logs.get_finished_logs()
+    record = data.log_record
+
+    assert not record.trace_id
+    assert not record.span_id
+
+
+def test_a_logged_exception_maps_to_exception_attributes(
+    tmp_path: Path, exported_logs: Any
+) -> None:
+    import logging
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["logs"]\n\n[[log]]\nname = "otel_exc"\n')
+
+    applied = load_config(source).apply()
+    try:
+        try:
+            raise KeyError("missing")
+        except KeyError:
+            logging.getLogger("otel_exc").exception("lookup failed")
+    finally:
+        applied.revert()
+
+    (data,) = exported_logs.get_finished_logs()
+    record = data.log_record
+
+    assert record.attributes is not None
+    assert record.attributes["exception.type"] == "KeyError"
+    assert "missing" in str(record.attributes["exception.message"])
 
 
 # ---------------------------------------------------------------------------
