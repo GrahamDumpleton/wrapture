@@ -1,14 +1,21 @@
 """A small Flask shop, unaware it is being observed.
 
 Nothing here imports wrapture: the middleware and the handler
-bindings arrive from wrapture.toml when this module is imported.
+bindings arrive from wrapture.toml when this module is imported. The
+logging is ordinary stdlib logging, which the [[log]] capture in
+wrapture-otel.toml turns into events; the logger opts into INFO
+itself so the demo emits without any handler configuration.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 
 from flask import Flask, Response, jsonify
+
+log = logging.getLogger("myapp")
+log.setLevel(logging.INFO)
 
 app = Flask(__name__)
 
@@ -16,7 +23,12 @@ CATALOG = {"widget": 25, "gadget": 120}
 
 
 def quote(item: str) -> dict[str, str | int]:
+    log.info("quoting %s", item)
+
     price = CATALOG[item]
+    if price >= 100:
+        log.warning("%s is a big-ticket item at %d", item, price)
+
     return {"item": item, "price": price}
 
 

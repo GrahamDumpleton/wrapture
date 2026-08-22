@@ -17,6 +17,16 @@ name = "quote"
 module = "flask"
 call = "wrapture_local.flask_support:instrument"
 
+# The app's own log messages become events, so the logs signal below
+# has something to export; each record lands correlated to the span
+# it happened inside. INFO lowers the default WARNING threshold so
+# the demo's quoting lines flow; Flask logs errors on this logger
+# too, so a failing request contributes its exception record.
+
+[[log]]
+name = "myapp"
+level = "INFO"
+
 [[sink]]
 type = "printer"
 
@@ -28,7 +38,7 @@ type = "printer"
 
 [otel]
 service_name = "flask-shop"
-signals = ["traces", "metrics"]
+signals = ["traces", "metrics", "logs"]
 
 # Under [otel.traces], sample keeps that fraction of call trees in
 # the trace export, decided once per tree at its root, while the
