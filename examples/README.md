@@ -203,8 +203,10 @@ out by exception type, and a counter of operations begun.
 
 Both sinks ship in wrapture itself, as the `wrapture.otel`
 subpackage, with the OpenTelemetry dependencies behind the
-`wrapture[otel]` extra, and the top-level `[otel]` table registers
-them: its `signals` key says which signals are on,
+`wrapture[otel]` extra; this example is a plain consumer of the
+shipped code, and the OpenTelemetry export page of the
+documentation is the full guide. The top-level `[otel]` table
+registers the sinks: its `signals` key says which signals are on,
 shared facts like `service_name` sit at the top of the table, and
 per-signal tuning nests beneath it (`[otel.metrics]` sets
 `export_interval = 5`, seconds between metric exports; an

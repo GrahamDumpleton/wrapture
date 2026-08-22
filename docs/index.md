@@ -120,6 +120,7 @@ ad-hoc-tracing
 wsgi-tracing
 asgi-tracing
 scheduled-tracing
+otel-export
 ```
 
 ```{toctree}

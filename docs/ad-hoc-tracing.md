@@ -1281,13 +1281,12 @@ sequenceDiagram
 The converters above render a trace after the fact, from a tape or a
 file. Feeding a tracing backend while the application runs is a job
 for a sink, and OpenTelemetry's is one wrapture ships: the
-`wrapture.otel` subpackage exports request trees over OTLP to
-whatever backend the standard OTel environment variables name, with
-the OpenTelemetry dependencies behind the `wrapture[otel]` extra.
-It is also the worked case for
-[a sink of your own](#writing-your-own-sink) feeding any backend
-with a span model; the pattern is the same, only the API names
-change.
+[OpenTelemetry export](otel-export.md) guide covers the `[otel]`
+config table, the three signals, the trace identity claiming and
+the `wrapture[otel]` extra. What stays here is the shipped sink as
+the worked case for [a sink of your own](#writing-your-own-sink)
+feeding any backend with a span model; the pattern is the same,
+only the API names change.
 
 Most of the mapping writes itself, because the two models are close:
 
@@ -1365,138 +1364,9 @@ Passing `start_time` and `end_time` through this conversion means the
 span timings are the event timings, not the moments the exporter
 heard about them.
 
-The sink also completes the
-[trace identity](#trace-identity-and-propagation) story by claiming
-the tree's w3c slot. There are two id generators in the
-room, wrapture's minting (which must work with no OTel installed)
-and the SDK's, and the sink makes them agree. For an identity that
-arrived in headers, the root span is created with a remote parent
-built from the slot, so the exported tree continues the caller's
-trace rather than starting a detached one, and the arrived sampled
-flag rides along for the SDK's parent-based sampler to honour: an
-upstream "do not sample" exports nothing. For an identity wrapture
-minted locally, the root span is created normally, the SDK
-generating its own trace id, and the slot takes the whole identity
-at that moment, before the operation's body runs, so serialised
-files, outbound headers and exported spans all read one id and the
-backend shows a clean native root. In both cases the slot's span-id
-register then tracks the innermost exported span as spans open and
-close, so `trace_headers()` carries a live parent at any moment
-inside the tree, and downstream services attach to spans that
-really got exported. When wrapture's own `sample =` gate drops a
-tree, the sink never hears it: the minted id stands unclaimed and
-outbound headers carry it, which is what "not sampled" means.
-
-In a config file, OpenTelemetry export is first-class: the
-top-level `[otel]` table, sibling to `[trace]`, is the one
-registration covering every signal. Its presence opts in (export
-needs an endpoint to be useful, so no table means no export), and
-`enabled = false` is accepted so a stanza can be kept in the file
-but switched off, matching the `[trace]` style. The `signals` key
-says which signals are enabled, shared facts sit at the top of the
-table, and each signal's own tuning nests beneath it:
-
-```toml
-[otel]
-service_name = "flask-shop"
-signals = ["traces", "metrics", "logs"]
-
-[otel.traces]
-sample = 0.1
-
-[otel.metrics]
-export_interval = 5
-
-[otel.environment]
-exporter_otlp_endpoint = "http://localhost:4318"
-exporter_otlp_protocol = "http/protobuf"
-```
-
-The sink it builds always registers ahead of whatever the `[[sink]]`
-list builds, which then stacks in file order as usual; a tracing
-sink must hear a root event before any other sink can observe its
-trace identity, and the table's position makes that ordering true by
-construction rather than by convention. In code the same rule is the
-caller's, and simply stated: add the OTel sink before other sinks.
-The two neighbouring tables stay crisp: `[trace]` governs
-identities, `[otel]` governs export. Any other export destination
-remains a `[[sink]]` entry with a `module:attr` factory, which is
-also the escape hatch spelling (`type = "wrapture.otel:sink"`) for
-composing the OTel sink somewhere unusual, such as inside a window.
-
-The factory composes what the table asks for from the pieces this
-guide already covered: the span sink wrapped in `Sample` when
-`traces.sample` is given, so the trace export is sampled per tree
-while the metrics sink beside it still hears every event, the pair
-delivered through a `Fanout`, whose capture negotiation means a
-metrics-only registration stays at `"none"` while traces raise it to
-`"summary"`.
-
-`[otel.environment]` holds defaults for OTel's own environment
-variables: each key is uppercased, prefixed with `OTEL_` when not
-already, and applied with setdefault before the providers are
-built, so the file can name any of the SDK's documented variables
-without the factory knowing them individually, and a variable set in
-the real environment always wins. That gives the file three
-postures: self-contained (endpoint in the file, runs with no
-environment setup), deployment-owned (no environment table, the real
-environment decides everything), or mixed, defaults in the file with
-the deployment overriding what differs. Named keys such as
-`export_interval` are passed to constructors explicitly and beat
-both spellings. The posture is wrapture-first: choosing wrapture
-means taking all it does, including standing up the SDK providers,
-which is what the zero-code story requires. An application that
-already configured its own providers wins as the failsafe, the
-telemetry flowing through the exporters the application chose, and
-wrapture warns (a `ConfigWarning` per signal) naming what is lost:
-the table's provider-level settings no longer apply, and behaviour
-wrapture relies on, such as the sampler honouring an upstream
-sampling decision, is whatever the application installed.
-`OTEL_TRACES_EXPORTER=console` and
-`OTEL_METRICS_EXPORTER=console` dump either signal to standard
-output for a look without a collector; the examples README carries
-the run commands:
-
-```console
-$ cd examples/flask-app
-$ uv run --with flask --extra otel \
-    python -m wrapture --config wrapture-otel.toml main.py
-```
-
-Each request then arrives in the backend as one trace: a SERVER root
-span named for the request line, the view handler and its helpers
-nested beneath it with their captured arguments and results, and the
-failing request's tree marked as an error with the `KeyError`
-recorded on the span that raised it.
-
-The metrics signal aggregates the same events instead of exporting
-them individually: request durations into the semantic-convention
-`http.server.request.duration` histogram attributed by method and
-status code, call durations into a per-path histogram whose error
-series split out by exception type, and a counter of operations
-observed beginning. The sink protocol needs nothing added for this;
-the enter and close notifications are exactly the increment points
-instruments want, and the design is the `Aggregate` collector's
-(bounded memory, `"none"` capture on both axes, so nothing is ever
-retained or even captured) with the aggregation handed to the OTel
-SDK. The bound path is safe as a metric attribute precisely because
-the config chose the bindings: the set of values is closed, where
-the raw request URL is not, so requests are attributed by method and
-status only. This pairing is also why `sample` lives under
-`[otel.traces]` rather than as the registration's own gating key: a
-gate on the whole registration would starve the histograms, while
-sampling inside it drops only the span export, keeping the
-always-on cheap signal complete beside the sampled drill-down.
-
-The logs signal exports the log events the `[[log]]` captures
-(described earlier in this guide) select, through the OTel logs
-bridge. Selection stays where it is: the
-captures decide which messages become events at all, and the sink
-only exports events that exist. The mapping is direct, severity from
-the record's level, body from the formatted message, the logger name
-and source location as attributes, the logged exception as the
-standard exception attributes. The payoff of log events inheriting
-their tree's trace is correlation: each record lands carrying the
-tree's trace id and the id of the exported span it happened inside,
-so opening a request's span in the backend shows its log lines,
-not just its timings.
+Everything else about the shipped sink, the `[otel]` table and its
+per-signal tuning, the trace identity claiming that makes files,
+headers and exported spans agree on one id, the metrics and logs
+signals, the provider posture and its warnings, and the fork
+behaviour, lives in the
+[OpenTelemetry export](otel-export.md) guide.
