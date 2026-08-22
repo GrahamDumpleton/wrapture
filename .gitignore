@@ -13,5 +13,9 @@ venv/
 .coverage
 htmlcov/
 .tox/
-examples/*/trace.jsonl
-examples/*/trace.json
+examples/operator-code/trace.json
+examples/operator-code/trace.jsonl
+examples/stream-to-disk/trace.json
+examples/stream-to-disk/trace.jsonl
+examples/trace-propagation/client.jsonl
+examples/trace-propagation/server.jsonl

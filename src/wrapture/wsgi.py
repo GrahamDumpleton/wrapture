@@ -32,6 +32,7 @@ from urllib.parse import unquote_plus
 
 from wrapt import MISSING, CallableObjectProxy
 
+from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of
 from .events import Event
 from .sinks import (
@@ -154,6 +155,20 @@ def _request_data(environ: Mapping[str, Any], policy: CapturePolicy) -> dict[str
         data["query"] = _captured_query(query, policy)
 
     return data
+
+
+def _trace_environ(environ: Mapping[str, Any]) -> dict[str, str]:
+    # The propagation headers the configured trace formats want,
+    # lifted off the environ under their casefolded names.
+
+    headers: dict[str, str] = {}
+
+    for name in _trace.wanted_headers():
+        value = environ.get("HTTP_" + name.upper().replace("-", "_"))
+        if isinstance(value, str):
+            headers[name] = value
+
+    return headers
 
 
 def _content_headers(event: Event, headers: Iterable[tuple[str, str]]) -> None:
@@ -453,6 +468,18 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                     event.data.update(_request_data(environ, args_policy))
                 else:
                     event.data["interface"] = "wsgi"
+
+                # Incoming trace context, parsed at the boundary: the
+                # request joins the caller's distributed trace. With
+                # no recognised headers the event's trace stays None
+                # and the recording path inherits or mints as usual;
+                # with the mechanism disabled (and this binding not
+                # re-enabling it) nothing is parsed at all.
+
+                if _trace._active() or (
+                    binding is not None and getattr(binding, "_trace_root", False)
+                ):
+                    event.trace = _trace.from_headers(_trace_environ(environ))
             finally:
                 _in_recorder.reset(guard)
 

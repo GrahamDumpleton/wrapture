@@ -92,6 +92,13 @@ GET /orders/42?expand=items (myapp.main.application)
 myapp.main.application -> '200 OK' [11.8ms, body 4.1ms over 3 chunks]
 ```
 
+The request boundary is also where distributed trace identity
+arrives: a request carrying a `traceparent` header joins the
+caller's trace, one with none mints a fresh identity, and either way
+every event in the request's tree shares it. The
+[trace identity section](ad-hoc-tracing.md#trace-identity-and-propagation)
+of the ad-hoc tracing guide covers the mechanism.
+
 ## Redacting secrets from recorded requests
 
 Query string redaction is identical to the WSGI middleware's,

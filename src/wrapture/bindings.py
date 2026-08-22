@@ -577,6 +577,12 @@ class Binding:
     after apply().
     """
 
+    # Marks this binding's roots as minting a trace identity even when
+    # the [trace] mechanism is disabled process-wide: the config's
+    # per-entry re-enable, set by an observe entry's trace = true.
+
+    _trace_root: bool = False
+
     def __init__(
         self,
         target: Any,

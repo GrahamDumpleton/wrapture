@@ -872,6 +872,21 @@ def _event_record(event: Event) -> dict[str, Any]:
     if event.previous is not MISSING:
         record["previous"] = _jsonable(event.previous)
 
+    # The trace identity, identity fields only: the span-id register
+    # is runtime plumbing for outbound injection, churning as spans
+    # open, and has no place in a file. trace_id is what joins one
+    # service's lines to another's.
+
+    if event.trace is not None and event.trace.slots:
+        record["trace"] = {
+            name: (
+                {"trace_id": slot.trace_id}
+                if slot.sampled is None
+                else {"trace_id": slot.trace_id, "sampled": slot.sampled}
+            )
+            for name, slot in event.trace.slots.items()
+        }
+
     if event.injected:
         record["injected"] = True
     if event.phase is not None:

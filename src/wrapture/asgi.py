@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from wrapt import MISSING, CallableObjectProxy
 
+from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of
 from .events import Event
 from .sinks import (
@@ -108,6 +109,30 @@ def _encoded_headers(headers: Iterable[tuple[Any, Any]]) -> list[tuple[Any, Any]
         encoded.append((name, value))
 
     return encoded
+
+
+def _trace_scope(scope: Mapping[str, Any]) -> dict[str, str]:
+    # The propagation headers the configured trace formats want,
+    # lifted off the scope's byte-pair header list under their
+    # casefolded names. First occurrence wins, matching how the WSGI
+    # environ collapses repeats.
+
+    wanted = _trace.wanted_headers()
+    headers: dict[str, str] = {}
+
+    for raw_name, raw_value in scope.get("headers") or ():
+        try:
+            name = bytes(raw_name).decode("latin-1").casefold()
+        except (TypeError, ValueError):
+            continue
+
+        if name in wanted and name not in headers:
+            try:
+                headers[name] = bytes(raw_value).decode("latin-1")
+            except (TypeError, ValueError):
+                continue
+
+    return headers
 
 
 def _scope_data(scope: Mapping[str, Any], policy: CapturePolicy) -> dict[str, Any]:
@@ -309,6 +334,18 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                     event.data.update(_scope_data(scope, args_policy))
                 else:
                     event.data["interface"] = "asgi"
+
+                # Incoming trace context, parsed at the boundary: the
+                # request joins the caller's distributed trace. With
+                # no recognised headers the event's trace stays None
+                # and the recording path inherits or mints as usual;
+                # with the mechanism disabled (and this binding not
+                # re-enabling it) nothing is parsed at all.
+
+                if _trace._active() or (
+                    binding is not None and getattr(binding, "_trace_root", False)
+                ):
+                    event.trace = _trace.from_headers(_trace_scope(scope))
             finally:
                 _in_recorder.reset(guard)
 

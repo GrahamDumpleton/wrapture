@@ -1013,6 +1013,82 @@ counted, and a pending entry firing while suspended arrives
 suspended too), and `revert()` takes the whole intervention down
 without restarting the application.
 
+## Trace identity and propagation
+
+wrapture's event linkage, sequence numbers and parent ids, is
+process local. A **trace identity** extends the tree across
+processes: every tree of events carries a distributed trace id, the
+W3C trace context, and the identity travels in the `traceparent`
+header of outbound requests, so two services both observed by
+wrapture join their trace files on one id, with or without any
+tracing backend involved.
+
+**Every tree is a trace.** The mechanism is on by default: a root
+event that inherited no context mints a fresh identity, one random
+id per tree, only while events are being recorded at all, so the
+cost when nothing listens stays nothing. Children share their tree's
+context, readable in code as `event.trace`, and every JSONLines line
+carries the identity under its `trace` key:
+
+```json
+{"seq": 3, "path": "backend:quote", "trace": {"w3c": {"trace_id": "1f4c24c6b0e14f6a9d2c8e5a7b3f9d10", "sampled": true}}}
+```
+
+The [WSGI](wsgi-tracing.md) and [ASGI](asgi-tracing.md) middleware
+are the special case at the ingress boundary: an arriving request
+carrying a `traceparent` header joins the caller's distributed trace
+rather than minting, and its `tracestate` rides along untouched. A
+request with no recognised headers mints as any root does. A
+boundary inside an already-traced tree keeps the enclosing identity
+unless it receives headers of its own, which start a fresh scope for
+its subtree.
+
+On the way out, instrumentation injects the identity into outbound
+traffic. The whole public surface such a probe needs is two
+functions. `wrapture.current_trace()` answers "what trace is this
+operation part of", carrier-agnostic: a probe for a transport with
+no header concept (trace context in a SQL comment, a database
+session variable) reads the slot's ids off it and renders them its
+own way. `wrapture.trace_headers()` is the convenience for any
+carrier of named values, HTTP request headers foremost but equally
+message-queue headers or gRPC metadata: it returns the pairs an
+outbound message made right now should carry, empty when nothing is
+being recorded, so injection is always safe to attempt. A probe is a
+setup hook plus one behaviour stage; the trace-propagation example's
+`urllib_support.py` is the complete pattern, a client and a server
+in two processes sharing ids through nothing but the header.
+
+One invariant governs formats wrapture parses but nothing claims:
+**never break a trace you do not understand**. A request can carry
+several products' trace headers at once (services mid-migration
+send W3C and vendor formats side by side); each configured format
+parses into its own slot, and on egress a slot no tracing sink has
+claimed forwards its headers verbatim, so that product sees this
+service as a transparent hop and its trace stays connected, while a
+claimed slot is rewritten with span ids that really get exported.
+
+Configuration is the top-level `[trace]` table, and the noun is
+deliberate: this switches trace *identities*, never observation,
+recording or sinks:
+
+```toml
+[trace]
+enabled = false        # ids and propagation off process-wide
+formats = ["w3c"]      # the formats to parse at ingress
+
+[[observe]]
+target = "myapp.jobs"
+match = "run_*"
+trace = true           # these roots mint identities anyway
+```
+
+`formats` names the wire formats to recognise, w3c today, with the
+codec registry built for others to join. `trace = true` on an
+observe entry is the case-by-case re-enable under a global disable:
+that entry's roots, a background job wanting an identity for its
+outbound calls, say, mint even while the mechanism is off elsewhere.
+With no `[trace]` table at all, the defaults stand: enabled, w3c.
+
 ## Exporting traces to other tools
 
 Three exporters render a trace for existing tools rather than a

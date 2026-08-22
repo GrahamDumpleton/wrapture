@@ -23,6 +23,7 @@ from typing import Any, Literal
 from wrapt import MISSING
 
 from .capture import REFERENCE
+from .trace import TraceContext
 
 EventKind = Literal["call", "get", "set", "delete", "request", "log"]
 
@@ -134,6 +135,15 @@ class Event:
     phase: int | None = None
     stack: int | None = None
     data: dict[str, Any] = field(default_factory=dict)
+
+    # The distributed trace identity this event's tree carries, shared
+    # by reference with every event in the tree: parsed from incoming
+    # headers at a request boundary, minted at a root otherwise, None
+    # when the trace mechanism is disabled. The identity fields are
+    # written once, before any consumer can read them; only a tracing
+    # sink's span-id register changes afterwards.
+
+    trace: TraceContext | None = field(default=None, repr=False)
 
     @property
     def finished(self) -> bool:

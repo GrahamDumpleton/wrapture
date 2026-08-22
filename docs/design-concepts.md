@@ -200,6 +200,21 @@ tree. The same events flow to sinks, so a config file's `[[log]]`
 entries put an application's log messages into its trace with no
 code changes.
 
+## Trace identity: one trace across processes
+
+Event linkage is process local; a **trace identity** extends it. On
+by default, every tree of events carries a W3C trace id, minted at
+the root or joined from an arriving request's `traceparent` header,
+shared by every event in the tree and stamped on every serialised
+line, so two services both observed by wrapture join their trace
+files on one id with no tracing backend involved. Instrumentation
+injects the identity into outbound requests through a two-function
+public surface, `current_trace()` and `trace_headers()`, and formats
+wrapture parses but nothing claims pass through verbatim: it never
+breaks a trace it does not understand. The `[trace]` config table
+switches identities off process-wide, with `trace = true` on an
+observe entry as the case-by-case re-enable.
+
 ## From tests to tracing
 
 Take the same bindings, remove the test around them, and the
@@ -240,6 +255,7 @@ is the reference for all of it.
 | `mock(Spec)` | A made-up collaborator, strictly shaped by its spec | [Unit testing](unit-testing.md) |
 | `bound()` / `taped()` | The with-block's meaning as decorators, handles injected | [Unit testing](unit-testing.md) |
 | Log capture | Log messages as events, nested in the call that emitted them | [Unit testing](unit-testing.md), [Ad-hoc tracing](ad-hoc-tracing.md) |
+| Trace identity | Every tree carries a distributed trace id, propagated over HTTP | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Sinks | Where events go outside a test: print, stream, count, compose | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Config and injection | `wrapture.toml` plus a launcher or autowrapt: tracing without code changes | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Request tracing | Events grouped per WSGI/ASGI request | [WSGI](wsgi-tracing.md), [ASGI](asgi-tracing.md) |

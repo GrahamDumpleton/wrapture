@@ -25,6 +25,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from wrapt import MISSING
 
+from . import trace as _trace
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
 from .events import Event, _format_time, _own_time
@@ -477,6 +478,18 @@ def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
     event.parent_id = parent.seq if parent is not None else None
     event.depth = len(stack)
 
+    # Trace identity. An event arriving with a context already set (a
+    # request boundary that parsed incoming headers) keeps it, shading
+    # its subtree; otherwise a nested event shares its parent's by
+    # reference, and a root mints one when the mechanism is enabled,
+    # process-wide or by this root's binding. Every tree is a trace.
+
+    if event.trace is None:
+        if parent is not None:
+            event.trace = parent.trace
+        elif _trace._active() or getattr(event.binding, "_trace_root", False):
+            event.trace = _trace.mint()
+
     return _stack.set(stack + (event,))
 
 
@@ -508,6 +521,47 @@ def current_event() -> Event | None:
 
     stack = _stack.get()
     return stack[-1] if stack else None
+
+
+def current_trace() -> _trace.TraceContext | None:
+    """The distributed trace identity of the in-flight event's tree,
+    or None when nothing is being recorded or the tree carries none.
+
+    This is the read half of the public surface instrumentation
+    packages build on: what trace is this operation part of. Treat
+    the returned context as read only; the write side belongs to
+    tracing sinks, which are internals territory.
+    """
+
+    event = current_event()
+    return event.trace if event is not None else None
+
+
+def trace_headers() -> dict[str, str]:
+    """The name-value pairs an outbound message sent now should carry,
+    so the service it reaches joins this tree's distributed trace.
+
+    The injection convenience for any carrier of named values: HTTP
+    request headers foremost, and equally message-queue headers or
+    gRPC metadata; a probe calls this and merges the result into
+    whatever it is sending. Claimed and minted identities render from
+    their current ids; formats that arrived in headers and were never
+    claimed forward verbatim, so a product wrapture has no sink for
+    sees a transparent hop rather than a broken trace. Empty when
+    nothing is being recorded or the tree carries no identity, so
+    injection is always safe to attempt.
+
+    A carrier with no header concept (trace context in a SQL comment,
+    say) reads current_trace() instead and renders the slot's ids its
+    own way, forgoing the verbatim pass-through only headers can
+    honour.
+    """
+
+    context = current_trace()
+    if context is None:
+        return {}
+
+    return _trace.headers_for(context)
 
 
 def annotate(**data: Any) -> None:

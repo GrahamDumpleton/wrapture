@@ -1,0 +1,23 @@
+# The server half: wrap the WSGI application in the recording
+# middleware and observe the helper beneath it. The middleware parses
+# the traceparent header the client's probe injected, so every tree
+# recorded here carries the client's trace id rather than minting its
+# own.
+
+pythonpath = "."
+
+[[observe]]
+target = "backend"
+name = "app"
+mode = "wsgi"
+
+[[observe]]
+target = "backend"
+name = "quote"
+
+[[sink]]
+type = "printer"
+
+[[sink]]
+type = "jsonlines"
+path = "server.jsonl"
