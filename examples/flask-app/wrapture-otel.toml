@@ -21,10 +21,11 @@ call = "wrapture_local.flask_support:instrument"
 type = "printer"
 
 # One registration for every OTel signal: shared facts at the top,
-# per-signal tuning nested beneath.
+# per-signal tuning nested beneath. The sink ships in wrapture
+# itself; the wrapture[otel] extra supplies its dependencies.
 
 [[sink]]
-type = "wrapture_local.otel_support:sink"
+type = "wrapture.otel:sink"
 service_name = "flask-shop"
 signals = ["traces", "metrics"]
 

@@ -201,8 +201,9 @@ feeds the same events into the semantic-convention
 per-path `wrapture.call.duration` histogram whose error series split
 out by exception type, and a counter of operations begun.
 
-Both sinks live in `wrapture_local/otel_support.py`, the stand-in
-for what a wrapture-otel package would ship, and one `[[sink]]`
+Both sinks ship in wrapture itself, as the `wrapture.otel`
+subpackage, with the OpenTelemetry dependencies behind the
+`wrapture[otel]` extra, and one `[[sink]]`
 entry registers them: its `signals` key says which signals are on,
 shared facts like `service_name` sit at the top of the table, and
 per-signal tuning nests beneath it (`[sink.metrics]` sets
@@ -216,7 +217,7 @@ collector on OTLP over http/protobuf, so the demo needs no
 environment setup at all:
 
 ```console
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+$ uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
@@ -237,7 +238,7 @@ runs. The explicit port stays clear of macOS AirPlay, which listens
 on 5000:
 
 ```console
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+$ uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml -m flask --app myapp run --port 5001
 ```
 
@@ -260,11 +261,11 @@ growing at exactly the rate of the `/quote/missing` hits.
 
 With no collector at hand, `OTEL_TRACES_EXPORTER=console` and
 `OTEL_METRICS_EXPORTER=console` dump the spans and metrics to
-standard output instead, for which the sdk alone suffices:
+standard output instead:
 
 ```console
 $ OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console \
-    uv run --with flask --with opentelemetry-sdk \
+    uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 

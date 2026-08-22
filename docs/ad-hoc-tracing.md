@@ -1244,15 +1244,15 @@ sequenceDiagram
 ### Live traces in OpenTelemetry: a sink
 
 The converters above render a trace after the fact, from a tape or a
-file. Feeding a tracing backend while the application runs is instead
-a job for [a sink of your own](#writing-your-own-sink), and
-OpenTelemetry makes the worked case: the `examples/flask-app`
-directory of the source checkout carries a complete OTel sink
-(`wrapture_local/otel_support.py`), the stand-in for what a
-wrapture-otel package would ship, exporting the demo's request trees
-over OTLP to whatever backend the standard OTel environment variables
-name. The pattern is the same for any backend with a span model; only
-the API names change.
+file. Feeding a tracing backend while the application runs is a job
+for a sink, and OpenTelemetry's is one wrapture ships: the
+`wrapture.otel` subpackage exports request trees over OTLP to
+whatever backend the standard OTel environment variables name, with
+the OpenTelemetry dependencies behind the `wrapture[otel]` extra.
+It is also the worked case for
+[a sink of your own](#writing-your-own-sink) feeding any backend
+with a span model; the pattern is the same, only the API names
+change.
 
 Most of the mapping writes itself, because the two models are close:
 
@@ -1337,7 +1337,7 @@ and each signal's own tuning nests beneath it:
 
 ```toml
 [[sink]]
-type = "wrapture_local.otel_support:sink"
+type = "wrapture.otel:sink"
 service_name = "flask-shop"
 signals = ["traces", "metrics"]
 
@@ -1382,7 +1382,7 @@ the run commands:
 
 ```console
 $ cd examples/flask-app
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+$ uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
