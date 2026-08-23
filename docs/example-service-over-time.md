@@ -365,7 +365,7 @@ Releasing everything the page applied:
 
 The `examples/flask-app` directory in the repository is a real
 version of this scenario: a small Flask shop in `myapp.py` that never
-imports wrapture, and a `wrapture.toml` whose `[[setup]]` hook
+imports wrapture, and a `wrapture.toml` whose `[[instrument]]` entry
 instruments Flask itself, so every request records as one tree with
 its view function beneath it, plus an `[[observe]]` entry for the
 app's own `quote` helper. Its shipped config ends in a printer sink,
@@ -379,9 +379,8 @@ pythonpath = "."
 target = "myapp"
 name = "quote"
 
-[[setup]]
-module = "flask"
-call = "wrapture_local.flask_support:instrument"
+[[instrument]]
+name = "wrapture_local.flask_support:FlaskInstrumentation"
 
 # The raw stream, one file per day, rotated at local midnight.
 [[sink]]
@@ -473,5 +472,5 @@ restarts, and how to write a collector of your own. The
 [ad-hoc tracing page](ad-hoc-tracing.md) covers sinks, output paths
 and rotation, the config file grammar and the runner, and the
 [WSGI request tracing page](wsgi-tracing.md) explains what the
-request events in the stream contain and how the Flask setup hook
-records them.
+request events in the stream contain and how the Flask
+instrumentation records them.

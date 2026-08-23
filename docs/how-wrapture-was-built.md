@@ -21,12 +21,23 @@ things a test most needs to be sure of, that the right calls happened,
 in the right order, with the real code actually running, sit just
 outside what substitution can express.
 
+There is a second thread to this. I was also the original author of
+the New Relic Python agent for their APM product, written while I
+worked there, and that left me with a keen and lasting interest in
+instrumenting Python programs for performance analysis and tracing:
+attaching observation to code you do not control, recording what
+flows through it, and doing so without disturbing the program being
+watched. Testing and tracing look like different problems, but
+underneath they want the same thing, a way to see the real calls as
+they happen.
+
 I had long believed that wrapt's machinery, wrapping real code rather
-than replacing it, could support something better: a testing tool where
-the real call graph stays intact, everything that flows through it is
-recorded and introspectable, and strictness is the default rather than
-an opt-in. wrapture is me finally scratching that itch, and satisfying
-my curiosity about whether the idea held up.
+than replacing it, could serve both: a testing tool where the real call
+graph stays intact, everything that flows through it is recorded and
+introspectable, and strictness is the default rather than an opt-in,
+and, from the same recorded calls, a tracing tool. wrapture is me
+finally scratching that itch, and satisfying my curiosity about whether
+the idea held up.
 
 ## The process
 

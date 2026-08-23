@@ -1,7 +1,7 @@
 # The client half again, exporting to OpenTelemetry as well as
-# printing. Same observation and urllib probe as client.toml; the
+# printing. Same observation and urllib instrumentation as client.toml; the
 # [otel] table adds the span export, and its sink claims each tree's
-# identity, so the id the probe injects into the traceparent header
+# identity, so the id the instrumentation injects into the traceparent header
 # is the id of a span the backend really has. Run with the otel
 # extra:
 #
@@ -13,9 +13,8 @@ pythonpath = "."
 target = "frontend"
 match = "*"
 
-[[setup]]
-module = "urllib.request"
-call = "wrapture_local.urllib_support:instrument"
+[[instrument]]
+name = "wrapture_local.urllib_support:UrllibInstrumentation"
 
 [[sink]]
 type = "printer"

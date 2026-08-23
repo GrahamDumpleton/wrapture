@@ -100,11 +100,12 @@ inside a `wrapture.when_imported` hook for the module, which runs with
 the module as soon as it is imported (see
 [patching a module before it is imported](monkey-patching.md#patching-a-module-before-it-is-imported)).
 
-The config layer's `[[observe]]` and `[[setup]]` entries are the same
-idea in file form: applying a config registers a post-import hook per
-target and constructs the bindings when the module arrives, so
-zero-code configuration does not carry this restriction. Deferral is a
-property of when the hook runs, never a state a binding models.
+The config layer's `[[observe]]` and `[[instrument]]` entries are the
+same idea in file form: applying a config registers a post-import hook
+per target or trigger module and constructs the bindings when the
+module arrives, so zero-code configuration does not carry this
+restriction. Deferral is a property of when the hook runs, never a
+state a binding models.
 
 ## Calls on other threads may not be recorded
 

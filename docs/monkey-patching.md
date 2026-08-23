@@ -1118,7 +1118,7 @@ variable is gone as soon as it returns and the handle is what
 the same without the decorator, for patches built in a loop or from
 data. [Changing what a third-party library does](example-third-party-libraries.md#applying-before-the-library-is-imported)
 walks through a hook firing on a real import, and the config file's
-`[[setup]]` entry, described in
+`[[instrument]]` entry, described in
 [configuring from a file](ad-hoc-tracing.md#configuring-from-a-file),
 gives the same trigger without any code in the application.
 

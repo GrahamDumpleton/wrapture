@@ -25,6 +25,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
+    "packaging>=24.0",
     "wrapt>=2.4.0rc5",
 ]
 

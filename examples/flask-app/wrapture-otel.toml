@@ -13,9 +13,8 @@ pythonpath = "."
 target = "myapp"
 name = "quote"
 
-[[setup]]
-module = "flask"
-call = "wrapture_local.flask_support:instrument"
+[[instrument]]
+name = "wrapture_local.flask_support:FlaskInstrumentation"
 
 # The app's own log messages become events, so the logs signal below
 # has something to export; each record lands correlated to the span

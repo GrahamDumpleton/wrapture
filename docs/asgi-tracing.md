@@ -235,8 +235,8 @@ inherited application with no code changes.
 As on the WSGI side, the observe entry form requires knowing where
 the application object lives, and framework applications often are
 the application object themselves rather than delegating to a
-swappable attribute. A setup hook triggered by the framework's own
-import can interpose at a construction-time choke point instead,
+swappable attribute. An instrumentation triggered by the framework's
+own import can interpose at a construction-time choke point instead,
 with `when=False` keeping the plumbing itself out of the trace; the
 fastapi-app example in the repository's
 [examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)

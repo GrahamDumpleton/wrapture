@@ -226,20 +226,27 @@ The observe entry form requires knowing where the application object
 lives. For the out-of-box experience, where a config should not have
 to name the app at all, and for application-factory patterns where
 no importable attribute ever holds it, the middleware is also usable
-directly, and a setup hook triggered by the framework's own import
-can install it on every instance at construction:
+directly, and an instrumentation triggered by the framework's own
+import can install it on every instance at construction:
 
 ```python
-def instrument(module):
-    def wrap_app(wrapped, instance, args, kwargs):
-        outcome = wrapped(*args, **kwargs)
-        instance.wsgi_app = wrapture.WSGIMiddleware(
-            instance.wsgi_app, label=f"{instance.name}.wsgi_app"
-        )
-        return outcome
+class FlaskInstrumentation(wrapture.Instrumentation):
+    target = "flask"
+    modules = ("flask",)
+    removable = True
 
-    wrapture.binding(module.Flask, "__init__", when=False) \
-        .on_call.decorates(wrap_app).apply()
+    def apply(self, name, module):
+        def wrap_app(wrapped, instance, args, kwargs):
+            outcome = wrapped(*args, **kwargs)
+            instance.wsgi_app = wrapture.WSGIMiddleware(
+                instance.wsgi_app, label=f"{instance.name}.wsgi_app"
+            )
+            return outcome
+
+        constructor = wrapture.binding(module.Flask, "__init__", when=False)
+        constructor.on_call.decorates(wrap_app).apply()
+
+        self.on_remove(constructor.remove)
 ```
 
 The `when=False` makes this a behaviour-only binding: it installs the
@@ -249,9 +256,9 @@ it exists to produce.
 
 Pair it with a binding on the framework's route-registration choke
 point substituting `observed()` on each view function, and one
-`[[setup]]` entry instruments the whole framework; shipped as an
+`[[instrument]]` entry instruments the whole framework; shipped as an
 installed package with an entry point, the config reduces to
-`[[setup]]` with a `group` key. The flask-app example in the
+`[[instrument]]` with `name = "flask"`. The flask-app example in the
 repository's
 [examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
 is this pattern in full.

@@ -15,7 +15,10 @@ type = "printer"
 type = "jsonlines"
 path = "trace.jsonl"
 
-[[setup]]
-module = "shop"
-call = "wrapture_local.hooks:instrument"
+# A local instrumentation class, named by reference; the extra key is
+# one of the settings the class declares, validated against that
+# declaration when the file loads.
+
+[[instrument]]
+name = "wrapture_local.hooks:ShopInstrumentation"
 threshold = 400

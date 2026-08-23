@@ -634,9 +634,9 @@ match = "parse_*"
 type = "jsonlines"
 path = "trace.jsonl"
 
-[[setup]]
-module = "myapp.orders"
-call = "wrapture_local.hooks:instrument_orders"
+[[instrument]]
+name = "wrapture_local.hooks:OrdersInstrumentation"
+tenants = ["acme", "globex"]
 ```
 
 ### Choosing what to observe
@@ -846,23 +846,22 @@ long-lived processes: a live exception keeps its traceback frames
 for the event's lifetime, so `logging.exception()` in a hot loop is
 a heavier capture than the message alone.
 
-### Setup callbacks: running code at apply time
+### Instrumentation: code that patches a target
 
 Declarative `[[observe]]` entries cover plain observation. Everything
 richer (behaviour pipelines, redaction policies, `when=` predicates,
-iterator proxies) lives in ordinary Python that a `[[setup]]` entry
-triggers at the right moment: `call` names a `module:attr` callable
-invoked with the module named by `module` as soon as that module is
-imported, or immediately if it already was.
-
-Any other key on the entry rides through to the handler as a keyword
-argument, the same convention a `[[sink]]` entry uses, so one
-generic handler can be specialised per deployment from the file:
+iterator proxies, a framework's choke points) lives in ordinary
+Python, and the config's way of running such code at the right moment
+is an **instrumentation**: a subclass of `wrapture.Instrumentation`
+that declares, as class data, the one target package it covers and
+the trigger modules under it, and whose `apply(name, module)` is
+called once per trigger module when that module is imported, or
+immediately if it already was. An `[[instrument]]` entry names the
+class, and its remaining keys are the class's declared settings:
 
 ```toml
-[[setup]]
-module = "myapp.orders"
-call = "wrapture_local.hooks:instrument_orders"
+[[instrument]]
+name = "wrapture_local.hooks:OrdersInstrumentation"
 tenants = ["acme", "globex"]
 ```
 
@@ -870,56 +869,124 @@ tenants = ["acme", "globex"]
 # wrapture_local/hooks.py
 import wrapture
 
-def instrument_orders(module, *, tenants=()):
-    def traced_tenant(instance, args, kwargs):
-        return kwargs.get("tenant") in tenants
 
-    wrapture.binding(module.OrderService, "restock",
-                     when=traced_tenant).apply()
+class OrdersInstrumentation(wrapture.Instrumentation):
+    """Restock tracing for the tenants named in the config."""
+
+    target = "myapp"
+    modules = ("myapp.orders",)
+    removable = True
+    settings = {
+        "tenants": wrapture.Setting((), "tenants whose restocks are traced"),
+    }
+
+    def apply(self, name, module):
+        tenants = self.settings["tenants"]
+
+        def traced_tenant(instance, args, kwargs):
+            return kwargs.get("tenant") in tenants
+
+        restock = wrapture.binding(module.OrderService, "restock",
+                                   when=traced_tenant)
+        restock.apply()
+
+        self.on_remove(restock.remove)
 ```
 
-With no extra keys the handler is called with just the module, so a
-plain `handler(module)` signature keeps working; option values are
-limited to what TOML can express, and a handler rejecting an option
-(a typo, say) follows the usual failure posture below. Unlike sink
-references, the handler reference resolves only when the hook fires:
-by then the trigger module is mid-import anyway, so naming operator
-code here can never cause it to be imported ahead of the module it
-instruments.
+The pieces, in the order they matter:
 
-A package can also ship a whole family of handlers (instrumentation
-for every interesting module of a framework, say) and have the
-config activate it with one entry. The package declares the family
-as entry points in its own metadata, entry name the trigger module
-and target the handler, the same shape wrapt's own hook discovery
-reads:
+- `target` is exactly one top-level import name and every entry in
+  `modules` must live under it; a class claiming a module outside its
+  target is refused the moment it is defined. The target is what the
+  conflict check works on: two enabled entries for one target are a
+  `ConfigError` when the config is built, and since every trigger
+  lives under its target, that is also what stops one module being
+  patched twice.
+- `settings` declares every key the entry may carry, each a
+  `Setting(default, description)`. Declaration is what makes the
+  file validated rather than passed through blind: an unknown key is
+  a `ConfigError` at load (the `tenats` typo fails there, not inside
+  the hook), and so is a value whose outer type does not match the
+  default's (a string where the default is an integer, a scalar where
+  it is a list). What is inside a list or table is the class's own
+  business, checked in `configure()` if it needs checking, which runs
+  once after construction and before any trigger fires, so a
+  `ConfigError` raised there still surfaces at apply time. The
+  resolved values, class defaults under the entry's, are
+  `self.settings` on the instance.
+- `apply()` is the one door. Inside it, import whatever touches the
+  target (the module defining the class imports only wrapture, so
+  that loading the class never imports the package it is about to
+  patch), build the patches, and register the undo with
+  `self.on_remove(callback)`, tagged automatically with the trigger
+  being applied. Bindings are the common case, and the recipe is
+  three lines: build a `wrapture.bindings(...)` group, `group.apply()`,
+  `self.on_remove(group.remove)`. Override `remove(name, module)`
+  instead for a centralised teardown.
+- `removable = True` is the class's claim that it can undo itself.
+  It defaults to false, so a package has to say so; the claim governs
+  `report()` and the warning `revert()` gives, and the undo callbacks
+  run either way.
+- `name`, `description` and `version` default from the entry point
+  and distribution for a packaged instrumentation, and to the target,
+  the class docstring's first line and nothing for a local one.
 
-```toml
-# the wrapture-flask package's pyproject.toml
-[project.entry-points.wrapture_flask]
-"flask.app" = "wrapture_flask.hooks:instrument_app"
-"flask.blueprints" = "wrapture_flask.hooks:instrument_blueprints"
-```
+The `name` key takes three spellings. A `module:attr` reference, as
+above, names a class by its location: operator code next to the
+config file, made importable by `pythonpath`, or a package under
+test. A bare name such as `flask` names an instrumentation an
+installed package registered in the `wrapture.instrumentation` entry
+point group (one entry per class, the entry point name being the
+instrumentation's name, so one distribution can ship instrumentation
+for many packages); it resolves when exactly one installed
+distribution registers it. And `name@distribution`, as in
+`requests@wrapture-instrumentation-acme`, picks between two
+distributions that register the same name, the part after `@` being
+the distribution name as `pip list` shows it, matched after the usual
+name normalisation; a bare name two distributions register is a
+`ConfigError` listing the qualified spellings to choose from. `enabled
+= false` keeps an entry in the file but inert: still validated, but
+applying nothing, taking part in no conflict check and satisfying no
+requirement, which is what lets a generated file be shipped with
+every entry present and switched off. A class may also declare
+`requires`, other targets that must have an enabled instrumentation
+in the same config; requirements are never pulled in automatically,
+and a missing one is a `ConfigError` naming the target.
 
-The config names the group instead of a module and call (the two
-forms are mutually exclusive), and any extra keys go to every
-handler in the family:
+Applying is as deferred as observing: each trigger module gets one
+post-import hook, which fires immediately for a module already
+imported and otherwise when the application imports it, and an
+`apply()` that raises from inside an application import warns and
+lets the import continue, exactly as a failing observe entry does.
+The installed version of the target, read from package metadata, is
+what a class's `supports` range (a PEP 440 specifier) and any
+per-module range in `modules` (`{"flask.app": None,
+"flask.sansio.app": ">=2.3"}`) are checked against before anything
+fires: a version outside the range registers nothing for the
+affected triggers and warns with `ConfigWarning`, never an error,
+because an environment newer or older than the package is not a
+misconfiguration. `AppliedConfig.instrumentations` is the live record
+of each applied instance, with its settings in effect, the target
+version found, and `applied` and `pending` trigger lists; `report()`
+shows the same; and `revert()` removes each in reverse application
+order through its own `remove()`, neutralising the hooks that never
+fired, so instrumentation is no longer outside what a config can
+undo.
 
-```toml
-[[setup]]
-group = "wrapture_flask"
-capture_headers = false
-```
-
-Discovery reads metadata alone at apply time, importing nothing, and
-each handler still resolves only when its own module arrives. A
-group with no entry points is a loud `ConfigError`, since it means a
-misspelled name or an uninstalled package. Because the entry point
-shape is exactly wrapt's convention, a family whose handlers default
-every option is equally usable through raw
-`wrapt.discover_post_import_hooks()`; the config route adds the
-options, the failure posture, and the config file's control over
-when it all happens.
+What is installed, and what a file could switch on, is a command
+away: `python -m wrapture.tools instrumentation` lists every
+registered instrumentation from class data alone, applying nothing
+(distribution and version, target and installed version with the
+support verdict, triggers, requirements, settings with defaults,
+removability); `--config PATH` adds the file's own reference-form
+classes and marks the entries it selects; and `--toml` writes
+`[[instrument]]` entries to standard output instead, one per installed
+instrumentation, every one `enabled = false` and every setting a
+commented-out line at its default with its description beside it, so
+un-commenting a line is the whole act of configuring. [Writing an
+instrumentation package](instrumentation-packages.md) covers the
+packaging side: the entry point, the import-light rule, the naming
+convention, and testing the class directly.
 
 Framework instrumentation has one more call to know about. A
 framework routinely catches the exception a view raised and hands it
@@ -976,19 +1043,21 @@ and the posture depends on when that is. Fired during apply itself
 hear and raises. Fired later, from inside the application's own
 import of the module, it warns with `ConfigWarning` and drops the
 entry instead, because observation must never fail the import it
-rode in on; a setup callback that raises after apply is handled the
-same way.
+rode in on; an instrumentation whose `apply()` raises after apply is
+handled the same way.
 
 The same setup is available programmatically as the `Config` class
-with `ObserveEntry` and `SetupEntry` values, which is exactly what
-the loader builds: the file can say nothing that `Config` cannot,
-and code can additionally pass live objects, a constructed sink or a
-callable capture policy, where the file is limited to what TOML can
-spell. `apply()` returns the live `AppliedConfig` record: `bindings`
-grows as hooks fire, `pending` names the entries still waiting,
-`report()` renders the whole picture as text, which is the way to
-ask an injected process what is actually installed, and `revert()`
-takes everything down again, neutralising hooks that have not fired.
+with `ObserveEntry` and `InstrumentEntry` values, which is exactly
+what the loader builds: the file can say nothing that `Config`
+cannot, and code can additionally pass live objects, a constructed
+sink, a callable capture policy or an `Instrumentation` subclass
+itself, where the file is limited to what TOML can spell. `apply()`
+returns the live `AppliedConfig` record: `bindings` grows as hooks
+fire, `pending` names the entries still waiting, `instrumentations`
+holds each applied instrumentation, `report()` renders the whole
+picture as text, which is the way to ask an injected process what is
+actually installed, and `revert()` takes everything down again,
+neutralising hooks that have not fired.
 
 ### Zero-code runs: python -m wrapture
 
@@ -1023,8 +1092,9 @@ Runnable demonstrations of this whole workflow live in the
 [examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
 of the repository: a live printer over an order flow, a threaded
 pipeline streamed to disk and rendered in Perfetto, and an
-operator-code bundle showing `pythonpath`, a setup callback and a
-sink factory together. Each is a directory to `cd` into and run.
+operator-code bundle showing `pythonpath` and a local instrumentation
+class with a setting read from the file. Each is a directory to `cd`
+into and run.
 
 ## Injection without a launcher: autowrapt
 
@@ -1180,19 +1250,20 @@ still joins its own trace, since ingress parsing at the boundary is
 independent of root minting.
 
 On the way out, instrumentation injects the identity into outbound
-traffic. The whole public surface such a probe needs is two
-functions. `wrapture.current_trace()` answers "what trace is this
-operation part of", carrier-agnostic: a probe for a transport with
-no header concept (trace context in a SQL comment, a database
-session variable) reads the slot's ids off it and renders them its
-own way. `wrapture.trace_headers()` is the convenience for any
+traffic. The whole public surface such an instrumentation needs is
+two functions. `wrapture.current_trace()` answers "what trace is this
+operation part of", carrier-agnostic: an instrumentation for a
+transport with no header concept (trace context in a SQL comment, a
+database session variable) reads the slot's ids off it and renders
+them its own way. `wrapture.trace_headers()` is the convenience for any
 carrier of named values, HTTP request headers foremost but equally
 message-queue headers or gRPC metadata: it returns the pairs an
 outbound message made right now should carry, empty when nothing is
-being recorded, so injection is always safe to attempt. A probe is a
-setup hook plus one behaviour stage; the trace-propagation example's
-`urllib_support.py` is the complete pattern, a client and a server
-in two processes sharing ids through nothing but the header.
+being recorded, so injection is always safe to attempt. Such an
+instrumentation is one `Instrumentation` class with one behaviour
+stage; the trace-propagation example's `urllib_support.py` is the
+complete pattern, a client and a server in two processes sharing ids
+through nothing but the header.
 
 W3C trace context is the one wire format wrapture speaks. The
 ecosystem has converged on it, and vendor baggage rides inside the

@@ -22,7 +22,9 @@ extensions = [
     "myst_parser",
 ]
 
-myst_heading_anchors = 2
+# Heading anchors to depth 3, so a guide's subsections (the h3 level) can
+# be linked from other pages by their slug.
+myst_heading_anchors = 3
 
 exclude_patterns = ["_build"]
 

@@ -1031,6 +1031,7 @@ wheels = [
 name = "wrapture"
 source = { editable = "." }
 dependencies = [
+    { name = "packaging" },
     { name = "wrapt" },
 ]
 
@@ -1072,6 +1073,7 @@ requires-dist = [
     { name = "myst-parser", marker = "extra == 'docs'" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'" },
+    { name = "packaging", specifier = ">=24.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "setuptools", marker = "extra == 'dev'" },

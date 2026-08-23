@@ -9,16 +9,18 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
-from . import convert
+from . import convert, instrumentation
 
 _USAGE = """\
 usage: python -m wrapture.tools COMMAND [options]
 
-Command line tools over recorded traces. Commands:
+Command line tools over recorded traces and the environment. Commands:
 
-  convert   render a JSONLines trace file in another format:
-            chrome (Perfetto timeline), mermaid (sequence diagram),
-            canonical (snapshot text tree)
+  convert          render a JSONLines trace file in another format:
+                   chrome (Perfetto timeline), mermaid (sequence
+                   diagram), canonical (snapshot text tree)
+  instrumentation  list the instrumentation installed in this
+                   environment, or write [[instrument]] entries for it
 
 python -m wrapture.tools COMMAND -h shows each command's options.
 """
@@ -39,8 +41,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         convert.main(rest)
         return
 
+    if command == "instrumentation":
+        instrumentation.main(rest)
+        return
+
     print(
-        f"wrapture: unknown command {command!r}: expected convert",
+        f"wrapture: unknown command {command!r}: expected convert or instrumentation",
         file=sys.stderr,
     )
     print(_USAGE, file=sys.stderr, end="")

@@ -1,6 +1,6 @@
 # The server half: wrap the WSGI application in the recording
 # middleware and observe the helper beneath it. The middleware parses
-# the traceparent header the client's probe injected, so every tree
+# the traceparent header the client's instrumentation injected, so every tree
 # recorded here carries the client's trace id rather than minting its
 # own.
 
