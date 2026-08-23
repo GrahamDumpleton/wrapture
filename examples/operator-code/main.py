@@ -5,10 +5,10 @@ Run from this directory:
     uv run python -m wrapture main.py
 
 The config's pythonpath entry makes the wrapture_local package next
-to it importable, its setup callback binds the gateway with a when=
-predicate whose threshold comes from the config file itself, and its
-sink factory fans events out to a live printer and trace.jsonl at
-once.
+to it importable, its [[instrument]] entry names a local
+Instrumentation class that binds the gateway with a when= predicate
+whose threshold comes from the config file itself, and its two sink
+entries fan events out to a live printer and trace.jsonl at once.
 """
 
 from __future__ import annotations

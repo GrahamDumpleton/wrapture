@@ -51,12 +51,13 @@ $ AUTOWRAPT_BOOTSTRAP=wrapture python main.py
 
 The output is identical to the runner's, because the runner and
 autowrapt are two triggers for the same config machinery. The config
-applies during interpreter startup, but observe entries defer:
-bindings land when the application itself imports the observed
-module, so nothing has to be importable that early. Only
-operator-code carries a `pythonpath` entry, because its sink factory
-resolves when the config loads and lives in an uninstalled package
-next to it.
+applies during interpreter startup, but observe entries and
+instrumentation defer: bindings land when the application itself
+imports the observed module, so nothing has to be importable that
+early. The examples carrying a local instrumentation class next to
+the config also carry a `pythonpath` entry, because the class itself
+(though not the code it patches) is imported when the config loads
+and lives in an uninstalled package beside it.
 
 ## live-printer
 
@@ -118,11 +119,16 @@ config file, reached only by the references in `wrapture.toml`.
 - `pythonpath = "."` is anchored to the config file's directory, so
   the `wrapture_local` package beside it is importable however the
   process was launched.
-- The `[[setup]]` entry names a callback that runs when the `shop`
-  module is imported; it binds the gateway with a `when=` predicate,
-  and the entry's extra `threshold` key reaches the callback as a
-  keyword argument, so of the six charges made only the two over 400
-  are recorded, with the cutoff adjustable in the config file alone.
+- The `[[instrument]]` entry names a local `Instrumentation` class by
+  reference, `wrapture_local.hooks:ShopInstrumentation`, whose
+  `apply()` runs when the `shop` module is imported and binds the
+  gateway with a `when=` predicate. The entry's extra `threshold` key
+  is one of the settings the class declares, validated against that
+  declaration when the file loads (misspell it and the load fails
+  loudly), so of the six charges made only the two over 400 are
+  recorded, with the cutoff adjustable in the config file alone. The
+  class registers its binding's removal with `on_remove()`, so the
+  patch comes down again with the config.
 - Two `[[sink]]` entries fan out to a live printer and a JSONLines
   file; a relative sink path is anchored to the config file's
   directory just as `pythonpath` is.
@@ -146,12 +152,13 @@ every HTTP request prints as one tree, the request line, the view
 handler and its helpers nested beneath it, and the status when the
 body closes.
 
-All the Flask knowledge lives in one setup hook
+All the Flask knowledge lives in one `Instrumentation` class
 (`wrapture_local/flask_support.py`), triggered by the import of
-`flask` itself, a stand-in for what a wrapture-flask package would
-ship; packaged with an entry point, the config would say `[[setup]]`
-with `group = "wrapture_flask"` and nothing else. The hook patches
-Flask's three choke points:
+`flask` itself, a stand-in for what a wrapture-instrumentation-flask
+package would ship; packaged with an entry point, the config would
+say `[[instrument]]` with `name = "flask"` and nothing else, where
+here it names the class by reference. Its `apply()` patches Flask's
+three choke points:
 
 - `Flask.__init__` installs the recording WSGI middleware on each
   new instance's `wsgi_app` attribute, so every application the
@@ -166,7 +173,7 @@ Flask's three choke points:
 - `Flask.handle_exception` is where a view's exception ends up once
   Flask has caught it, on its way to becoming the 500 response, so
   the request itself completes normally with a status and no
-  exception. The hook's behaviour on it calls
+  exception. The binding's behaviour on it calls
   `wrapture.note_exception()` aimed at the enclosing request event
   (`current_event(kind="request")`), so the request shows the
   failure beside its status: `!! KeyError` after the `500` on the
@@ -305,12 +312,12 @@ The same out-of-box APM experience for the async world: the same
 small shop as flask-app, written with FastAPI, whose code never
 mentions wrapture and whose config never names the app.
 
-All the FastAPI knowledge lives in one setup hook
+All the FastAPI knowledge lives in one `Instrumentation` class
 (`wrapture_local/fastapi_support.py`), triggered by the import of
-`fastapi` itself, the stand-in for a wrapture-fastapi package. The
-choke points differ from Flask's because a FastAPI instance is
-itself the ASGI application, with no swappable attribute like
-`wsgi_app`:
+`fastapi` itself, the stand-in for a wrapture-instrumentation-fastapi
+package. The choke points differ from Flask's because a FastAPI
+instance is itself the ASGI application, with no swappable attribute
+like `wsgi_app`:
 
 - `FastAPI.build_middleware_stack` wraps the middleware pipeline the
   instance builds once, lazily, at its first request, in the
@@ -359,13 +366,14 @@ into making the request and consuming the reply body, the two
 phases urllib's `open()` cannot separate by itself since the
 response object escapes the call with its body unread.
 
-The moving parts are the mechanism's defaults plus one probe. Trace
-identity is on by default, so every client tree mints an id at its
-root. The setup hook in `wrapture_local/urllib_support.py`, the
-stand-in for what a wrapture-probe-urllib package would ship, binds
-urllib's opener so each outbound request records as a client-side
-call and carries `wrapture.trace_headers()` in its headers, the
-whole public surface a probe needs. On the server, the WSGI
+The moving parts are the mechanism's defaults plus one
+instrumentation. Trace identity is on by default, so every client
+tree mints an id at its root. The `Instrumentation` class in
+`wrapture_local/urllib_support.py`, the stand-in for what a
+wrapture-instrumentation-urllib package would ship, binds urllib's
+opener so each outbound request records as a client-side call and
+carries `wrapture.trace_headers()` in its headers, the whole public
+surface such an instrumentation needs. On the server, the WSGI
 middleware parses the incoming header at the boundary, so that
 process's trees join the client's trace instead of minting their
 own.
@@ -409,8 +417,9 @@ The directory carries a second pair of configs, `client-otel.toml`
 and `server-otel.toml`, that add OpenTelemetry export on both sides
 (the `wrapture[otel]` extra supplies the dependencies), which turns
 the same run into the cross-service correlation demo. The client
-side's sink claims each tree's identity, so the id the probe
-injects is the id of a span the backend really has; the server
+side's sink claims each tree's identity, so the id the
+instrumentation injects is the id of a span the backend really has;
+the server
 side's sink creates each request span with the arrived identity as
 a remote parent. In an OTel viewer each order is then one
 distributed trace: the `order-frontend` spans with the

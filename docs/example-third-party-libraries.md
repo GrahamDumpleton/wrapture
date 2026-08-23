@@ -352,14 +352,14 @@ where the patches are built in a loop or from data.
 ```
 
 The config layer offers the same trigger without any code in the
-application. A `[[setup]]` entry names a trigger module and a
-callback: the callback runs with the module as its argument as soon
-as that module is imported, or immediately if it already was, and the
-binding it creates lands before the application's first call. Applied
-by `python -m wrapture` or by autowrapt, the config is in place before
-the application imports anything, so the ordering nothing enforced in
-the naive version is now guaranteed by the launcher. The last section
-shows the file.
+application. An `[[instrument]]` entry names an `Instrumentation`
+class whose `apply()` runs with the module as its argument as soon as
+the trigger module is imported, or immediately if it already was, and
+the binding it creates lands before the application's first call.
+Applied by `python -m wrapture` or by autowrapt, the config is in
+place before the application imports anything, so the ordering nothing
+enforced in the naive version is now guaranteed by the launcher. The
+last section shows the file.
 
 ## Recording calls without recording the token
 
@@ -426,18 +426,17 @@ rather than pretending.
 
 Everything above ran in a process that already had the library
 imported. To install the header patch at startup, without the
-application mentioning wrapture, put the binding in a setup callback
-next to a `wrapture.toml`. The `pythonpath` key makes the companion
-code importable, anchored to the config file's own directory, and any
-key on the `[[setup]]` entry other than `module` and `call` is passed
-to the callback as a keyword argument:
+application mentioning wrapture, put the binding in an
+`Instrumentation` class next to a `wrapture.toml`. The `pythonpath`
+key makes the companion code importable, anchored to the config
+file's own directory, and any key on the `[[instrument]]` entry other
+than `name` is one of the settings the class declares:
 
 ```toml
 pythonpath = "."
 
-[[setup]]
-module = "vendored_client"
-call = "wrapture_local.patches:install"
+[[instrument]]
+name = "wrapture_local.patches:ClientInstrumentation"
 tenant = "acme"
 ```
 
@@ -445,29 +444,40 @@ tenant = "acme"
 # wrapture_local/patches.py
 import wrapture
 
-installed: list[wrapture.Binding] = []
 
+class ClientInstrumentation(wrapture.Instrumentation):
+    """Stamp the tenant header on every vendored client request."""
 
-def install(module, *, tenant: str) -> None:
-    def with_tenant(args, kwargs):
-        headers = {**(kwargs.get("headers") or {}), "X-Tenant": tenant}
-        return args, {**kwargs, "headers": headers}
+    target = "vendored_client"
+    modules = ("vendored_client",)
+    removable = True
+    settings = {"tenant": wrapture.Setting("", "the tenant to send")}
 
-    request = wrapture.binding(module.Client, "request")
-    request.on_call.transforms_args(with_tenant)
+    def apply(self, name, module):
+        tenant = self.settings["tenant"]
 
-    installed.append(request.apply())
+        def with_tenant(args, kwargs):
+            headers = {**(kwargs.get("headers") or {}), "X-Tenant": tenant}
+            return args, {**kwargs, "headers": headers}
+
+        request = wrapture.binding(module.Client, "request")
+        request.on_call.transforms_args(with_tenant)
+        request.apply()
+
+        self.on_remove(request.remove)
 ```
 
-The callback receives the freshly imported `vendored_client` module,
-so `module.Client` is the real class, and the binding is created after
-the import it depends on by construction. The callback reference
-resolves only when the hook fires, so naming operator code here never
-causes it to be imported ahead of the library. Keeping the applied
-binding in a module-level list is deliberate: `AppliedConfig.revert()`
-takes down what the config itself installed, but a setup callback's
-work is its own to undo, so hold the handle if you want to `suspend()`
-or `remove()` it later.
+`apply()` receives the freshly imported `vendored_client` module, so
+`module.Client` is the real class, and the binding is created after
+the import it depends on by construction. The module defining the
+class imports only wrapture, so naming it from the config never
+causes the library to be imported ahead of time. Registering the
+binding's `remove()` with `on_remove()` is what puts the patch inside
+what the config can undo: `AppliedConfig.revert()` calls the class's
+`remove()` for every trigger it applied, most recent first, and the
+`threshold`-style setting a typo would have silently dropped is
+instead a `ConfigError` at load, because the declaration says which
+keys exist.
 
 Run the application through the launcher, or point the environment at
 the file:
@@ -486,7 +496,7 @@ applies the same file at interpreter startup, gated on the package
 being installed and `AUTOWRAPT_BOOTSTRAP=wrapture` being set.
 
 Loading a config runs the code it names, so the trust boundary is
-write access to the file. Failures are loud: a callback that raises
+write access to the file. Failures are loud: an `apply()` that raises
 while the config is being applied propagates to the caller, and one
 that raises later, from inside the application's own import of the
 library, warns with `ConfigWarning` and lets the import continue,
@@ -501,6 +511,7 @@ form the pipeline. [Attribute bindings](monkey-patching.md#attribute-bindings)
 covers `on_set` and `on_delete`, and decorating a bound method per
 access. [Configuring from a file](ad-hoc-tracing.md#configuring-from-a-file)
 has the whole file format, including `[[observe]]` entries for pure
-observation and setup handler families declared as entry points, and
+observation and `[[instrument]]` entries naming packaged
+instrumentation by its entry point name, and
 [known limitations](known-limitations.md) lists what a binding cannot
 intercept and why.

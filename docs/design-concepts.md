@@ -250,6 +250,27 @@ schedule or trigger, feeding **collectors** that turn a slice of
 events into a report. The [ad-hoc tracing](ad-hoc-tracing.md) guide
 is the reference for all of it.
 
+## Instrumentation: packaged patching for a target
+
+When the patching a config needs is richer than naming members, it
+is an **instrumentation**: a subclass of `wrapture.Instrumentation`
+declaring the one target package it covers, the trigger modules
+under it, the version range it supports and the settings it takes,
+with an `apply(name, module)` that wrapture calls when each trigger
+is imported and a `remove()` that undoes it. An `[[instrument]]`
+entry names the class, by entry point name for a published package
+(one distribution may register many, one class per target) or by
+`module:attr` reference for a class next to the config file, and
+its other keys are the declared settings, validated at load.
+wrapture checks the declaration (triggers under the target, no two
+instrumentations for one target, requirements present), gates on the
+installed version, reports what each applied instance has done, and
+takes it down again on revert; `wrapture.instrumentation(...)` scopes
+the same to a block in a test, and `python -m wrapture.tools
+instrumentation` lists what an environment has installed and writes
+the template to switch it on. [Writing an instrumentation
+package](instrumentation-packages.md) is the author's guide.
+
 ## Trace identity: one trace across processes
 
 Event linkage is process local; a **trace identity** extends it. On
@@ -288,6 +309,7 @@ observe entry as the case-by-case re-enable.
 | Block events | `block()` declares a stretch of code as an event, children nested under it | [Unit testing](unit-testing.md), [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Sinks | Where events go outside a test: print, stream, count, compose | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Config and injection | `wrapture.toml` plus a launcher or autowrapt: tracing without code changes | [Ad-hoc tracing](ad-hoc-tracing.md) |
+| Instrumentation | A class declaring one target and patching it on import, named from the config | [Ad-hoc tracing](ad-hoc-tracing.md), [Instrumentation packages](instrumentation-packages.md) |
 | Request tracing | Events grouped per WSGI/ASGI request | [WSGI](wsgi-tracing.md), [ASGI](asgi-tracing.md) |
 | Trace identity | Every operation-rooted tree carries a distributed trace id, propagated over HTTP | [Ad-hoc tracing](ad-hoc-tracing.md) |
 | Windows and collectors | Scheduled slices of observation turned into reports | [Scheduled tracing](scheduled-tracing.md) |

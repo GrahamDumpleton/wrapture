@@ -105,7 +105,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     invocation = _parse(sys.argv[1:] if argv is None else argv)
 
     # Resolve and apply the config before anything else happens, so
-    # patches and setup hooks are in place before the target module
+    # patches and instrumentation are in place before the target module
     # imports anything. Finding no config is an error rather than a
     # silent untraced run.
 

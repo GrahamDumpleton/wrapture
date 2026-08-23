@@ -1,12 +1,14 @@
 # Request-tied tracing of a Flask application, with no changes to it
 # and no knowledge of it.
 #
-# All the Flask instrumentation lives in the setup hook, triggered by
-# the import of flask itself: every application instance gets the
-# recording WSGI middleware at construction, and every view function
-# is observed as it registers. The config never names the app. The
-# one observe entry covers this application's own helper, the kind of
-# addition an operator layers on top of the out-of-box experience.
+# All the Flask instrumentation lives in one Instrumentation class,
+# triggered by the import of flask itself: every application instance
+# gets the recording WSGI middleware at construction, every view
+# function is observed as it registers, and the exception Flask
+# catches is noted against the request. The config never names the
+# app. The one observe entry covers this application's own helper, the
+# kind of addition an operator layers on top of the out-of-box
+# experience.
 
 pythonpath = "."
 
@@ -14,9 +16,8 @@ pythonpath = "."
 target = "myapp"
 name = "quote"
 
-[[setup]]
-module = "flask"
-call = "wrapture_local.flask_support:instrument"
+[[instrument]]
+name = "wrapture_local.flask_support:FlaskInstrumentation"
 
 [[sink]]
 type = "printer"

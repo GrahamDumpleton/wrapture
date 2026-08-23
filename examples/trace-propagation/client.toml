@@ -9,9 +9,8 @@ pythonpath = "."
 target = "frontend"
 match = "*"
 
-[[setup]]
-module = "urllib.request"
-call = "wrapture_local.urllib_support:instrument"
+[[instrument]]
+name = "wrapture_local.urllib_support:UrllibInstrumentation"
 
 [[sink]]
 type = "printer"

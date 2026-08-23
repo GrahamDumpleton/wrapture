@@ -429,8 +429,8 @@ Against a real application, none of the above needs to be code. The
 [examples](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
 is a small Flask shop whose `wrapture.toml` installs the WSGI
 middleware on every Flask instance and observes every view function
-from a `[[setup]]` hook, and names the application's own `quote` helper
-in an `[[observe]]` entry. To get the timing view of this page, the
+from an `[[instrument]]` entry, and names the application's own
+`quote` helper in an `[[observe]]` entry. To get the timing view of this page, the
 `[[sink]]` entry is a printer with `timing` on (the default, shown here
 for emphasis), and `depth` gates it to the request, the view and one
 layer beneath:
@@ -442,9 +442,8 @@ pythonpath = "."
 target = "myapp"
 name = "quote"
 
-[[setup]]
-module = "flask"
-call = "wrapture_local.flask_support:instrument"
+[[instrument]]
+name = "wrapture_local.flask_support:FlaskInstrumentation"
 
 [[sink]]
 type = "printer"
@@ -494,5 +493,5 @@ to a file for the exporters afterwards.
   [scheduled tracing](scheduled-tracing.md) turns it into a periodic
   report.
 - [Configuring from a file](ad-hoc-tracing.md#configuring-from-a-file)
-  has the complete config grammar, including `[[setup]]` hooks like the
-  Flask one used above.
+  has the complete config grammar, including `[[instrument]]` entries
+  like the Flask one used above.

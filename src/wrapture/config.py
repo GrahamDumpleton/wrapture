@@ -3,11 +3,11 @@ TOML file loader.
 
 The programmatic form is the primitive: a Config holds observe entries
 saying which members of which targets to bind, the sink events flow to,
-setup callbacks to trigger on module imports, and the capture and
-sampling settings, and apply() installs the lot. The TOML file is a
-thin loader over it; everything the file can say is expressible in
-code, and the programmatic path can additionally pass live objects
-where the file is limited to what TOML can spell.
+instrumentation to apply as its trigger modules are imported, and the
+capture and sampling settings, and apply() installs the lot. The TOML
+file is a thin loader over it; everything the file can say is
+expressible in code, and the programmatic path can additionally pass
+live objects where the file is limited to what TOML can spell.
 
 Failures are loud. A file that says something the schema does not
 allow, a reference that does not resolve, a named member that does not
@@ -17,7 +17,7 @@ ConfigWarning, because an empty selection may simply mean the code
 being observed has moved on.
 
 A config file can name arbitrary code to run, through sink factories
-and setup callbacks, so loading one is equivalent to executing code:
+and instrumentation, so loading one is equivalent to executing code:
 the trust boundary is write access to the file, exactly as it is for
 any other file the process imports.
 """
@@ -33,8 +33,7 @@ import threading
 import tomllib
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from importlib import metadata
+from dataclasses import dataclass
 from typing import Any, cast
 
 import wrapt
@@ -46,6 +45,15 @@ from .capture import redact as _redact
 from .collectors import Aggregate, Counter
 from .events import Event
 from .exceptions import ConfigError, ConfigWarning
+from .instrumentations import (
+    Instrumentation,
+    InstrumentEntry,
+    _Applied,
+    _apply_planned,
+    _plan_entries,
+    _Planned,
+    _revert_applied,
+)
 from .logs import LogCapture, capture_logs
 from .outputs import OutputPath
 from .sinks import (
@@ -221,76 +229,17 @@ class ObserveEntry:
             )
 
 
-@dataclass(frozen=True)
-class SetupEntry:
-    """One setup rule, in one of two forms.
-
-    The single form names `module` (the trigger) and `call` (a
-    module:attr reference): the callback runs with the module once it
-    is imported, or immediately if it already was. The group form
-    names `group`, an entry point group some installed package
-    declares, each of whose entries maps a trigger module to a
-    handler, so one entry activates a whole family of handlers. The
-    two forms are mutually exclusive.
-
-    `options` are extra keyword arguments passed to the handler along
-    with the module, `handler(module, **options)`, so one handler can
-    be specialised from the config; with no options the call is
-    exactly `handler(module)`. In the group form every handler in the
-    family receives the same options. Handler references resolve only
-    when their hook fires, so naming operator code here cannot cause
-    it to be imported before the module it wants to instrument.
-    """
-
-    module: str = ""
-    call: str = ""
-    group: str = ""
-    options: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        for key in ("module", "call", "group"):
-            if not isinstance(getattr(self, key), str):
-                raise ConfigError(
-                    f"setup entry: {key} must be a string, got {getattr(self, key)!r}"
-                )
-
-        if self.group:
-            if self.module or self.call:
-                raise ConfigError(
-                    f"setup group {self.group!r}: group is an alternative"
-                    f" to module and call, not a companion; use one form"
-                    f" or the other"
-                )
-        else:
-            if not self.module:
-                raise ConfigError(
-                    f"setup entry: module must be a non-empty module name,"
-                    f" got {self.module!r}"
-                )
-
-            _split_reference(self.call, key="call", where=f"setup for {self.module!r}")
-
-        if not isinstance(self.options, Mapping) or not all(
-            isinstance(key, str) for key in self.options
-        ):
-            raise ConfigError(
-                f"setup entry: options must be a mapping with string keys,"
-                f" got {self.options!r}"
-            )
-
-        object.__setattr__(self, "options", dict(self.options))
-
-
 class AppliedConfig:
     """The live record of what one Config.apply() installed.
 
-    Observe entries defer: apply() registers a post-import hook per
-    target module, which fires immediately for a module already
-    imported and otherwise when the application imports it. The
-    bindings recorded here therefore grow over the life of the
-    process; `pending` names the entries still waiting for their
-    module, `report()` renders the whole picture, and `revert()`
-    takes everything down again.
+    Observe entries and instrumentation defer: apply() registers a
+    post-import hook per target or trigger module, which fires
+    immediately for a module already imported and otherwise when the
+    application imports it. The bindings recorded here therefore grow
+    over the life of the process; `pending` names the observe entries
+    still waiting for their module, `instrumentations` is the live
+    record of each applied instrumentation, `report()` renders the
+    whole picture, and `revert()` takes everything down again.
     """
 
     def __init__(self, sink: Sink | None, windows: Sequence[Window] = ()) -> None:
@@ -298,6 +247,8 @@ class AppliedConfig:
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
         self._captures: list[LogCapture] = []
+        self._instrumentations: list[_Applied] = []
+        self._disabled: tuple[InstrumentEntry, ...] = ()
         self._trace_previous: bool | None = None
         self._sink = sink
         self._windows = tuple(windows)
@@ -339,10 +290,21 @@ class AppliedConfig:
         with self._lock:
             return tuple(self._captures)
 
+    @property
+    def instrumentations(self) -> tuple[Instrumentation, ...]:
+        """The instrumentations this config applied, in application
+        order: each instance carries its settings in effect, the target
+        version found, the triggers applied and pending, and its
+        removability claim."""
+
+        with self._lock:
+            return tuple(holder.instance for holder in self._instrumentations)
+
     def report(self) -> str:
         """A human-readable listing of what is installed: the sink,
-        every binding applied so far, and the targets still waiting
-        for their module.
+        every binding applied so far, the instrumentations with their
+        triggers fired and pending, and the targets still waiting for
+        their module.
 
         Zero-code injection means nothing in the source says the
         patching is there; this is the way to ask.
@@ -352,6 +314,8 @@ class AppliedConfig:
             bindings = list(self._bindings)
             pending = list(self._pending)
             captures = list(self._captures)
+            instances = [holder.instance for holder in self._instrumentations]
+            disabled = list(self._disabled)
 
         lines = [f"sink: {self._sink!r}" if self._sink is not None else "sink: none"]
 
@@ -363,6 +327,13 @@ class AppliedConfig:
         lines.append("applied:" if bindings else "applied: none")
         for bound in bindings:
             lines.append(f"  {bound.path}")
+
+        if instances or disabled:
+            lines.append("instrumentation:")
+            for instance in instances:
+                lines.append(f"  {instance._describe()}")
+            for off in disabled:
+                lines.append(f"  {off.label}: disabled")
 
         if captures:
             lines.append("log:")
@@ -414,14 +385,17 @@ class AppliedConfig:
 
     def revert(self) -> None:
         """Remove everything this record installed: the bindings, most
-        recent first, then the log captures, the windows, and the sink
+        recent first, then the instrumentations in reverse application
+        order, the log captures, the windows, and the sink
         registration.
 
         A post-import hook cannot be unregistered from wrapt, so a
         hook that has not fired yet is neutralised instead: when its
         module is eventually imported, it sees the record is reverted
-        and applies nothing. Setup callbacks are outside this:
-        whatever a callback did is its own to undo. Idempotent.
+        and applies nothing. An instrumentation is removed through its
+        own remove(), trigger by trigger; one that declared itself not
+        removable is warned about, since whatever it patched beyond
+        its undo callbacks may remain. Idempotent.
         """
 
         with self._lock:
@@ -431,12 +405,16 @@ class AppliedConfig:
             self._reverted = True
             bindings = list(self._bindings)
             captures = list(self._captures)
+            applied = list(self._instrumentations)
             self._bindings.clear()
             self._pending.clear()
             self._captures.clear()
+            self._instrumentations.clear()
 
         for bound in reversed(bindings):
             bound.remove()
+
+        _revert_applied(applied)
 
         for capture in reversed(captures):
             capture.remove()
@@ -465,7 +443,7 @@ class AppliedConfig:
 
 class Config:
     """A whole tracing setup: what to observe, where events go, which
-    setup callbacks to trigger, and how much to capture and keep.
+    instrumentation to apply, and how much to capture and keep.
 
     This is the programmatic primitive beneath the TOML config file:
     everything a file can say is expressible here directly. Construct
@@ -479,7 +457,7 @@ class Config:
         observe: Sequence[ObserveEntry] = (),
         sink: Sink | None = None,
         windows: Sequence[Window] = (),
-        setup: Sequence[SetupEntry] = (),
+        instrument: Sequence[InstrumentEntry] = (),
         log: Sequence[LogCapture] = (),
         trace: Mapping[str, Any] | None = None,
         capture: CapturePolicy | str | None = None,
@@ -492,19 +470,22 @@ class Config:
         Fanout, and sampling, depth limiting and filtering are the
         combinators wrapped around the sink they gate. `windows` are
         the Window objects to start, whose contents listen or collect
-        only while a run is open. `setup` is the
-        SetupEntry callbacks to register. `log` is the LogCapture
-        selections to apply, as capture_logs() returns them. `trace`
-        is the trace identity settings, a mapping with an `enabled`
-        (default True) key, applied process-wide and restored on
-        revert; None leaves the process-wide setting alone.
-        `capture` overrides the
-        capture level on every binding the config creates, in the
-        forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
-        from the environment after a successful apply, so Python
-        processes this one launches by exec or spawn start untraced;
-        the default leaves the environment alone, since launched
-        workers are usually the application itself.
+        only while a run is open. `instrument` is the InstrumentEntry
+        list naming the instrumentations to apply; each is resolved
+        and its settings validated now, and the enabled entries are
+        checked against each other for conflicts and requirements,
+        so a bad entry fails the build rather than the apply. `log`
+        is the LogCapture selections to apply, as capture_logs()
+        returns them. `trace` is the trace identity settings, a
+        mapping with an `enabled` (default True) key, applied
+        process-wide and restored on revert; None leaves the
+        process-wide setting alone. `capture` overrides the capture
+        level on every binding the config creates, in the forms
+        binding() accepts. `inherit=False` strips wrapture's autowrapt
+        trigger from the environment after a successful apply, so
+        Python processes this one launches by exec or spawn start
+        untraced; the default leaves the environment alone, since
+        launched workers are usually the application itself.
         """
 
         for entry in observe:
@@ -520,11 +501,13 @@ class Config:
                     f" capture_logs() returns them, got {capture_entry!r}"
                 )
 
-        for setup_entry in setup:
-            if not isinstance(setup_entry, SetupEntry):
-                raise ConfigError(
-                    f"setup entries must be SetupEntry instances, got {setup_entry!r}"
-                )
+        # Instrumentation resolves now: the class loads (importing only
+        # wrapture, by contract), the settings are checked against its
+        # declaration, and the enabled entries are checked against each
+        # other.
+
+        self._instrument = tuple(instrument)
+        self._instrument_planned: tuple[_Planned, ...] = _plan_entries(instrument)
 
         if sink is not None and not isinstance(sink, Sink):
             raise ConfigError(f"sink must be a Sink, got {sink!r}")
@@ -570,7 +553,6 @@ class Config:
         self._observe = tuple(observe)
         self._sink = sink
         self._windows = tuple(windows)
-        self._setup = tuple(setup)
         self._log = tuple(log)
         self._capture = capture
         self._inherit = inherit
@@ -594,10 +576,11 @@ class Config:
         return self._windows
 
     @property
-    def setup(self) -> tuple[SetupEntry, ...]:
-        """The setup callback entries this config registers."""
+    def instrument(self) -> tuple[InstrumentEntry, ...]:
+        """The instrumentation entries this config holds, enabled and
+        disabled alike."""
 
-        return self._setup
+        return self._instrument
 
     @property
     def capture(self) -> CapturePolicy | str | None:
@@ -623,7 +606,9 @@ class Config:
         when the application imports it, so applying never imports a
         target itself, and validation that needs the module (a name
         that must exist, a match with nothing to select) happens when
-        the hook fires. Setup callbacks are registered the same way.
+        the hook fires. Instrumentation is registered the same way,
+        one hook per trigger module, after its conflicts with any
+        other applied config are checked and its configure() has run.
         A target whose module is never imported never binds, which
         the returned record's `pending` shows and a warning at
         interpreter shutdown reports.
@@ -639,6 +624,9 @@ class Config:
             installed = add_sink(self._sink)
 
         record = AppliedConfig(installed, self._windows)
+        record._disabled = tuple(
+            entry for entry in self._instrument if not entry.enabled
+        )
 
         # While the applying flag is set, a hook firing synchronously
         # (its module already imported) propagates errors out of this
@@ -655,8 +643,7 @@ class Config:
                 record._adopt(entry)
                 _register_observe(entry, self._capture, record)
 
-            for setup_entry in self._setup:
-                _register_setup(setup_entry, record)
+            _apply_planned(self._instrument_planned, record)
 
             # Log captures apply immediately: the logging module is
             # always importable, so there is nothing to defer on.
@@ -953,90 +940,6 @@ def _report_never_fired() -> None:
             ConfigWarning,
             stacklevel=2,
         )
-
-
-def _register_setup_hook(
-    trigger: str,
-    resolve: Callable[[], Any],
-    describe: str,
-    options: Mapping[str, Any],
-    record: AppliedConfig,
-) -> None:
-    # The shared trampoline behind both setup forms. Resolution of the
-    # handler is deferred to the moment the hook fires: by then the
-    # trigger module is mid-import anyway, so importing operator code
-    # cannot defeat patch-before-import ordering. wrapt fires the hook
-    # immediately when the module is already imported, so an entry
-    # never silently waits forever on a module that is already there.
-
-    def trampoline(module: Any) -> None:
-        try:
-            handler = resolve()
-
-            if not callable(handler):
-                raise ConfigError(
-                    f"{describe} resolved to {handler!r}, which is not callable"
-                )
-
-            handler(module, **options)
-        except Exception as exc:
-            # Same posture as observe entries: loud during apply,
-            # warn-and-continue from inside an application import.
-
-            if record._applying:
-                raise
-
-            warnings.warn(
-                f"{describe} raised: {exc!r}. The import continues;"
-                f" whatever the handler did before raising stands.",
-                ConfigWarning,
-                stacklevel=2,
-            )
-
-    wrapt.register_post_import_hook(trampoline, trigger)
-
-
-def _register_setup(entry: SetupEntry, record: AppliedConfig) -> None:
-    if entry.group:
-        # The group form: an installed package declares its handler
-        # family as entry points, entry name the trigger module and
-        # target the handler, the same shape wrapt's own hook
-        # discovery reads. Discovery happens now, from metadata alone,
-        # importing nothing; each handler still resolves only when
-        # its module arrives, and every handler in the family gets
-        # the entry's options.
-
-        points = list(metadata.entry_points(group=entry.group))
-
-        if not points:
-            raise ConfigError(
-                f"setup group {entry.group!r} has no entry points: a"
-                f" misspelled group, or the package declaring it is not"
-                f" installed"
-            )
-
-        for point in points:
-            _register_setup_hook(
-                trigger=point.name,
-                resolve=point.load,
-                describe=(
-                    f"setup group {entry.group!r} handler"
-                    f" {point.value!r} for {point.name!r}"
-                ),
-                options=entry.options,
-                record=record,
-            )
-        return
-
-    _register_setup_hook(
-        trigger=entry.module,
-        resolve=lambda: _resolve_reference(
-            entry.call, key="call", where=f"setup for {entry.module!r}"
-        ),
-        describe=f"setup callback {entry.call!r} for {entry.module!r}",
-        options=entry.options,
-        record=record,
-    )
 
 
 # The sinks a config file can name by short name. Deliberately only the
@@ -1432,6 +1335,73 @@ def _entry_table(
     return dict(table)
 
 
+_KNOWN_KEYS = {
+    "pythonpath",
+    "capture",
+    "observe",
+    "sink",
+    "otel",
+    "window",
+    "instrument",
+    "log",
+    "trace",
+    "inherit",
+}
+
+
+def _apply_pythonpath(document: Mapping[str, Any], location: str) -> None:
+    # Relative pythonpath entries anchor to the config file's own
+    # directory, not the process working directory, so a config that
+    # ships next to its operator code stays self-contained wherever
+    # the process launches from. Prepended in order, ahead of
+    # everything already on the path.
+
+    if "pythonpath" not in document:
+        return
+
+    anchor = os.path.dirname(os.path.abspath(location))
+    entries = _strings(document["pythonpath"], key="pythonpath", where=location)
+
+    for directory in reversed(entries):
+        if not os.path.isabs(directory):
+            directory = os.path.normpath(os.path.join(anchor, directory))
+        sys.path.insert(0, directory)
+
+
+def _instrument_entries(document: Mapping[str, Any]) -> list[InstrumentEntry]:
+    # An [[instrument]] table has one reserved key, name, plus the
+    # enabled switch; everything else is a setting of the named
+    # instrumentation, validated against its declaration when the
+    # Config is built.
+
+    entries: list[InstrumentEntry] = []
+
+    tables = document.get("instrument", ())
+    if isinstance(tables, dict):
+        raise ConfigError(
+            "instrument is a list of tables: write each as an [[instrument]]"
+            " entry, not an [instrument] table"
+        )
+
+    for raw in tables:
+        if not isinstance(raw, dict):
+            raise ConfigError(f"[[instrument]] entries must be tables, got {raw!r}")
+
+        table = dict(raw)
+        name = table.pop("name", None)
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                "[[instrument]]: the name key is required, naming a registered"
+                " instrumentation (optionally as name@distribution) or a"
+                " module:attr reference to an Instrumentation class"
+            )
+
+        enabled = table.pop("enabled", True)
+        entries.append(InstrumentEntry(name, enabled=enabled, settings=table))
+
+    return entries
+
+
 def _config_from(document: Any, location: str) -> Config:
     # Build a Config from a parsed TOML document, applying the one
     # load-time side effect first: pythonpath entries go onto sys.path
@@ -1441,36 +1411,11 @@ def _config_from(document: Any, location: str) -> Config:
     if not isinstance(document, dict):
         raise ConfigError(f"{location}: config must be a TOML table")
 
-    known = {
-        "pythonpath",
-        "capture",
-        "observe",
-        "sink",
-        "otel",
-        "window",
-        "setup",
-        "log",
-        "trace",
-        "inherit",
-    }
-    unknown = sorted(set(document) - known)
+    unknown = sorted(set(document) - _KNOWN_KEYS)
     if unknown:
         raise ConfigError(f"{location}: unknown config keys {unknown}")
 
-    # Relative pythonpath entries anchor to the config file's own
-    # directory, not the process working directory, so a config that
-    # ships next to its operator code stays self-contained wherever
-    # the process launches from. Prepended in order, ahead of
-    # everything already on the path.
-
-    if "pythonpath" in document:
-        anchor = os.path.dirname(os.path.abspath(location))
-        entries = _strings(document["pythonpath"], key="pythonpath", where=location)
-
-        for directory in reversed(entries):
-            if not os.path.isabs(directory):
-                directory = os.path.normpath(os.path.join(anchor, directory))
-            sys.path.insert(0, directory)
+    _apply_pythonpath(document, location)
 
     observe: list[ObserveEntry] = []
     for raw in document.get("observe", ()):
@@ -1482,24 +1427,7 @@ def _config_from(document: Any, location: str) -> Config:
         )
         observe.append(ObserveEntry(**table))
 
-    # A setup table works like the sink table: module, call and group
-    # are the reserved keys, and everything else rides through to the
-    # handler as options.
-
-    setup: list[SetupEntry] = []
-    for raw in document.get("setup", ()):
-        if not isinstance(raw, dict):
-            raise ConfigError(f"[[setup]] entries must be tables, got {raw!r}")
-
-        table = dict(raw)
-        setup.append(
-            SetupEntry(
-                module=table.pop("module", ""),
-                call=table.pop("call", ""),
-                group=table.pop("group", ""),
-                options=table,
-            )
-        )
+    instrument = _instrument_entries(document)
 
     # A [[log]] entry is capture_logs() spelt as TOML: the keys are
     # its arguments, all optional, and the defaults match.
@@ -1556,7 +1484,7 @@ def _config_from(document: Any, location: str) -> Config:
         observe=observe,
         sink=sink,
         windows=windows,
-        setup=setup,
+        instrument=instrument,
         log=log,
         trace=document.get("trace"),
         capture=document.get("capture"),
@@ -1564,16 +1492,10 @@ def _config_from(document: Any, location: str) -> Config:
     )
 
 
-def load_config(path: str | os.PathLike[str]) -> Config:
-    """Load a TOML config file into a Config, without applying it.
-
-    The file is either a wrapture config file, whose whole content is
-    the config, or a pyproject.toml, whose [tool.wrapture] table is.
-    Loading has two immediate effects beyond parsing: pythonpath
-    entries are prepended to sys.path, and the [sink] table's sink is
-    constructed, both because later stages depend on them existing.
-    Anything the schema does not allow raises ConfigError.
-    """
+def _read_document(path: str | os.PathLike[str]) -> tuple[Any, str]:
+    # Parse a config file into its document and location: the whole
+    # file for a wrapture config, the [tool.wrapture] table for a
+    # pyproject.toml.
 
     location = os.fspath(path)
 
@@ -1590,6 +1512,22 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         if document is None:
             raise ConfigError(f"{location} has no [tool.wrapture] table")
 
+    return document, location
+
+
+def load_config(path: str | os.PathLike[str]) -> Config:
+    """Load a TOML config file into a Config, without applying it.
+
+    The file is either a wrapture config file, whose whole content is
+    the config, or a pyproject.toml, whose [tool.wrapture] table is.
+    Loading has three immediate effects beyond parsing: pythonpath
+    entries are prepended to sys.path, the [sink] table's sink is
+    constructed, and each [[instrument]] entry's class is imported and
+    its settings validated, all because later stages depend on them
+    existing. Anything the schema does not allow raises ConfigError.
+    """
+
+    document, location = _read_document(path)
     return _config_from(document, location)
 
 

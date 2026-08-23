@@ -1,11 +1,11 @@
 # Request-tied tracing of a FastAPI application, with no changes to
 # it and no knowledge of it.
 #
-# All the FastAPI instrumentation lives in the setup hook, triggered
-# by the import of fastapi itself: every application instance gets
-# the recording ASGI middleware around the pipeline it builds at its
-# first request, and every route handler is observed as it
-# registers. The config never names the app. The one observe entry
+# All the FastAPI instrumentation lives in one Instrumentation class,
+# triggered by the import of fastapi itself: every application
+# instance gets the recording ASGI middleware around the pipeline it
+# builds at its first request, and every route handler is observed as
+# it registers. The config never names the app. The one observe entry
 # covers this application's own helper, the kind of addition an
 # operator layers on top of the out-of-box experience.
 
@@ -15,9 +15,8 @@ pythonpath = "."
 target = "myapp"
 name = "quote"
 
-[[setup]]
-module = "fastapi"
-call = "wrapture_local.fastapi_support:instrument"
+[[instrument]]
+name = "wrapture_local.fastapi_support:FastAPIInstrumentation"
 
 [[sink]]
 type = "printer"

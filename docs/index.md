@@ -136,6 +136,7 @@ wsgi-tracing
 asgi-tracing
 scheduled-tracing
 otel-export
+instrumentation-packages
 ```
 
 ```{toctree}

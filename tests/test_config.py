@@ -1,8 +1,8 @@
 """Tests for the config layer: the programmatic Config primitive and
 the TOML file loader.
 
-A Config bundles observe entries, a sink, setup callbacks, and the
-capture and sampling settings; apply() installs the lot and unwinds
+A Config bundles observe entries, a sink, instrumentation entries, and
+the capture and sampling settings; apply() installs the lot and unwinds
 itself on failure. The TOML loader is a thin schema over the same
 primitive, with loud failures for anything it does not understand.
 """
@@ -28,7 +28,6 @@ from wrapture import (
     JSONLines,
     ObserveEntry,
     Sample,
-    SetupEntry,
     Sink,
     binding,
     find_config,
@@ -629,135 +628,6 @@ def test_a_pending_entry_firing_while_suspended_applies_suspended(
         _unwind(applied)
 
 
-def _raising_setup(module: Any) -> None:
-    raise RuntimeError("operator code broke")
-
-
-_setup_seen: list[tuple[Any, dict[str, Any]]] = []
-
-
-def _optioned_setup(module: Any, **options: Any) -> None:
-    _setup_seen.append((module, options))
-
-
-def test_extra_setup_keys_reach_the_handler_as_keyword_arguments() -> None:
-    del _setup_seen[:]
-
-    config = Config(
-        setup=[
-            SetupEntry(
-                module=__name__,
-                call=f"{__name__}:_optioned_setup",
-                options={"tenants": ["acme"], "limit": 3},
-            )
-        ]
-    )
-    config.apply()
-
-    ((module, options),) = _setup_seen
-    assert module is sys.modules[__name__]
-    assert options == {"tenants": ["acme"], "limit": 3}
-
-
-def test_the_loader_turns_extra_setup_keys_into_options(tmp_path: Path) -> None:
-    source = tmp_path / "trace.toml"
-    source.write_text(
-        textwrap.dedent(
-            """
-            [[setup]]
-            module = "mod"
-            call = "mod:fn"
-            tenants = ["acme"]
-            limit = 3
-            """
-        )
-    )
-
-    config = load_config(source)
-
-    (entry,) = config.setup
-    assert entry.options == {"tenants": ["acme"], "limit": 3}
-
-
-def test_a_setup_group_registers_every_declared_handler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The group's entry points are discovered from metadata (faked
-    # here with real EntryPoint objects, so resolution is the real
-    # machinery); each entry hooks its own module, and every handler
-    # in the family receives the entry's options.
-
-    from importlib.metadata import EntryPoint
-    from types import SimpleNamespace
-
-    (tmp_path / "cfg17_ga_mod.py").write_text("MARK = 'a'\n")
-    (tmp_path / "cfg17_gb_mod.py").write_text("MARK = 'b'\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    points = [
-        EntryPoint("cfg17_ga_mod", f"{__name__}:_optioned_setup", "cfg17_hooks"),
-        EntryPoint("cfg17_gb_mod", f"{__name__}:_optioned_setup", "cfg17_hooks"),
-    ]
-    monkeypatch.setattr(
-        "wrapture.config.metadata",
-        SimpleNamespace(entry_points=lambda group: points),
-    )
-
-    del _setup_seen[:]
-
-    config = Config(setup=[SetupEntry(group="cfg17_hooks", options={"headers": False})])
-    config.apply()
-
-    assert _setup_seen == []
-
-    importlib.import_module("cfg17_ga_mod")
-    importlib.import_module("cfg17_gb_mod")
-
-    marks = [(module.MARK, options) for module, options in _setup_seen]
-    assert marks == [("a", {"headers": False}), ("b", {"headers": False})]
-
-
-def test_an_empty_setup_group_fails_loudly() -> None:
-    config = Config(setup=[SetupEntry(group="definitely_not_a_group_xyz")])
-
-    with pytest.raises(ConfigError, match="has no entry points"):
-        config.apply()
-
-
-def test_group_and_the_single_form_are_mutually_exclusive() -> None:
-    with pytest.raises(ConfigError, match="alternative to module and call"):
-        SetupEntry(module="mod", call="mod:fn", group="hooks")
-
-
-def test_setup_options_must_be_a_mapping() -> None:
-    with pytest.raises(ConfigError, match="options must be a mapping"):
-        SetupEntry(module="mod", call="mod:fn", options="loud")  # type: ignore[arg-type]
-
-
-def test_a_setup_callback_raising_at_deferred_fire_warns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # During apply a raising callback is the caller's to hear; fired
-    # from an application import later, it warns and the import
-    # continues, since observation must never break the application.
-
-    (tmp_path / "cfg16_setup_mod.py").write_text("value = 2\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    config = Config(
-        setup=[SetupEntry(module="cfg16_setup_mod", call=f"{__name__}:_raising_setup")]
-    )
-
-    applied = config.apply()
-    try:
-        with pytest.warns(ConfigWarning, match="operator code broke"):
-            module = importlib.import_module("cfg16_setup_mod")
-
-        assert module.value == 2
-    finally:
-        _unwind(applied)
-
-
 # ---------------------------------------------------------------------------
 # entry validation
 # ---------------------------------------------------------------------------
@@ -781,74 +651,6 @@ def test_exclude_requires_match() -> None:
 def test_a_target_has_at_most_one_colon() -> None:
     with pytest.raises(ConfigError, match="single colon"):
         ObserveEntry(target="mod:Thing:run", name="go")
-
-
-def test_a_setup_call_must_be_a_module_attr_reference() -> None:
-    with pytest.raises(ConfigError, match="module:attr"):
-        SetupEntry(module="mod", call="just_a_name")
-
-
-# ---------------------------------------------------------------------------
-# setup callbacks
-# ---------------------------------------------------------------------------
-
-_setup_calls: list[Any] = []
-
-
-def _note_setup(module: Any) -> None:
-    _setup_calls.append(module)
-
-
-def test_a_setup_callback_fires_immediately_for_an_imported_module() -> None:
-    del _setup_calls[:]
-
-    config = Config(setup=[SetupEntry(module=__name__, call=f"{__name__}:_note_setup")])
-    config.apply()
-
-    assert _setup_calls == [sys.modules[__name__]]
-
-
-def test_a_setup_callback_fires_when_the_module_is_imported(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The trigger module does not exist yet when the config applies;
-    # the callback runs only once it is imported, receiving the live
-    # module, with the callback reference resolved at that moment.
-
-    (tmp_path / "cfgtest_lazy_target.py").write_text("MARK = 'target'\n")
-    (tmp_path / "cfgtest_lazy_hooks.py").write_text(
-        "fired = []\n\ndef instrument(module):\n    fired.append(module.MARK)\n"
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-
-    config = Config(
-        setup=[
-            SetupEntry(
-                module="cfgtest_lazy_target",
-                call="cfgtest_lazy_hooks:instrument",
-            )
-        ]
-    )
-    config.apply()
-
-    assert "cfgtest_lazy_target" not in sys.modules
-
-    importlib.import_module("cfgtest_lazy_target")
-
-    hooks = sys.modules["cfgtest_lazy_hooks"]
-    assert hooks.fired == ["target"]
-
-
-def test_an_unresolvable_setup_callback_fails_at_fire_time() -> None:
-    # The trigger module is already imported, so registration fires
-    # the hook on the spot and the bad reference surfaces from apply.
-
-    config = Config(
-        setup=[SetupEntry(module=__name__, call=f"{__name__}:no_such_callback")]
-    )
-
-    with pytest.raises(ConfigError, match="no attribute 'no_such_callback'"):
-        config.apply()
 
 
 # ---------------------------------------------------------------------------
@@ -899,10 +701,6 @@ def test_load_config_reads_the_full_schema(
             [[sink]]
             type = "cfgtest_sinks:make_sink"
             tag = "from-config"
-
-            [[setup]]
-            module = "{__name__}"
-            call = "{__name__}:_note_setup"
             """
         )
     )
@@ -921,10 +719,6 @@ def test_load_config_reads_the_full_schema(
 
     assert type(config.sink).__name__ == "Probe"
     assert getattr(config.sink, "tag", None) == "from-config"
-
-    (setup,) = config.setup
-    assert setup.module == __name__
-    assert setup.call == f"{__name__}:_note_setup"
 
     assert config.capture == "summary"
 

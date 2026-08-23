@@ -54,7 +54,6 @@ from .config import (
     AppliedConfig,
     Config,
     ObserveEntry,
-    SetupEntry,
     find_config,
     load_config,
 )
@@ -93,6 +92,13 @@ from .export import (
     chrome_trace,
     load_events,
     mermaid,
+)
+from .instrumentations import (
+    Instrumentation,
+    Instrumented,
+    InstrumentEntry,
+    Setting,
+    instrumentation,
 )
 from .iterators import (
     IteratorAbandonBehaviour,
@@ -193,6 +199,9 @@ __all__ = [
     "Filter",
     "GetBehaviour",
     "GetPhase",
+    "InstrumentEntry",
+    "Instrumentation",
+    "Instrumented",
     "IteratorAbandonBehaviour",
     "IteratorErrorBehaviour",
     "IteratorFinishBehaviour",
@@ -211,7 +220,7 @@ __all__ = [
     "SequenceExhaustedError",
     "SetBehaviour",
     "SetPhase",
-    "SetupEntry",
+    "Setting",
     "Sink",
     "SinkErrorWarning",
     "StackFrame",
@@ -238,6 +247,7 @@ __all__ = [
     "discover",
     "find_config",
     "flush_sinks",
+    "instrumentation",
     "iterator",
     "load_config",
     "load_events",

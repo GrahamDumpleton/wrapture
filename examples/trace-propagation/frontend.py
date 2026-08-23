@@ -1,8 +1,8 @@
 """The client half: orders quotes over HTTP.
 
 Nothing here mentions trace headers. The client.toml next to it
-observes these functions, and its setup hook instruments urllib so
-every outbound request carries the current trace identity; the
+observes these functions, and its [[instrument]] entry instruments
+urllib so every outbound request carries the current trace identity; the
 minted id then reappears in the server's records.
 
 The one piece of embedded instrumentation is the pair of blocks in
