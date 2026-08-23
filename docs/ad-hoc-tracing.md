@@ -983,8 +983,8 @@ classes and marks the entries it selects; and `--toml` writes
 `[[instrument]]` entries to standard output instead, one per installed
 instrumentation, every one `enabled = false` and every setting a
 commented-out line at its default with its description beside it, so
-un-commenting a line is the whole act of configuring. [Writing an
-instrumentation package](instrumentation-packages.md) covers the
+un-commenting a line is the whole act of configuring. [Instrumentation
+packages](instrumentation-packages.md) covers the
 packaging side: the entry point, the import-light rule, the naming
 convention, and testing the class directly.
 

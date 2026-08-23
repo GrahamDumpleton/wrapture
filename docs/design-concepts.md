@@ -268,8 +268,8 @@ installed version, reports what each applied instance has done, and
 takes it down again on revert; `wrapture.instrumentation(...)` scopes
 the same to a block in a test, and `python -m wrapture.tools
 instrumentation` lists what an environment has installed and writes
-the template to switch it on. [Writing an instrumentation
-package](instrumentation-packages.md) is the author's guide.
+the template to switch it on. [Instrumentation
+packages](instrumentation-packages.md) is the author's guide.
 
 ## Trace identity: one trace across processes
 

@@ -1,4 +1,4 @@
-# Writing an instrumentation package
+# Instrumentation packages
 
 An instrumentation package ships, for one or more target packages,
 the code that patches them on wrapture's behalf: a Flask

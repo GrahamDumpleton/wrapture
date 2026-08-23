@@ -1631,7 +1631,7 @@ def test_the_instrumentation_applies_and_removes():
         instrumentation.remove("flask.app", flask.app)
 ```
 
-[Writing an instrumentation package](instrumentation-packages.md)
+[Instrumentation packages](instrumentation-packages.md)
 covers the rest of the author's side: the entry point, the rule that
 the class's module imports only wrapture, and the bindings recipe
 for removal.
