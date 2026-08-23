@@ -102,10 +102,24 @@ One mechanism, three uses, in increasing order of machinery:
    in the environment applies the same config at interpreter startup, so the
    program starts with plain `python`.
 
-The distinction that matters: most tracing tools either need the code to
-have been written with them in mind, or can only be switched on for the
-whole program at once. wrapture needs neither: you point at a method by
-name and a trace appears.
+On top of the tracing layer sits
+[OpenTelemetry export](https://wrapture.readthedocs.io/en/latest/otel-export.html):
+the same recorded events sent to any OTLP backend as traces, metrics and
+correlated logs, switched on by one `[otel]` table in the config, with the
+trace identity arriving and leaving in W3C `traceparent` headers so two
+observed services join one distributed trace. These are layers of one
+mechanism, not separate products: the binding vocabulary that stubs a method
+in a test is the same one that traces it in production, and the config that
+names methods for a printed call tree is the config that exports spans, so
+what starts as a monkey patch or a test assertion can grow into full
+observability without the code being rewritten along the way.
+
+The distinction that matters: most instrumentation, OpenTelemetry's own
+included, either has to be written into the code as SDK calls, or arrives
+as auto-instrumentation covering only the frameworks it already knows.
+wrapture needs neither: you point at your own methods by name and a trace
+appears, and the same pointing is how it lands in a test, a terminal, or a
+backend.
 
 ## Why
 
