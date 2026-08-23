@@ -326,11 +326,16 @@ $ curl http://127.0.0.1:8000/quote/widget
 ## trace-propagation
 
 Two processes, one trace. A client places orders against a quote
-service over HTTP, both sides observed by wrapture, neither
-mentioning it, and the trace identity minted at each client tree's
+service over HTTP, both sides observed by wrapture, and the trace
+identity minted at each client tree's
 root travels in the `traceparent` header and reappears in the
 server's records: distributed tracing with no tracing backend
-anywhere, just wrapture on both ends.
+anywhere, just wrapture on both ends. The server code never
+mentions wrapture; the client's one embedded touch is a pair of
+`wrapture.block()` markers in `fetch_quote`, splitting the exchange
+into making the request and consuming the reply body, the two
+phases urllib's `open()` cannot separate by itself since the
+response object escapes the call with its body unread.
 
 The moving parts are the mechanism's defaults plus one probe. Trace
 identity is on by default, so every client tree mints an id at its
