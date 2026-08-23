@@ -158,9 +158,10 @@ location, sorted by `self` time, the figure that answers "where is
 the time going": `Shop.handle` spends more time in its own body than
 `Pricing.quote` does, even though every quote runs inside a handle,
 because self time excludes what the observed children account for.
-The `errors` column appears only when something raised. The same
-figures are on the report as data, for a dashboard or a test to read
-without parsing the table:
+The `errors` column appears only when something failed, and counts
+an exception the code caught and noted with `note_exception()` the
+same as one that escaped. The same figures are on the report as
+data, for a dashboard or a test to read without parsing the table:
 
 ```python
 >>> report.kind, report.window, report.run, report.cut_short

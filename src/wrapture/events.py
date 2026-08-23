@@ -29,6 +29,20 @@ from .trace import TraceContext
 EventKind = Literal["call", "get", "set", "delete", "request", "log", "block"]
 
 
+@dataclass(frozen=True)
+class CaughtException:
+    """One exception noted against an event with note_exception().
+
+    `exception` is the exception object as handed over, its traceback
+    riding along; `at` is the moment of the note on the perf_counter
+    clock, the same clock as the event's `started`, so a sink can
+    place it in time.
+    """
+
+    exception: BaseException
+    at: float
+
+
 @dataclass(eq=False)
 class Event:
     """One recorded occurrence at a binding.
@@ -96,10 +110,16 @@ class Event:
 
     # Outcome. For a call this is the return value or the exception it
     # raised; for a get it is the value read, so the same accessors and
-    # filters work across calls and reads.
+    # filters work across calls and reads. `exception` is the one that
+    # escaped the scope; `caught` holds the exceptions the observed code
+    # handled itself and reported with note_exception(), in the order
+    # noted. The two are distinct facts: a scope can return normally
+    # and still carry a failure. Replaced, never mutated, on each note,
+    # so a reader never sees a half-built sequence.
 
     result: Any = MISSING
     exception: BaseException | None = None
+    caught: tuple[CaughtException, ...] = ()
 
     # kind == "call": the arguments as sent, the signature-normalized
     # form with defaults applied, and the (args, kwargs) actually passed
@@ -155,6 +175,14 @@ class Event:
         been created but not yet awaited."""
 
         return self.duration is not None
+
+    @property
+    def failed(self) -> bool:
+        """Whether the operation failed, however the failure surfaced:
+        an exception escaped the scope, or one was caught inside it and
+        noted against the event with note_exception()."""
+
+        return self.exception is not None or bool(self.caught)
 
     def __str__(self) -> str:
         # Display favours the friendly label; the path is there when no
@@ -214,6 +242,15 @@ class Event:
         positional = [repr(a) for a in (self.args or ())]
         keyword = [f"{k}={v!r}" for k, v in (self.kwargs or {}).items()]
         return ", ".join(positional + keyword)
+
+
+def _caught_types(event: Event) -> list[str]:
+    # The type names of the exceptions noted against the event, in the
+    # order noted, for the renderers that mark each with `!!` after
+    # the outcome: tree(), the Printer sink and the canonical export
+    # all draw from this so they agree.
+
+    return [type(caught.exception).__name__ for caught in event.caught]
 
 
 def _format_time(seconds: float) -> str:

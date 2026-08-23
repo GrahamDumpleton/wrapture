@@ -151,7 +151,7 @@ All the Flask knowledge lives in one setup hook
 `flask` itself, a stand-in for what a wrapture-flask package would
 ship; packaged with an entry point, the config would say `[[setup]]`
 with `group = "wrapture_flask"` and nothing else. The hook patches
-Flask's two choke points:
+Flask's three choke points:
 
 - `Flask.__init__` installs the recording WSGI middleware on each
   new instance's `wsgi_app` attribute, so every application the
@@ -163,6 +163,15 @@ Flask's two choke points:
   exist, so the hook intercepts registration itself; every route
   registered afterwards is captured, wherever the view came from:
   module functions, closures, blueprints from other modules.
+- `Flask.handle_exception` is where a view's exception ends up once
+  Flask has caught it, on its way to becoming the 500 response, so
+  the request itself completes normally with a status and no
+  exception. The hook's behaviour on it calls
+  `wrapture.note_exception()` aimed at the enclosing request event
+  (`current_event(kind="request")`), so the request shows the
+  failure beside its status: `!! KeyError` after the `500` on the
+  printed line, and an exception event with error status on the
+  exported span.
 
 The one observe entry in `wrapture.toml` covers this application's
 own `quote` helper, the kind of addition an operator layers on top
@@ -176,9 +185,19 @@ $ cd examples/flask-app
 $ uv run --with flask python -m wrapture main.py
 ```
 
-The script drives four requests through Flask's test client,
+The script drives five requests through Flask's test client,
 including one that fails, so the last tree shows the `KeyError`
-inside the handler and the `500` the request becomes. The same
+escaping the view, and the request line that says both that it
+answered `500` and that the `KeyError` was the reason:
+
+```text
+GET /quote/missing (myapp.wsgi_app)
+  myapp.quoted(item='missing')
+  myapp.quoted !! KeyError [78us]
+myapp.wsgi_app -> '500 INTERNAL SERVER ERROR' !! KeyError [2.7ms, body 11us over 1 chunk]
+```
+
+The same
 config also traces the real development server, with the trees
 appearing in the server log as requests arrive:
 
@@ -195,7 +214,10 @@ trees, exported as OTel traces and aggregated into OTel metrics.
 Each request becomes a SERVER span named access-log style with the
 usual HTTP attributes, the view handler and its helpers become
 INTERNAL spans beneath it, and the failing request's tree arrives
-with error status and the recorded `KeyError`. The metrics sink
+with the `KeyError` recorded twice over: on the view's span, where
+it escaped, and on the request span, where the `handle_exception`
+binding noted it, so the request shows error status, the 500 and
+the exception together. The metrics sink
 feeds the same events into the semantic-convention
 `http.server.request.duration` histogram by method and status, a
 per-path `wrapture.call.duration` histogram whose error series split
@@ -232,7 +254,7 @@ $ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 $ export OTEL_EXPORTER_OTLP_PROTOCOL="grpc"
 ```
 
-The four scripted requests make a short burst. For a sustained
+The five scripted requests make a short burst. For a sustained
 stream of metrics, run the development server under the same config
 and drive traffic at it from a second shell; the config's
 five-second `export_interval` means points arrive while the traffic

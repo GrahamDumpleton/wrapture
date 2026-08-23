@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -212,3 +213,49 @@ def test_config_names_collectors_only_under_a_window(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="not a builtin sink or collector"):
         load_config(source)
+
+
+class Shop:
+    """The framework shape: dispatch() catches what the view raises,
+    hands it to handle_error(), and returns normally."""
+
+    def dispatch(self, sku: str) -> str:
+        try:
+            return Gateway().refund(1)
+        except TimeoutError as exc:
+            return self.handle_error(exc)
+
+    def handle_error(self, exc: BaseException) -> str:
+        return "500"
+
+
+def test_aggregate_counts_a_noted_exception_as_an_error() -> None:
+    import wrapture
+
+    aggregate = Aggregate()
+    dispatch = binding(Shop, "dispatch")
+
+    def noting(wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: Any) -> str:
+        wrapture.note_exception(args[0], event=wrapture.current_event(binding=dispatch))
+        return "500"
+
+    handle = binding(Shop, "handle_error").on_call.decorates(noting)
+
+    with dispatch, handle, window(name="stats", collect=[aggregate]) as run:
+        assert Shop().dispatch("sku") == "500"
+
+    (report,) = run.reports
+    dispatch_path = f"{__name__}:Shop.dispatch"
+    handle_path = f"{__name__}:Shop.handle_error"
+
+    # The dispatch completed with a result, and still counts as the
+    # one failure; the handler itself, which the note was aimed past,
+    # does not.
+
+    assert report.text.splitlines()[1] == (
+        "2 paths, 2 operations begun, 2 completed, 1 raised"
+    )
+    assert report.data["paths"][dispatch_path]["completed"] == 1
+    assert report.data["paths"][dispatch_path]["errors"] == 1
+    assert report.data["paths"][handle_path]["errors"] == 0
+    assert report.data["raised"] == 1

@@ -145,7 +145,8 @@ class Counter(Sink):
 @dataclass(frozen=True)
 class PathStats:
     """Aggregated figures for one path: how many operations began, how
-    many completed and how many of those raised, and the total, self,
+    many completed and how many of those failed (raised, or carried an
+    exception noted with note_exception()), and the total, self,
     fastest and slowest execution times of the ones that completed.
 
     Execution time is the event's duration, except for generators,
@@ -176,13 +177,14 @@ class Aggregate(Sink):
     """Per-path statistics in bounded memory.
 
     One row per path: how many operations began, how many completed
-    (and how many of those raised), and the total, self, fastest and
-    slowest execution times of the completed ones. Self time is
-    computed as events close, from the parent links alone, so no
-    events are retained; memory is bounded by the number of bound
-    locations plus the operations in flight at any moment. As a
-    collector its report is the table sorted by self time; as a sink
-    left registered, `stats` is read directly.
+    (and how many of those failed, by raising or by carrying a noted
+    exception), and the total, self, fastest and slowest execution
+    times of the completed ones. Self time is computed as events
+    close, from the parent links alone, so no events are retained;
+    memory is bounded by the number of bound locations plus the
+    operations in flight at any moment. As a collector its report is
+    the table sorted by self time; as a sink left registered, `stats`
+    is read directly.
     """
 
     capture_args: CapturePolicy | str = "none"
@@ -254,9 +256,11 @@ class Aggregate(Sink):
             row[6] += max(0.0, own - children)
 
     def on_exit(self, event: Event) -> None:
-        """Fold the completed operation's time into its row."""
+        """Fold the completed operation's time into its row; one that
+        carries a noted exception counts as failed, so the errors
+        column sees failures the code handled itself."""
 
-        self._observe(event, failed=False)
+        self._observe(event, failed=bool(event.caught))
 
     def on_error(self, event: Event) -> None:
         """Fold the failed operation's time into its row."""
@@ -282,7 +286,7 @@ class Aggregate(Sink):
 
         `text` is a table sorted by self time, one row per path with
         calls, total, self, per-call, min and max, and an errors column
-        when any operation raised; a path begun but never completed
+        when any operation failed; a path begun but never completed
         shows its count with the timing cells blank. `data` is
         {"paths": {path: {"count", "completed", "errors", "total",
         "self", "min", "max"}}, "begun": n, "completed": n, "raised": n},

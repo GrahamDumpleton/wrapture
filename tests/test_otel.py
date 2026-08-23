@@ -714,3 +714,201 @@ def test_a_configured_otel_sink_hears_events(tmp_path: Path) -> None:
 
     assert sink.open_spans == 0
     assert sink.skipped == 0
+
+
+# ---------------------------------------------------------------------------
+# noted exceptions
+# ---------------------------------------------------------------------------
+
+
+class _Pricing:
+    def quote(self, sku: str) -> int:
+        if sku == "missing":
+            raise KeyError(sku)
+        return 100
+
+
+class _Shop:
+    """The framework shape: dispatch() catches what the view raises
+    and hands it to handle_error(), which returns normally."""
+
+    def dispatch(self, sku: str) -> str:
+        try:
+            return f"200 {_Pricing().quote(sku)}"
+        except Exception as exc:
+            return self.handle_error(exc)
+
+    def handle_error(self, exc: BaseException) -> str:
+        return "500"
+
+
+def _noting_handler(dispatch: Any) -> Any:
+    def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        wrapture.note_exception(args[0], event=wrapture.current_event(binding=dispatch))
+        return wrapped(*args, **kwargs)
+
+    return wrapture.binding(_Shop, "handle_error").on_call.decorates(noting)
+
+
+def _span_named(exported: Any, name: str) -> Any:
+    return next(span for span in exported.get_finished_spans() if span.name == name)
+
+
+def test_a_noted_exception_becomes_a_span_event_and_an_error_status(
+    tmp_path: Path, exported: Any
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    dispatch = wrapture.binding(_Shop, "dispatch")
+    handle = _noting_handler(dispatch)
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with dispatch, handle:
+            assert _Shop().dispatch("missing") == "500"
+    finally:
+        applied.revert()
+
+    span = _span_named(exported, "_Shop.dispatch")
+
+    # The span closed normally, with its result, and still reports
+    # the failure: one exception event, timestamped inside the span,
+    # and an error status naming the type.
+
+    assert span.attributes["wrapture.result"] == "500"
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.status.description == "KeyError"
+
+    (occurrence,) = span.events
+    assert occurrence.name == "exception"
+    assert occurrence.attributes["exception.type"] == "KeyError"
+    assert span.start_time <= occurrence.timestamp <= span.end_time
+
+    # The handler's own span, which the note was aimed past, is clean.
+
+    handler = _span_named(exported, "_Shop.handle_error")
+    assert handler.status.status_code is StatusCode.UNSET
+    assert handler.events == ()
+
+
+def test_a_noted_exception_and_a_5xx_agree_on_one_error_status(
+    tmp_path: Path, exported: Any
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    class App:
+        def __call__(self, environ: dict[str, Any], start_response: Any) -> list[bytes]:
+            try:
+                _Pricing().quote("missing")
+            except KeyError as exc:
+                status = self.handle_exception(exc)
+            else:
+                status = "200 OK"
+            start_response(status, [])
+            return [b""]
+
+        def handle_exception(self, exc: BaseException) -> str:
+            return "500 INTERNAL SERVER ERROR"
+
+    def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+        return wrapped(*args, **kwargs)
+
+    handle = wrapture.binding(App, "handle_exception").on_call.decorates(noting)
+    app = wrapture.WSGIMiddleware(App())
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with handle:
+            _serve(app, {"REQUEST_METHOD": "GET", "PATH_INFO": "/quote/missing"})
+    finally:
+        applied.revert()
+
+    request = next(
+        span for span in exported.get_finished_spans() if span.kind.name == "SERVER"
+    )
+
+    assert request.attributes["http.response.status_code"] == 500
+    assert request.status.status_code is StatusCode.ERROR
+    assert [event.attributes["exception.type"] for event in request.events] == [
+        "KeyError"
+    ]
+
+
+def test_a_noted_exception_that_escapes_is_one_span_event(
+    tmp_path: Path, exported: Any
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    error = KeyError("missing")
+
+    def note_then_raise(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        wrapture.note_exception(error)
+        raise error
+
+    dispatch = wrapture.binding(_Shop, "dispatch").on_call.decorates(note_then_raise)
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with dispatch, pytest.raises(KeyError):
+            _Shop().dispatch("missing")
+    finally:
+        applied.revert()
+
+    span = _span_named(exported, "_Shop.dispatch")
+
+    assert span.status.status_code is StatusCode.ERROR
+    assert [event.attributes["exception.type"] for event in span.events] == ["KeyError"]
+
+
+def test_metrics_attribute_a_noted_exception_as_the_error_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from wrapture.otel import metrics as metrics_module
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(metrics_module, "get_meter", provider.get_meter)
+
+    sink = metrics_module.OpenTelemetryMetricsSink()
+    dispatch = wrapture.binding(_Shop, "dispatch")
+    handle = _noting_handler(dispatch)
+
+    wrapture.add_sink(sink)
+    try:
+        with dispatch, handle:
+            _Shop().dispatch("missing")
+            _Shop().dispatch("sku")
+    finally:
+        wrapture.remove_sink(sink)
+
+    data: Any = reader.get_metrics_data()
+    points: list[tuple[Any, int]] = [
+        (point.attributes, point.count)
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "wrapture.call.duration"
+        for point in metric.data.data_points
+    ]
+
+    dispatch_path = f"{__name__}:_Shop.dispatch"
+    by_error = {
+        attributes.get("error.type"): count
+        for attributes, count in points
+        if attributes["wrapture.path"] == dispatch_path
+    }
+
+    # The failed dispatch is attributed by the noted type, the clean
+    # one carries no error attribute, and the handler's own call,
+    # which the note was aimed past, is not an error either.
+
+    assert by_error == {"KeyError": 1, None: 1}
+    assert all(
+        "error.type" not in attributes
+        for attributes, _ in points
+        if attributes["wrapture.path"] == f"{__name__}:_Shop.handle_error"
+    )

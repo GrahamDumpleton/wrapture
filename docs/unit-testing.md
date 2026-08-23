@@ -1062,6 +1062,58 @@ recording it is a silent no-op, so observed code can call it
 unconditionally. `current_event()` returns the in-flight event itself,
 or `None` when nothing is recording.
 
+(noting-a-caught-exception)=
+
+### Noting a caught exception
+
+An event's `exception` is the exception that escaped the scope. Code
+that catches an exception and handles it leaves the scope completing
+normally, with a result and no exception, which is the honest record
+of control flow but not of the failure; a framework whose error
+handler turns a `KeyError` into a 500 response is the common case,
+and the handler, passed the exception as an argument, is the only
+place it can be seen. `note_exception()` is the sibling of
+`annotate()` for that place: it attaches the exception to an event
+without changing control flow.
+
+```python
+def handling(wrapped, instance, args, kwargs):
+    wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+    return wrapped(*args, **kwargs)
+
+handle = wrapture.binding(App, "handle_exception").on_call.decorates(handling)
+```
+
+The noted exceptions land on the event's `caught` tuple, one
+`CaughtException` per note carrying the exception and the moment it
+was noted, distinct from `exception`, so the two facts never blur:
+the scope returned, and a failure was noted against it. `event.failed`
+answers "did this operation fail, however the failure surfaced", and
+`raising()` widens to match: `events.raising(KeyError)` finds the
+request whether the framework swallowed the error or let it escape.
+`tree()` shows a noted exception as the same `!!` marker after the
+result, so one line says both:
+
+```text
+GET /quote/missing (app)  -> '500 INTERNAL SERVER ERROR'  !! KeyError
+```
+
+With no `event=`, the note goes to the in-flight event, which from
+inside a bound handler is the handler's own call; the unit of work
+that failed is usually further out, which is what the two filters on
+`current_event()` are for. `current_event(kind="request")` returns
+the nearest enclosing event of that kind, the request wrapture's own
+middleware recorded; `current_event(binding=dispatch)` returns the
+nearest enclosing event that the given binding recorded, for a unit
+of work your own binding created. Either walks outward from the
+innermost in-flight event, returns `None` when nothing matches, and
+given both requires both. Noting the same exception object twice
+against one event records it once, and an exception noted against
+an event that it then escapes shows once, as the escape. Outside
+recording the call is a silent no-op; a note aimed at an event that
+has already finished is refused with a `ConfigWarning`, since the
+sinks have already heard that event close.
+
 ### Capturing the call stack
 
 The tape's parent and child links give the logical path between

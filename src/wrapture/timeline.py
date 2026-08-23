@@ -23,6 +23,7 @@ import functools
 import sys
 import threading
 import time
+import warnings
 import weakref
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, Self, runtime_checkable
@@ -32,7 +33,8 @@ from wrapt import MISSING
 from . import trace as _trace
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
-from .events import Event, _format_time, _own_time
+from .events import CaughtException, Event, _caught_types, _format_time, _own_time
+from .exceptions import ConfigWarning
 from .sinks import (
     Sink,
     _active_sinks,
@@ -196,7 +198,10 @@ class _EventQueries:
 
         A completed event shows its result after `->`; one that raised
         shows `!!` and the exception type; one still in progress shows
-        neither. With times=True a timed event also shows its
+        neither. An exception caught inside the scope and noted with
+        note_exception() shows as `!!` and its type after the result,
+        so one line can say both that the scope returned and that it
+        failed. With times=True a timed event also shows its
         execution time and, where observed children account for part
         of it, its self time.
         """
@@ -253,6 +258,11 @@ class _EventQueries:
                 marker = f"  -> {event.result!r}{injected}"
             else:
                 marker = ""
+
+            # Exceptions caught inside the scope and noted against it
+            # follow the outcome, one marker each, in the order noted.
+
+            marker += "".join(f"  !! {name}" for name in _caught_types(event))
 
             line = "  " * level + str(event) + marker
             if times:
@@ -660,16 +670,40 @@ def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
         _in_recorder.reset(guard)
 
 
-def current_event() -> Event | None:
+def current_event(kind: str | None = None, binding: Any = None) -> Event | None:
     """The in-flight event, or None when nothing is being recorded.
 
     The behaviour pipeline runs after its event is pushed, so this is
     reachable from inside a decorates() handler, where it names the
     event for the very call the handler is wrapping.
+
+    The filters aim further out, at the nearest enclosing event of a
+    given identity: `kind=` selects by what sort of thing the event is
+    ("request" for the request wrapture's own middleware recorded),
+    `binding=` by which binding recorded it (the handle an
+    instrumentation holds on its own binding, or a behaviour namespace
+    standing in for it). Either walks the in-flight stack from the
+    innermost event outward and returns the first match, None when no
+    enclosing event matches; given both, both must match. This is how
+    a handler that was passed an exception reaches the unit of work
+    that actually failed, for note_exception().
     """
 
     stack = _stack.get()
-    return stack[-1] if stack else None
+
+    if kind is None and binding is None:
+        return stack[-1] if stack else None
+
+    binding = getattr(binding, "_binding", binding)
+
+    for event in reversed(stack):
+        if kind is not None and event.kind != kind:
+            continue
+        if binding is not None and event.binding is not binding:
+            continue
+        return event
+
+    return None
 
 
 def current_trace() -> _trace.TraceContext | None:
@@ -726,6 +760,57 @@ def annotate(**data: Any) -> None:
     event = current_event()
     if event is not None:
         event.data.update(data)
+
+
+def note_exception(exception: BaseException, *, event: Event | None = None) -> None:
+    """Note a caught exception against an event, without changing
+    control flow.
+
+    For the code that handles an exception rather than letting it
+    escape: a framework's error handler is passed the exception and
+    returns a normal response, so the scope that failed completes with
+    a result and wrapture would otherwise never know. The note records
+    the exception on the event's `caught` sequence with the moment it
+    was noted, marks the event as failed for every sink, filter and
+    renderer, and leaves the exception's own fate to the caller.
+
+    `event` defaults to the in-flight event from current_event(), which
+    from inside a bound handler is the handler's own call; aim at the
+    unit of work that failed with the filters, `current_event(
+    kind="request")` for a request wrapture's middleware recorded, or
+    `current_event(binding=...)` for an event of the caller's own
+    binding. A silent no-op when nothing is being recorded, so
+    instrumentation calls it unconditionally.
+
+    Noting the same exception object twice against one event records it
+    once, and an exception noted against an event that it later escapes
+    shows once, as the escape. A note against an event that has already
+    finished is refused with a ConfigWarning and leaves the event
+    unchanged: the sinks have already heard that event close, so nothing
+    could carry the note to them, and the failure needs recording
+    another way.
+    """
+
+    if event is None:
+        event = current_event()
+        if event is None:
+            return
+
+    if event.finished:
+        warnings.warn(
+            f"note_exception() ignored for {event}: the event has already"
+            f" finished, so no sink can be told of the"
+            f" {type(exception).__name__}; note it against an event still in"
+            " flight, or record the failure another way",
+            ConfigWarning,
+            stacklevel=2,
+        )
+        return
+
+    if any(caught.exception is exception for caught in event.caught):
+        return
+
+    event.caught = event.caught + (CaughtException(exception, time.perf_counter()),)
 
 
 class _BlockRecorder:

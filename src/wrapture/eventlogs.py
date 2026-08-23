@@ -98,17 +98,31 @@ class EventLog:
         return self._narrow(f"[matching={name}]", lambda event: bool(predicate(event)))
 
     def raising(self, *exceptions: type[BaseException]) -> EventLog:
-        """Events that raised one of the given exception types, or, with
-        no arguments, events that raised anything at all."""
+        """Events in which one of the given exception types was raised,
+        or, with no arguments, events in which anything was raised.
+
+        Raised inside the scope, whether or not it escaped: an exception
+        that escaped the scope (the event's `exception`) and one caught
+        inside it and noted with note_exception() (its `caught`) both
+        count, so an assertion that a request failed with KeyError
+        holds whether the framework swallowed the exception or not.
+        Which of the two it was is the fields' business.
+        """
 
         if not exceptions:
-            return self._narrow("[raising]", lambda event: event.exception is not None)
+            return self._narrow("[raising]", lambda event: event.failed)
 
         names = ",".join(exception.__name__ for exception in exceptions)
-        return self._narrow(
-            f"[raising={names}]",
-            lambda event: isinstance(event.exception, exceptions),
-        )
+
+        def keep(event: Event) -> bool:
+            if isinstance(event.exception, exceptions):
+                return True
+
+            return any(
+                isinstance(caught.exception, exceptions) for caught in event.caught
+            )
+
+        return self._narrow(f"[raising={names}]", keep)
 
     def with_args(self, **arguments: Any) -> EventLog:
         """Call events whose normalized arguments include every given

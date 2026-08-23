@@ -99,7 +99,13 @@ as too fine-grained for a trace. Captured arguments, results and
 `annotate()` data ride along as span attributes, flattened onto
 dotted names (`wrapture.arg.item`, `wrapture.data.rows`), and an
 event that closes with an exception ends its span with error status
-and the exception recorded. Spans are parented through the event
+and the exception recorded. An exception the code caught and noted
+with `note_exception()` is recorded the same way, as an exception
+event on the span placed at the moment of the note, and sets the
+error status unless the span is already in error, so a request's
+5xx status and a noted exception agree rather than fight: the
+request span shows the response status, the error status, and the
+`KeyError` the framework swallowed. Spans are parented through the event
 tree's own links, so trees that cross threads export correctly, and
 the flush wrapture gives process sinks at interpreter exit drains
 the OTel batch processor too, so the tail of a trace is not lost in
@@ -148,7 +154,9 @@ The metrics signal aggregates the same events instead of exporting
 them individually: request durations into the semantic-convention
 `http.server.request.duration` histogram attributed by method and
 status code, call durations into a per-path `wrapture.call.duration`
-histogram whose error series split out by exception type, and a
+histogram whose error series split out by exception type (an
+escaped exception's, or the first noted with `note_exception()`, so
+the error rate counts failures the code handled itself), and a
 `wrapture.operations` counter of operations observed beginning. The
 bound path is safe as a metric attribute precisely because the
 config chose the bindings: the set of values is closed, where the

@@ -158,12 +158,15 @@ class OpenTelemetrySink(wrapture.Sink):
         # A request's result is its status line; report it the semconv
         # way and mark server errors. Anything else is just a result.
 
+        errored = False
+
         if event.kind == "request":
             status = _status_code(event.result)
             if status is not None:
                 span.set_attribute("http.response.status_code", status)
                 if status >= 500:
                     span.set_status(Status(StatusCode.ERROR))
+                    errored = True
         elif event.result is not wrapture.MISSING:
             span.set_attribute(f"{self._prefix}.result", self._coerce(event.result))
 
@@ -175,12 +178,20 @@ class OpenTelemetrySink(wrapture.Sink):
         if event.body_duration is not None:
             span.set_attribute(f"{self._prefix}.body_duration", event.body_duration)
 
+        # Exceptions the code caught and noted against the event each
+        # become an exception event on the span, placed at the moment
+        # of the note, and the first of them sets the error status
+        # unless a 5xx already did: the two agree rather than fight.
+
+        self._record_caught(span, event, errored=errored)
+
         self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
         self._restore_register(event)
 
     def on_error(self, event: Event) -> None:
-        """Close the event's span as failed, recording the exception."""
+        """Close the event's span as failed, recording the exception
+        that escaped and any noted against the event besides."""
 
         span = self._take(event.seq)
         if span is None:
@@ -192,9 +203,29 @@ class OpenTelemetrySink(wrapture.Sink):
         else:
             span.set_status(Status(StatusCode.ERROR))
 
+        self._record_caught(span, event, errored=True)
+
         self._sweep_data(span, event)
         span.end(end_time=self._end_time(event))
         self._restore_register(event)
+
+    def _record_caught(self, span: trace.Span, event: Event, *, errored: bool) -> None:
+        # One exception event per noted exception, timestamped from the
+        # note's perf_counter moment through the sink's pinned clock so
+        # it sits inside the span on the same clock as its start and
+        # end. The status is set to ERROR once, from the first note,
+        # and left alone when the span is already in error.
+
+        for caught in event.caught:
+            span.record_exception(
+                caught.exception, timestamp=self._to_epoch_ns(caught.at)
+            )
+
+            if not errored:
+                span.set_status(
+                    Status(StatusCode.ERROR, type(caught.exception).__name__)
+                )
+                errored = True
 
     def flush(self) -> None:
         """Push batched spans to the exporter; called by wrapture at

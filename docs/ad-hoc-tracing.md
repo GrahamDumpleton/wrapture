@@ -391,8 +391,10 @@ The form is deliberately stable. Every line has `seq`, `parent_id`
 only when it was observed: `label`, `started` and `duration`
 (plus `body_duration` and `items` for generators), `arguments` or the
 raw `args`/`kwargs` shape, `forwarded`, `result`, `exception` (type
-and message), `value` and `previous` for attribute writes, `injected`,
-`stack`, and `data`. Absence means "not captured", so an absent
+and message), `caught` (a list of the exceptions noted with
+`note_exception()`, each with type, message and `offset`, the
+seconds since the event started), `value` and `previous` for
+attribute writes, `injected`, `stack`, and `data`. Absence means "not captured", so an absent
 `result` stays distinguishable from `"result": null`, a call that
 returned None, exactly the distinction `MISSING` preserves in memory.
 
@@ -557,6 +559,13 @@ surface, four pieces that read as one:
   aggregating sink wants is an annotation on an event: count inside
   the loop, annotate the total onto the enclosing block on the way
   out, one event rather than ten thousand.
+- **`wrapture.note_exception(exc)`** is annotation's sibling for a
+  failure the code handled itself: an exception caught and dealt
+  with, so the scope completes normally, is noted against the event
+  as a `caught` entry, marking the operation failed for every sink
+  and filter without touching control flow. Equally safe to call
+  unconditionally; `event=` aims it past the in-flight event at the
+  unit of work that failed.
 - **`WSGIMiddleware` and `ASGIMiddleware`** wrap the application
   object at the edge in code,
   `application = wrapture.WSGIMiddleware(application)`, grouping
@@ -911,6 +920,29 @@ every option is equally usable through raw
 `wrapt.discover_post_import_hooks()`; the config route adds the
 options, the failure posture, and the config file's control over
 when it all happens.
+
+Framework instrumentation has one more call to know about. A
+framework routinely catches the exception a view raised and hands it
+to an error handler that returns normally (`Flask.handle_exception`,
+Django's `handle_uncaught_exception`, Celery's `on_failure`), so the
+request or task that failed completes with a result and no
+exception; the handler is the only code that can be bound, and
+`wrapture.note_exception(exc, event=...)` from a behaviour on it is
+how the failure reaches the event that actually failed. The aiming
+rule: `event=wrapture.current_event(kind="request")` when the unit
+of work is a request wrapture's own middleware recorded, which no
+binding of yours created, and
+`event=wrapture.current_event(binding=self.task_call)` when it is
+an event of the instrumentation's own binding (a Celery
+instrumentation's `Task.__call__`, say), the handle it already
+holds. Both return the nearest enclosing match, `None` when the
+handler runs with nothing enclosing it. A handler that fires after
+the unit of work has closed cannot note against it: the sinks have
+already heard that event close, so the note is refused with a
+`ConfigWarning` naming the event and the exception, which tells you
+the failure needs recording another way. The [unit testing
+guide](unit-testing.md#noting-a-caught-exception) has the full
+semantics.
 
 ### Code next to the config file
 

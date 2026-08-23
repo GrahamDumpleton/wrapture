@@ -131,6 +131,16 @@ assertions conclude (`assert_once()`, `assert_never()`,
 `assert_times()`), `tape.assert_order()` checks sequence across any
 bindings, and `tape.tree()` prints the nested call tree.
 
+An event keeps two facts about failure apart. Its `exception` is the
+exception that escaped the scope, set by the recording path itself.
+Its `caught` sequence holds the exceptions the observed code handled
+inside the scope and reported with `wrapture.note_exception()`, the
+way a framework's error handler can, the scope itself completing with
+a result; `event.failed` is either, and `raising()` matches either. A
+noted exception shows in every view as the same `!!` marker an escape
+does, after the result, so one line can say both that the scope
+returned and that it failed.
+
 Timelines scope as well as record. A tape is never cleared; a test
 that wants fresh counts for each phase opens one timeline per phase,
 and timelines nest, an inner one reading only what happened inside it

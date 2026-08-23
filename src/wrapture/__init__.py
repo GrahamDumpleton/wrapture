@@ -72,6 +72,7 @@ from .eventlogs import (
     EventLog,
 )
 from .events import (
+    CaughtException,
     Event,
 )
 from .exceptions import (
@@ -138,6 +139,7 @@ from .timeline import (
     block,
     current_event,
     current_trace,
+    note_exception,
     propagate,
     timeline,
     trace_headers,
@@ -175,6 +177,7 @@ __all__ = [
     "Block",
     "CallBehaviour",
     "CallPhase",
+    "CaughtException",
     "Config",
     "ConfigError",
     "ConfigWarning",
@@ -240,6 +243,7 @@ __all__ = [
     "load_events",
     "mermaid",
     "mock",
+    "note_exception",
     "observed",
     "propagate",
     "redact",
