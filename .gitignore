@@ -19,3 +19,5 @@ examples/stream-to-disk/trace.json
 examples/stream-to-disk/trace.jsonl
 examples/trace-propagation/client.jsonl
 examples/trace-propagation/server.jsonl
+examples/trace-propagation/client-otel.jsonl
+examples/trace-propagation/server-otel.jsonl

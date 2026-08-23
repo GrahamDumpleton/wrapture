@@ -377,3 +377,25 @@ for name in ('client.jsonl', 'server.jsonl'):
 A request arriving with no `traceparent` (a plain `curl` at the
 server) mints a fresh id at the boundary instead, so the server's
 records are joinable per request either way.
+
+The directory carries a second pair of configs, `client-otel.toml`
+and `server-otel.toml`, that add OpenTelemetry export on both sides
+(the `wrapture[otel]` extra supplies the dependencies), which turns
+the same run into the cross-service correlation demo. The client
+side's sink claims each tree's identity, so the id the probe
+injects is the id of a span the backend really has; the server
+side's sink creates each request span with the arrived identity as
+a remote parent. In an OTel viewer each order is then one
+distributed trace: the `order-frontend` spans with the
+`quote-service` request span attached beneath the outbound urllib
+span that made the call. Same two terminals, with the extra:
+
+```console
+$ uv run --extra otel python -m wrapture --config server-otel.toml server.py
+$ uv run --extra otel python -m wrapture --config client-otel.toml client.py
+```
+
+The configs also stream `client-otel.jsonl` and `server-otel.jsonl`,
+and the join query above works on them unchanged; the ids it prints
+are now the claimed ones, the same ids the viewer shows, files,
+headers and spans agreeing throughout.

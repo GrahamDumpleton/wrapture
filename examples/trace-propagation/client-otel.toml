@@ -1,0 +1,37 @@
+# The client half again, exporting to OpenTelemetry as well as
+# printing. Same observation and urllib probe as client.toml; the
+# [otel] table adds the span export, and its sink claims each tree's
+# identity, so the id the probe injects into the traceparent header
+# is the id of a span the backend really has. Run with the otel
+# extra:
+#
+#   uv run --extra otel python -m wrapture --config client-otel.toml client.py
+
+pythonpath = "."
+
+[[observe]]
+target = "frontend"
+match = "*"
+
+[[setup]]
+module = "urllib.request"
+call = "wrapture_local.urllib_support:instrument"
+
+[[sink]]
+type = "printer"
+
+# A separate file from client.toml's, so the two variants do not
+# interleave; every line carries the claimed trace id, the same id
+# the exported spans and the wire headers show.
+
+[[sink]]
+type = "jsonlines"
+path = "client-otel.jsonl"
+
+[otel]
+service_name = "order-frontend"
+signals = ["traces"]
+
+[otel.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+exporter_otlp_protocol = "http/protobuf"
