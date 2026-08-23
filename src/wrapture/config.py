@@ -1370,9 +1370,9 @@ def _apply_pythonpath(document: Mapping[str, Any], location: str) -> None:
 
 def _instrument_entries(document: Mapping[str, Any]) -> list[InstrumentEntry]:
     # An [[instrument]] table has one reserved key, name, plus the
-    # enabled switch; everything else is a setting of the named
-    # instrumentation, validated against its declaration when the
-    # Config is built.
+    # enabled switch and the optional triggers subset; everything else
+    # is a setting of the named instrumentation, validated against its
+    # declaration when the Config is built.
 
     entries: list[InstrumentEntry] = []
 
@@ -1397,7 +1397,10 @@ def _instrument_entries(document: Mapping[str, Any]) -> list[InstrumentEntry]:
             )
 
         enabled = table.pop("enabled", True)
-        entries.append(InstrumentEntry(name, enabled=enabled, settings=table))
+        triggers = table.pop("triggers", ())
+        entries.append(
+            InstrumentEntry(name, enabled=enabled, settings=table, triggers=triggers)
+        )
 
     return entries
 

@@ -13,11 +13,14 @@ keep it safe to load, how to test it, and how to name it.
 ## The shape
 
 One class per target, subclassing `wrapture.Instrumentation`, with
-class data for everything static and two methods for behaviour:
+class data for everything static and one decorated hook method per
+trigger module:
 
 ```python
 # wrapture_instrumentation_flask/__init__.py
 import wrapture
+
+from . import hooks
 
 
 class FlaskInstrumentation(wrapture.Instrumentation):
@@ -25,44 +28,47 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 
     target = "flask"
     supports = ">=2.0,<4"
-    modules = ("flask.app", "flask.blueprints")
-    requires = ("werkzeug",)
+    requires = "werkzeug"
     removable = True
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
         "ignore_paths": wrapture.Setting((), "paths never traced, exact match"),
     }
 
-    def apply(self, name, module):
-        from . import hooks
-
+    @wrapture.instrumentation_hook("flask.app")
+    def flask_app(self, name, module):
         hooks.instrument(name, module, self)
 ```
 
 Reading down:
 
 - `target` is the one top-level import name the class covers. Every
-  entry in `modules`, the trigger modules whose import calls
-  `apply()`, must live under it; wrapture refuses a class that claims
-  a module outside its target the moment the class is defined.
+  trigger module a hook declares must live under it; wrapture refuses
+  a class that claims a module outside its target the moment the
+  class is defined.
 - `supports` is a PEP 440 specifier against the target's installed
   version, read from package metadata. Outside the range, nothing
   registers and the user sees a `ConfigWarning`, never an error: the
   environment being newer or older than the package is not a
-  misconfiguration. `modules` may be a mapping carrying a per-module
-  specifier for a module that only exists from some version on,
-  `{"flask.app": None, "flask.sansio.app": ">=2.3"}`; the dry run
-  `python -m wrapture.tools instrumentation --verbose` shows what would
-  register in a given environment. Version segmentation beyond that is
-  the class's own dispatch on `self.target_version` inside `apply()`;
-  wrapture gates and reports, it never selects among hook functions.
+  misconfiguration. A trigger module that only exists from some
+  version on carries its own specifier on its hook's decorator,
+  `@wrapture.instrumentation_hook("flask.sansio.app", supports=">=2.3")`;
+  the dry run `python -m wrapture.tools instrumentation --verbose`
+  shows what would register in a given environment. Version
+  segmentation beyond that is the hook's own dispatch on
+  `self.target_version`; wrapture gates and reports, it never selects
+  among hook functions.
 - `requires` names other targets that must have an enabled
-  instrumentation in the same config. Requirements are not pulled in
-  automatically; a missing one is a loud `ConfigError` naming the
-  target.
+  instrumentation in the same config: a single name, or a sequence
+  of them. Requirements are not pulled in automatically; a missing
+  one is a loud `ConfigError` naming the target.
 - `removable` is the claim that the class can undo itself. It defaults
   to false, so say it; it governs `report()` and the warning
-  `revert()` gives, and undo callbacks run either way.
+  `revert()` gives, and cleanup callbacks run either way. A hook that
+  cannot undo its own patches overrides the claim for its trigger
+  alone, `@wrapture.instrumentation_hook(..., removable=False)`, and
+  the class-level claim consumers see is then true only for the
+  triggers that keep it.
 - `settings` declares every key an `[[instrument]]` entry may carry,
   each a `Setting(default, description)`. An unknown key, or a value
   whose outer type does not match the default's, is a `ConfigError`
@@ -70,29 +76,49 @@ Reading down:
   inside the hooks. The description is what the listing tool and the
   generated template show beside each setting, so write it for the
   person editing the file.
-- `name`, `description` and `version` default from the entry point
-  name, the distribution's summary and the distribution's version.
-  Set them only to override.
+- `name` and `version` default from the entry point name and the
+  distribution's version; set them only to override. `description`
+  defaults from the distribution's summary, which describes the whole
+  collection, so a class in a multi-target package should set its
+  own.
 
-`apply(name, module)` is called once per trigger module, when that
-module is imported or immediately if it already was, with the trigger
-name so one class serving several modules can dispatch. `self` is
-wrapture's per-application record: `self.settings`,
-`self.target_version`, `self.applied` and `self.pending` (the
-triggers fired and not yet fired), `self.trigger` (the one firing on
-this thread), and `self.on_remove(callback)`. `configure()` is the
-optional one-time hook before any trigger fires; `__init__` is
-wrapture's and is not overridden.
+## Hooks
 
-## Import only wrapture
+Each method decorated with `@wrapture.instrumentation_hook(module)`
+is the hook for one trigger module: it is called as
+`method(self, name, module)` when that module is imported, or
+immediately if it already was, with the trigger's name and the module
+object. The trigger string appears only on the decorator; the
+class's trigger set is derived from its decorated methods, and the
+method name itself is free. `self` is wrapture's per-application
+record: `self.settings`, `self.target_version`, `self.applied` and
+`self.pending` (the triggers fired and not yet fired), `self.trigger`
+(the one firing on this thread, the same value as `name`), and
+`self.on_cleanup(callback)`. `configure()` is the optional one-time
+hook before any trigger fires; `__init__`, `apply()` and `remove()`
+are wrapture's and are not overridden.
 
-The module that defines the class imports wrapture and nothing else.
-Anything that touches the target, the hook code, the framework's own
-classes, lives behind an import inside `apply()` and `remove()`, the
-`from . import hooks` above. The reason is the ordering everything
-else depends on: wrapture loads the class when the config loads, so
-that it can validate settings and report, and that happens before the
-application imports anything. A class whose module imported `flask`
+One method can serve several triggers by stacking the decorator,
+which is why the signature always takes `name`:
+
+```python
+    @wrapture.instrumentation_hook("celery.app.task")
+    @wrapture.instrumentation_hook("celery.app.base")
+    def celery_app(self, name, module):
+        ...
+```
+
+The base class owns `apply(name, module)` and `remove(name, module)`:
+wrapture's dispatch calls them as triggers arrive, and a package's
+own tests call them directly, with identical behaviour, which is
+what makes the direct testing recipe below work.
+
+## Import posture
+
+The module that defines the class must not import the target it
+patches. wrapture loads the class when the config loads, so that it
+can validate settings and report, and that happens before the
+application imports anything; a class whose module imported `flask`
 at the top would drag Flask in right then, ahead of the hook meant to
 fire on its import, and the patches would land after the import they
 were meant to precede. wrapture watches for exactly this: loading a
@@ -100,18 +126,45 @@ class is wrapped in a snapshot of `sys.modules`, and if any of the
 class's own triggers (or its target) appeared, a `ConfigWarning` says
 so, and the listing tool shows it as a warning line.
 
+Where the patch code lives is a matter of size, not of rules. A
+small instrumentation, a couple of bindings built against the module
+handed in, reads best directly in the hook method's body, as the
+examples on the [ad-hoc tracing](ad-hoc-tracing.md#instrumentation-code-that-patches-a-target)
+and [WSGI tracing](wsgi-tracing.md#framework-instrumentation-under-the-covers)
+pages do. Once the patching grows past what one method holds
+comfortably, the convention is a `hooks` module beside the class,
+imported at the top as the skeleton above does. Both placements are
+safe for the same reason: the code needs no target import of its
+own, importing only wrapture at top level and receiving the trigger
+module as a parameter, which for most instrumentation is everything
+it touches.
+
+When that stops being true, because the patching needs another
+submodule of the target, a class the trigger module does not expose,
+or a pile of helper modules, the imports must not ride on loading
+the class. The options, in the order to reach for them:
+
+- Import inside the hook function that uses the module, next to the
+  use. The import runs when the trigger fires, by which time the
+  target is imported anyway, so nothing is dragged in early.
+- From Python 3.15 on, the language-level lazy import can sit at the
+  top of `hooks.py` and defer just the same, keeping the imports in
+  the conventional place.
+- On older Pythons, `wrapt.lazy_import()` gives the equivalent: a
+  module handle at the top of `hooks.py` that imports for real on
+  first use, useful when the hook code needs many modules and
+  function-local imports would repeat everywhere.
+
 The same rule covers a multi-target package: each class's module
-imports only wrapture, and does not import a sibling class's target
-either.
+must not import a sibling class's target either.
 
 ## Removal: the bindings recipe
 
-Two styles on one mechanism. The usual one is to register undo
-callbacks from inside `apply()` with `on_remove()`, tagged
-automatically with the trigger being applied, and let the base
-`remove()` run them, most recent first, continuing past one that
-raises. For instrumentation built on bindings, the recipe is three
-lines:
+Two styles on one mechanism. The usual one is to register cleanup
+callbacks from inside the hook with `on_cleanup()`, tagged
+automatically with the trigger being applied, and let removal run
+them, most recent first, continuing past one that raises. For
+instrumentation built on bindings, the recipe is three lines:
 
 ```python
 # wrapture_instrumentation_flask/hooks.py
@@ -128,19 +181,34 @@ def instrument(name, module, instrumentation):
     group = wrapture.bindings(constructor=constructor, registrar=registrar)
     group.apply()
 
-    instrumentation.on_remove(group.remove)
+    instrumentation.on_cleanup(group.remove)
 ```
 
 Build the group, apply it, register its `remove()`. A `Binding`'s or
-`BindingGroup`'s `remove()` returns the object, and `on_remove()`
+`BindingGroup`'s `remove()` returns the object, and `on_cleanup()`
 ignores the return value, so the method passes straight in. The
-alternative is overriding `remove(name, module)` for a centralised
-teardown, when undo does not decompose per trigger.
+alternative, for teardown that does not decompose into callbacks, is
+a cleanup method paired with the hook:
 
-wrapture calls `remove()` only for triggers whose `apply()` actually
-ran, in reverse order on `revert()`. An `apply()` that raises has the
-callbacks it registered before raising run at once, so its partial
-work does not linger.
+```python
+    @wrapture.instrumentation_hook("flask.app")
+    def flask_app(self, name, module):
+        ...
+
+    @flask_app.cleanup
+    def remove_flask_app(self, name, module):
+        ...
+```
+
+The paired method covers every trigger its hook claims. On removal
+of a trigger, the `on_cleanup()` callbacks registered during its hook
+run first, most recent first, then the paired cleanup method; both
+continue past a raise with a warning.
+
+wrapture removes only triggers whose hook actually ran, in reverse
+order on `revert()`. A hook that raises has the callbacks it
+registered before raising run at once, so its partial work does not
+linger.
 
 ## Shaped settings
 
@@ -199,9 +267,9 @@ each named for its target:
 
 ```toml
 [project.entry-points."wrapture.instrumentation"]
-flask = "wrapture_instrumentation.flask:FlaskInstrumentation"
-werkzeug = "wrapture_instrumentation.werkzeug:WerkzeugInstrumentation"
-requests = "wrapture_instrumentation.requests:RequestsInstrumentation"
+flask = "wrapture_instrumentation.framework_flask:FlaskInstrumentation"
+werkzeug = "wrapture_instrumentation.framework_werkzeug:WerkzeugInstrumentation"
+requests = "wrapture_instrumentation.external_requests:RequestsInstrumentation"
 ```
 
 One distribution can therefore ship instrumentation for many common
@@ -253,9 +321,10 @@ third-party name.
 ## Testing the class directly
 
 Testability is a deliberate property of the shape. A package's own
-tests construct the class, call `apply()` on an imported module, and
-call `remove()` afterwards, with none of wrapture's hook machinery
-involved:
+tests construct the class, call `apply()` with a trigger name and the
+imported module, and call `remove()` afterwards, with none of
+wrapture's hook machinery involved; these are the same methods
+wrapture's own dispatch calls, so the two paths cannot drift apart:
 
 ```python
 import flask
@@ -272,11 +341,15 @@ def test_requests_are_recorded():
 ```
 
 Constructing the class runs the settings validation, so a test can
-also assert that a bad setting is refused. For the whole path through
+also assert that a bad setting is refused. Applying a trigger the
+class does not declare, or one already applied, is a `ConfigError`;
+removing one that never applied is a no-op. For the whole path through
 wrapture, the [unit testing guide](unit-testing.md#applying-instrumentation-in-a-test)
 shows `wrapture.instrumentation(FlaskInstrumentation, ...)` scoping
 an application of the class to a block, with `timeline()` recording
-what its bindings observe.
+what its bindings observe; its `triggers=` keyword scopes the
+application to a subset of the declared triggers, so a multi-trigger
+class can be tested one hook at a time.
 
 ## Checking an environment
 

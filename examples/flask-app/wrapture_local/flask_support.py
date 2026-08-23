@@ -1,9 +1,9 @@
 """Instrument Flask, entirely under the covers.
 
 A stand-in for what a wrapture-instrumentation-flask package would
-ship: one Instrumentation subclass, triggered by the import of "flask"
-itself, that instruments every Flask application the process ever
-creates. Nothing here knows the application's module, its attribute
+ship: one Instrumentation subclass whose hook, triggered by the import
+of "flask" itself, instruments every Flask application the process
+ever creates. Nothing here knows the application's module, its attribute
 names, or whether it uses the application-factory pattern; packaged
 with an entry point, the config would say `[[instrument]]` with
 `name = "flask"` and nothing else. Here the config names the class by
@@ -33,7 +33,7 @@ Three patches, all at Flask's own choke points:
 All three bindings are created with when=False, making them
 behaviour-only: the plumbing is not the trace, so they act without
 ever recording their own calls. They are applied as one group whose
-remove() is registered with on_remove(), which is what lets
+remove() is registered with on_cleanup(), which is what lets
 AppliedConfig.revert() and the instrumentation() context manager
 take the whole thing down again.
 """
@@ -49,10 +49,10 @@ class FlaskInstrumentation(wrapture.Instrumentation):
     """Request and view tracing for Flask applications."""
 
     target = "flask"
-    modules = ("flask",)
     removable = True
 
-    def apply(self, name: str, module: Any) -> None:
+    @wrapture.instrumentation_hook("flask")
+    def flask(self, name: str, module: Any) -> None:
         def wrap_app(
             wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
         ) -> Any:
@@ -110,4 +110,4 @@ class FlaskInstrumentation(wrapture.Instrumentation):
         )
         group.apply()
 
-        self.on_remove(group.remove)
+        self.on_cleanup(group.remove)

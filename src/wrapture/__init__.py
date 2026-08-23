@@ -99,6 +99,7 @@ from .instrumentations import (
     InstrumentEntry,
     Setting,
     instrumentation,
+    instrumentation_hook,
 )
 from .iterators import (
     IteratorAbandonBehaviour,
@@ -248,6 +249,7 @@ __all__ = [
     "find_config",
     "flush_sinks",
     "instrumentation",
+    "instrumentation_hook",
     "iterator",
     "load_config",
     "load_events",

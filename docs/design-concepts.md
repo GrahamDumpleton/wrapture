@@ -254,10 +254,10 @@ is the reference for all of it.
 
 When the patching a config needs is richer than naming members, it
 is an **instrumentation**: a subclass of `wrapture.Instrumentation`
-declaring the one target package it covers, the trigger modules
-under it, the version range it supports and the settings it takes,
-with an `apply(name, module)` that wrapture calls when each trigger
-is imported and a `remove()` that undoes it. An `[[instrument]]`
+declaring the one target package it covers, the version range it
+supports and the settings it takes, with a decorated hook method per
+trigger module that wrapture calls when that module is imported, and
+cleanup registration that undoes it on removal. An `[[instrument]]`
 entry names the class, by entry point name for a published package
 (one distribution may register many, one class per target) or by
 `module:attr` reference for a class next to the config file, and

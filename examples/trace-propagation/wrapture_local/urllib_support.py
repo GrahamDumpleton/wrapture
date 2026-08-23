@@ -26,10 +26,10 @@ class UrllibInstrumentation(wrapture.Instrumentation):
     """Outbound request recording and trace propagation for urllib."""
 
     target = "urllib"
-    modules = ("urllib.request",)
     removable = True
 
-    def apply(self, name: str, module: Any) -> None:
+    @wrapture.instrumentation_hook("urllib.request")
+    def request(self, name: str, module: Any) -> None:
         def inject(
             args: tuple[Any, ...], kwargs: dict[str, Any]
         ) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -53,4 +53,4 @@ class UrllibInstrumentation(wrapture.Instrumentation):
         opener.on_call.transforms_args(inject)
         opener.apply()
 
-        self.on_remove(opener.remove)
+        self.on_cleanup(opener.remove)

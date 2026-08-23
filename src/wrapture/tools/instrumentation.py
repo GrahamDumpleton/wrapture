@@ -28,6 +28,7 @@ from typing import Any, NoReturn
 from ..config import _apply_pythonpath, _instrument_entries, _read_document
 from ..exceptions import ConfigError, ConfigWarning
 from ..instrumentations import (
+    Instrumentation,
     InstrumentEntry,
     _plan,
     _registered,
@@ -304,6 +305,25 @@ def _target_line(resolved: _Resolved) -> str:
     return text
 
 
+def _removable_text(cls: type[Instrumentation]) -> str:
+    # The effective claim per trigger: one word when uniform, and the
+    # split spelled out when a hook's removable= differs from the rest.
+
+    verdicts = {
+        name: (hook.removable if hook.removable is not None else cls.removable)
+        for name, hook in cls._hooks.items()
+    }
+
+    if all(verdicts.values()):
+        return "yes"
+    if not any(verdicts.values()):
+        return "no"
+
+    yes = [name for name, verdict in verdicts.items() if verdict]
+    no = [name for name, verdict in verdicts.items() if not verdict]
+    return f"{', '.join(yes)} only, not {', '.join(no)}"
+
+
 def _modules_text(resolved: _Resolved) -> str:
     parts = []
     for name, specifier in _trigger_specifiers(resolved.cls).items():
@@ -375,7 +395,7 @@ def _render_listing(
         lines.append(f"  modules: {_modules_text(resolved)}")
         if cls.requires:
             lines.append(f"  requires: {', '.join(cls.requires)}")
-        lines.append(f"  removable: {'yes' if cls.removable else 'no'}")
+        lines.append(f"  removable: {_removable_text(cls)}")
 
         if cls.settings:
             lines.append("  settings:")

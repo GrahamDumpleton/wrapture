@@ -853,11 +853,11 @@ richer (behaviour pipelines, redaction policies, `when=` predicates,
 iterator proxies, a framework's choke points) lives in ordinary
 Python, and the config's way of running such code at the right moment
 is an **instrumentation**: a subclass of `wrapture.Instrumentation`
-that declares, as class data, the one target package it covers and
-the trigger modules under it, and whose `apply(name, module)` is
-called once per trigger module when that module is imported, or
-immediately if it already was. An `[[instrument]]` entry names the
-class, and its remaining keys are the class's declared settings:
+that declares, as class data, the one target package it covers, and
+as decorated hook methods the trigger modules under it, each hook
+called once when its module is imported, or immediately if it
+already was. An `[[instrument]]` entry names the class, and its
+remaining keys are the class's declared settings:
 
 ```toml
 [[instrument]]
@@ -874,13 +874,13 @@ class OrdersInstrumentation(wrapture.Instrumentation):
     """Restock tracing for the tenants named in the config."""
 
     target = "myapp"
-    modules = ("myapp.orders",)
     removable = True
     settings = {
         "tenants": wrapture.Setting((), "tenants whose restocks are traced"),
     }
 
-    def apply(self, name, module):
+    @wrapture.instrumentation_hook("myapp.orders")
+    def orders(self, name, module):
         tenants = self.settings["tenants"]
 
         def traced_tenant(instance, args, kwargs):
@@ -890,18 +890,18 @@ class OrdersInstrumentation(wrapture.Instrumentation):
                                    when=traced_tenant)
         restock.apply()
 
-        self.on_remove(restock.remove)
+        self.on_cleanup(restock.remove)
 ```
 
 The pieces, in the order they matter:
 
-- `target` is exactly one top-level import name and every entry in
-  `modules` must live under it; a class claiming a module outside its
-  target is refused the moment it is defined. The target is what the
-  conflict check works on: two enabled entries for one target are a
-  `ConfigError` when the config is built, and since every trigger
-  lives under its target, that is also what stops one module being
-  patched twice.
+- `target` is exactly one top-level import name and every trigger
+  module a hook declares must live under it; a class claiming a
+  module outside its target is refused the moment it is defined. The
+  target is what the conflict check works on: two enabled entries for
+  one target are a `ConfigError` when the config is built, and since
+  every trigger lives under its target, that is also what stops one
+  module being patched twice.
 - `settings` declares every key the entry may carry, each a
   `Setting(default, description)`. Declaration is what makes the
   file validated rather than passed through blind: an unknown key is
@@ -914,19 +914,26 @@ The pieces, in the order they matter:
   `ConfigError` raised there still surfaces at apply time. The
   resolved values, class defaults under the entry's, are
   `self.settings` on the instance.
-- `apply()` is the one door. Inside it, import whatever touches the
-  target (the module defining the class imports only wrapture, so
-  that loading the class never imports the package it is about to
-  patch), build the patches, and register the undo with
-  `self.on_remove(callback)`, tagged automatically with the trigger
-  being applied. Bindings are the common case, and the recipe is
-  three lines: build a `wrapture.bindings(...)` group, `group.apply()`,
-  `self.on_remove(group.remove)`. Override `remove(name, module)`
-  instead for a centralised teardown.
+- The decorated hook is the door: one
+  `@wrapture.instrumentation_hook(module)` method per trigger, called
+  as `method(self, name, module)`, the method name free and the
+  trigger string appearing only on the decorator (stack the decorator
+  for one method serving several triggers, with `name` saying which
+  fired). Inside it, build the patches against the module handed in
+  and register the undo with `self.on_cleanup(callback)`, tagged
+  automatically with the trigger being applied. Bindings are the
+  common case, and the recipe is three lines: build a
+  `wrapture.bindings(...)` group, `group.apply()`,
+  `self.on_cleanup(group.remove)`. For teardown that does not
+  decompose into callbacks, pair a cleanup method with the hook via
+  `@<hook>.cleanup`. The module defining the class must not import
+  the target, so that loading the class never imports the package it
+  is about to patch.
 - `removable = True` is the class's claim that it can undo itself.
   It defaults to false, so a package has to say so; the claim governs
-  `report()` and the warning `revert()` gives, and the undo callbacks
-  run either way.
+  `report()` and the warning `revert()` gives, and the cleanup
+  callbacks run either way. A hook may override the claim for its own
+  trigger with `removable=` on the decorator.
 - `name`, `description` and `version` default from the entry point
   and distribution for a packaged instrumentation, and to the target,
   the class docstring's first line and nothing for a local one.
@@ -948,30 +955,34 @@ name normalisation; a bare name two distributions register is a
 = false` keeps an entry in the file but inert: still validated, but
 applying nothing, taking part in no conflict check and satisfying no
 requirement, which is what lets a generated file be shipped with
-every entry present and switched off. A class may also declare
-`requires`, other targets that must have an enabled instrumentation
-in the same config; requirements are never pulled in automatically,
-and a missing one is a `ConfigError` naming the target.
+every entry present and switched off. An entry may carry `triggers`,
+a subset of the class's declared trigger modules to register, the
+escape hatch for excluding one hook of a large instrumentation while
+a fix is pending; a name the class does not declare is a
+`ConfigError`. A class may also declare `requires`, other targets
+that must have an enabled instrumentation in the same config, a
+single name or a sequence of them; requirements are never pulled in
+automatically, and a missing one is a `ConfigError` naming the
+target.
 
 Applying is as deferred as observing: each trigger module gets one
 post-import hook, which fires immediately for a module already
-imported and otherwise when the application imports it, and an
-`apply()` that raises from inside an application import warns and
-lets the import continue, exactly as a failing observe entry does.
-The installed version of the target, read from package metadata, is
-what a class's `supports` range (a PEP 440 specifier) and any
-per-module range in `modules` (`{"flask.app": None,
-"flask.sansio.app": ">=2.3"}`) are checked against before anything
-fires: a version outside the range registers nothing for the
+imported and otherwise when the application imports it, and a hook
+that raises from inside an application import warns and lets the
+import continue, exactly as a failing observe entry does. The
+installed version of the target, read from package metadata, is what
+a class's `supports` range (a PEP 440 specifier) and any per-trigger
+range on a hook's decorator
+(`@wrapture.instrumentation_hook("flask.sansio.app", supports=">=2.3")`)
+are checked against before anything fires: a version outside the range registers nothing for the
 affected triggers and warns with `ConfigWarning`, never an error,
 because an environment newer or older than the package is not a
 misconfiguration. `AppliedConfig.instrumentations` is the live record
 of each applied instance, with its settings in effect, the target
 version found, and `applied` and `pending` trigger lists; `report()`
 shows the same; and `revert()` removes each in reverse application
-order through its own `remove()`, neutralising the hooks that never
-fired, so instrumentation is no longer outside what a config can
-undo.
+order through `remove()`, neutralising the hooks that never fired,
+so instrumentation is no longer outside what a config can undo.
 
 What is installed, and what a file could switch on, is a command
 away: `python -m wrapture.tools instrumentation` lists every
@@ -1043,7 +1054,7 @@ and the posture depends on when that is. Fired during apply itself
 hear and raises. Fired later, from inside the application's own
 import of the module, it warns with `ConfigWarning` and drops the
 entry instead, because observation must never fail the import it
-rode in on; an instrumentation whose `apply()` raises after apply is
+rode in on; an instrumentation hook that raises after apply is
 handled the same way.
 
 The same setup is available programmatically as the `Config` class
