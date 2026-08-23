@@ -446,8 +446,9 @@ def test_rotate_on_an_untimed_path_warns_and_align_needs_rotate(
 def test_rotate_reopens_on_its_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A short interval on the real scheduler: the second file appears
-    # once the timer has fired and another line has been written.
+    # A short interval on the real scheduler: once the clock has moved
+    # on, the next firing reopens to the new name and the next line
+    # lands in the new file.
 
     import wrapture.outputs
 
@@ -461,9 +462,14 @@ def test_rotate_reopens_on_its_interval(
         Gateway().charge(1)
         sink.flush()
 
+        # The timer started with the first line and may already have
+        # fired, reopening the same file under the old clock, so wait
+        # for the observable outcome rather than a firing count: the
+        # sink reporting that it now writes the new name.
+
         clock[0] += 1
         deadline = time.monotonic() + 5
-        while sink._schedule is not None and sink._schedule.fired == 0:
+        while sink.path != str(tmp_path / "trace-1700000001.jsonl"):
             assert time.monotonic() < deadline, "rotation never fired"
             time.sleep(0.01)
 
@@ -475,3 +481,8 @@ def test_rotate_reopens_on_its_interval(
         "trace-1700000000.jsonl",
         "trace-1700000001.jsonl",
     ]
+
+    first = read_lines(tmp_path / "trace-1700000000.jsonl")
+    second = read_lines(tmp_path / "trace-1700000001.jsonl")
+    assert [line["arguments"]["amount"] for line in first] == [1]
+    assert [line["arguments"]["amount"] for line in second] == [2]
