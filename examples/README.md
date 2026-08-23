@@ -201,22 +201,25 @@ feeds the same events into the semantic-convention
 per-path `wrapture.call.duration` histogram whose error series split
 out by exception type, and a counter of operations begun.
 
-Both sinks live in `wrapture_local/otel_support.py`, the stand-in
-for what a wrapture-otel package would ship, and one `[[sink]]`
-entry registers them: its `signals` key says which signals are on,
+Both sinks ship in wrapture itself, as the `wrapture.otel`
+subpackage, with the OpenTelemetry dependencies behind the
+`wrapture[otel]` extra; this example is a plain consumer of the
+shipped code, and the OpenTelemetry export page of the
+documentation is the full guide. The top-level `[otel]` table
+registers the sinks: its `signals` key says which signals are on,
 shared facts like `service_name` sit at the top of the table, and
-per-signal tuning nests beneath it (`[sink.metrics]` sets
-`export_interval = 5`, seconds between metric exports; a
-`[sink.traces]` table would take `sample = 0.1` to sample the trace
+per-signal tuning nests beneath it (`[otel.metrics]` sets
+`export_interval = 5`, seconds between metric exports; an
+`[otel.traces]` table would take `sample = 0.1` to sample the trace
 export alone while the metrics still hear every event). The
-`[sink.environment]` table supplies defaults for OTel's own
+`[otel.environment]` table supplies defaults for OTel's own
 environment variables, each key uppercasing to its `OTEL_*` name and
 applied with setdefault. The shipped file defaults to a local
 collector on OTLP over http/protobuf, so the demo needs no
 environment setup at all:
 
 ```console
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+$ uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
@@ -237,7 +240,7 @@ runs. The explicit port stays clear of macOS AirPlay, which listens
 on 5000:
 
 ```console
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
+$ uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml -m flask --app myapp run --port 5001
 ```
 
@@ -260,18 +263,19 @@ growing at exactly the rate of the `/quote/missing` hits.
 
 With no collector at hand, `OTEL_TRACES_EXPORTER=console` and
 `OTEL_METRICS_EXPORTER=console` dump the spans and metrics to
-standard output instead, for which the sdk alone suffices:
+standard output instead:
 
 ```console
 $ OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=console \
-    uv run --with flask --with opentelemetry-sdk \
+    uv run --with flask --extra otel \
     python -m wrapture --config wrapture-otel.toml main.py
 ```
 
-If the application had already configured its own provider, the
-factory would leave it alone and the spans would flow through the
-application's exporter; here the app knows nothing of OTel, so the
-factory's zero-code path applies.
+If the application had already configured its own provider, it
+would win as the failsafe, the spans flowing through the
+application's exporter with a warning naming what of the `[otel]`
+table no longer applies; here the app knows nothing of OTel, so the
+zero-code path stands the providers up itself.
 
 ## fastapi-app
 
@@ -322,11 +326,16 @@ $ curl http://127.0.0.1:8000/quote/widget
 ## trace-propagation
 
 Two processes, one trace. A client places orders against a quote
-service over HTTP, both sides observed by wrapture, neither
-mentioning it, and the trace identity minted at each client tree's
+service over HTTP, both sides observed by wrapture, and the trace
+identity minted at each client tree's
 root travels in the `traceparent` header and reappears in the
 server's records: distributed tracing with no tracing backend
-anywhere, just wrapture on both ends.
+anywhere, just wrapture on both ends. The server code never
+mentions wrapture; the client's one embedded touch is a pair of
+`wrapture.block()` markers in `fetch_quote`, splitting the exchange
+into making the request and consuming the reply body, the two
+phases urllib's `open()` cannot separate by itself since the
+response object escapes the call with its body unread.
 
 The moving parts are the mechanism's defaults plus one probe. Trace
 identity is on by default, so every client tree mints an id at its
@@ -373,3 +382,25 @@ for name in ('client.jsonl', 'server.jsonl'):
 A request arriving with no `traceparent` (a plain `curl` at the
 server) mints a fresh id at the boundary instead, so the server's
 records are joinable per request either way.
+
+The directory carries a second pair of configs, `client-otel.toml`
+and `server-otel.toml`, that add OpenTelemetry export on both sides
+(the `wrapture[otel]` extra supplies the dependencies), which turns
+the same run into the cross-service correlation demo. The client
+side's sink claims each tree's identity, so the id the probe
+injects is the id of a span the backend really has; the server
+side's sink creates each request span with the arrived identity as
+a remote parent. In an OTel viewer each order is then one
+distributed trace: the `order-frontend` spans with the
+`quote-service` request span attached beneath the outbound urllib
+span that made the call. Same two terminals, with the extra:
+
+```console
+$ uv run --extra otel python -m wrapture --config server-otel.toml server.py
+$ uv run --extra otel python -m wrapture --config client-otel.toml client.py
+```
+
+The configs also stream `client-otel.jsonl` and `server-otel.jsonl`,
+and the join query above works on them unchanged; the ids it prints
+are now the claimed ones, the same ids the viewer shows, files,
+headers and spans agreeing throughout.

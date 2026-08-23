@@ -112,10 +112,9 @@ def _encoded_headers(headers: Iterable[tuple[Any, Any]]) -> list[tuple[Any, Any]
 
 
 def _trace_scope(scope: Mapping[str, Any]) -> dict[str, str]:
-    # The propagation headers the configured trace formats want,
-    # lifted off the scope's byte-pair header list under their
-    # casefolded names. First occurrence wins, matching how the WSGI
-    # environ collapses repeats.
+    # The trace propagation headers, lifted off the scope's byte-pair
+    # header list under their casefolded names. First occurrence
+    # wins, matching how the WSGI environ collapses repeats.
 
     wanted = _trace.wanted_headers()
     headers: dict[str, str] = {}

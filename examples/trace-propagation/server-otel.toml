@@ -1,0 +1,35 @@
+# The server half again, exporting to OpenTelemetry as well as
+# printing. Same observation as server.toml; the middleware parses
+# the traceparent the client sent, and the [otel] sink creates the
+# request span with that identity as a remote parent, so in the
+# backend each server tree hangs beneath the client span that made
+# the request: one distributed trace across the two services. Run
+# with the otel extra:
+#
+#   uv run --extra otel python -m wrapture --config server-otel.toml server.py
+
+pythonpath = "."
+
+[[observe]]
+target = "backend"
+name = "app"
+mode = "wsgi"
+
+[[observe]]
+target = "backend"
+name = "quote"
+
+[[sink]]
+type = "printer"
+
+[[sink]]
+type = "jsonlines"
+path = "server-otel.jsonl"
+
+[otel]
+service_name = "quote-service"
+signals = ["traces"]
+
+[otel.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+exporter_otlp_protocol = "http/protobuf"

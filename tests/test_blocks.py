@@ -239,7 +239,7 @@ def test_a_nested_block_shares_the_tree_trace() -> None:
 
 
 def test_no_identity_when_disabled() -> None:
-    previous = _configure(False, ("w3c",))
+    previous = _configure(False)
     try:
         with timeline() as tape:
             with wrapture.block("untraced"):

@@ -4,7 +4,7 @@ These cover the W3C codec, minting and inheritance in the recording
 path (every tree rooted in a declared operation is a trace), the kind
 gate on minting, the WSGI and ASGI ingress parse, the public egress
 surface (current_trace and trace_headers), the verbatim pass-through
-invariant for unclaimed formats, serialisation of the identity
+invariant for unclaimed identities, serialisation of the identity
 fields, and the [trace] config table with its per-entry re-enable.
 """
 
@@ -34,7 +34,7 @@ TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 
 @pytest.fixture
 def trace_disabled() -> Iterator[None]:
-    previous = _configure(False, ("w3c",))
+    previous = _configure(False)
     try:
         yield
     finally:
@@ -120,7 +120,7 @@ def test_from_headers_with_nothing_recognised_is_none() -> None:
     assert from_headers({"traceparent": "junk"}) is None
 
 
-def test_wanted_headers_names_the_configured_formats_headers() -> None:
+def test_wanted_headers_names_the_w3c_headers() -> None:
     assert wanted_headers() == ("traceparent", "tracestate")
 
 
@@ -583,10 +583,13 @@ def test_a_bad_trace_table_fails_the_load(tmp_path: Path) -> None:
     with pytest.raises(wrapture.ConfigError, match="unknown keys"):
         wrapture.load_config(str(bad_key))
 
-    bad_format = tmp_path / "format.toml"
-    bad_format.write_text('[trace]\nformats = ["zipkin9"]\n')
+    # The formats key was removed when the trace layer froze to w3c,
+    # so a config still carrying it fails as an unknown key.
 
-    with pytest.raises(wrapture.ConfigError, match="unknown trace format"):
+    bad_format = tmp_path / "format.toml"
+    bad_format.write_text('[trace]\nformats = ["w3c"]\n')
+
+    with pytest.raises(wrapture.ConfigError, match="unknown keys"):
         wrapture.load_config(str(bad_format))
 
     bad_flag = tmp_path / "flag.toml"

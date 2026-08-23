@@ -1065,6 +1065,41 @@ counted, and a pending entry firing while suspended arrives
 suspended too), and `revert()` takes the whole intervention down
 without restarting the application.
 
+## Forked worker processes
+
+A fork inherits the parent's memory, patches and sinks included, and
+wrapture keeps recording coherent across it. The first sink
+registration installs `os.register_at_fork` handlers, benign in a
+process that never forks. Before a fork the process sinks are
+flushed, so buffered output is not duplicated into the child, and
+the recording locks are taken, so the child does not inherit one
+held by a thread that no longer exists there; the parent releases
+them afterwards, and the child reinitialises them fresh.
+
+The child also discards the inherited in-flight stack, and with it
+any active trace. This is structural, not just policy: the in-flight
+events belong to the parent, which will run their bodies and close
+them, so a child that kept the stack would nest its first event
+under an operation completing in another process. Immediately after
+a fork, `current_event()` and `annotate()` are in the
+nothing-in-flight state until new work starts. The consequences fall
+out of the trace kind gate: the child's first operation is a genuine
+root, a daemon worker's next WSGI or ASGI request mints or joins a
+trace as any root request does, and a child wanting an immediate
+identity opens a block, which mints.
+
+Sinks hear about the fork through `on_fork()`, a notification
+delivered in the child only, with a do-nothing default; a sink
+overrides it to rebuild what fork broke, since worker threads do not
+survive into the child and inherited descriptors are shared with the
+parent. `JSONLines` restarts its writer lazily and expands its path
+template afresh, so a `{pid}` template gives each process a file of
+its own; the OpenTelemetry sink drops its open-span table (the
+parent's spans are the parent's) while the OTel SDK's own at-fork
+handling restarts the exporter threads. Children created by spawn or
+exec are a different case and need none of this: they start fresh
+and deliberately untraced, as the autowrapt section above describes.
+
 ## Trace identity and propagation
 
 wrapture's event linkage, sequence numbers and parent ids, is
@@ -1127,14 +1162,20 @@ setup hook plus one behaviour stage; the trace-propagation example's
 `urllib_support.py` is the complete pattern, a client and a server
 in two processes sharing ids through nothing but the header.
 
-One invariant governs formats wrapture parses but nothing claims:
-**never break a trace you do not understand**. A request can carry
-several products' trace headers at once (services mid-migration
-send W3C and vendor formats side by side); each configured format
-parses into its own slot, and on egress a slot no tracing sink has
-claimed forwards its headers verbatim, so that product sees this
-service as a transparent hop and its trace stays connected, while a
-claimed slot is rewritten with span ids that really get exported.
+W3C trace context is the one wire format wrapture speaks. The
+ecosystem has converged on it, and vendor baggage rides inside the
+standard's own `tracestate` header, so there is nothing left for a
+second convention to carry. One invariant governs an identity
+wrapture parses but nothing claims: **never break a trace you do
+not understand**. An arriving identity keeps its raw headers on the
+slot, and on egress a slot no tracing sink has claimed forwards
+those headers verbatim, so the upstream product sees this service
+as a transparent hop and its trace stays connected, while a claimed
+slot is rewritten with span ids that really get exported. Headers
+wrapture does not parse are never touched at all: a request
+carrying a vendor format alongside `traceparent` (services
+mid-migration send both) flows through the application with no
+wrapture involvement in the vendor headers whatsoever.
 
 Configuration is the top-level `[trace]` table, and the noun is
 deliberate: this switches trace *identities*, never observation,
@@ -1143,7 +1184,6 @@ recording or sinks:
 ```toml
 [trace]
 enabled = false        # ids and propagation off process-wide
-formats = ["w3c"]      # the formats to parse at ingress
 
 [[observe]]
 target = "myapp.jobs"
@@ -1151,15 +1191,13 @@ match = "run_*"
 trace = true           # these roots mint identities anyway
 ```
 
-`formats` names the wire formats to recognise, w3c today, with the
-codec registry built for others to join. `trace = true` on an
-observe entry is the case-by-case re-enable under a global disable:
-that entry's roots, a background job wanting an identity for its
-outbound calls, say, mint even while the mechanism is off elsewhere.
-Because only operations mint, the flag lands on the entry's call and
-request bindings; an entry that binds nothing but attributes is
-rejected, since the flag could never act there. With no `[trace]`
-table at all, the defaults stand: enabled, w3c.
+`trace = true` on an observe entry is the case-by-case re-enable
+under a global disable: that entry's roots, a background job wanting
+an identity for its outbound calls, say, mint even while the
+mechanism is off elsewhere. Because only operations mint, the flag
+lands on the entry's call and request bindings; an entry that binds
+nothing but attributes is rejected, since the flag could never act
+there. With no `[trace]` table at all, the default stands: enabled.
 
 ## Exporting traces to other tools
 
@@ -1241,15 +1279,14 @@ sequenceDiagram
 ### Live traces in OpenTelemetry: a sink
 
 The converters above render a trace after the fact, from a tape or a
-file. Feeding a tracing backend while the application runs is instead
-a job for [a sink of your own](#writing-your-own-sink), and
-OpenTelemetry makes the worked case: the `examples/flask-app`
-directory of the source checkout carries a complete OTel sink
-(`wrapture_local/otel_support.py`), the stand-in for what a
-wrapture-otel package would ship, exporting the demo's request trees
-over OTLP to whatever backend the standard OTel environment variables
-name. The pattern is the same for any backend with a span model; only
-the API names change.
+file. Feeding a tracing backend while the application runs is a job
+for a sink, and OpenTelemetry's is one wrapture ships: the
+[OpenTelemetry export](otel-export.md) guide covers the `[otel]`
+config table, the three signals, the trace identity claiming and
+the `wrapture[otel]` extra. What stays here is the shipped sink as
+the worked case for [a sink of your own](#writing-your-own-sink)
+feeding any backend with a span model; the pattern is the same,
+only the API names change.
 
 Most of the mapping writes itself, because the two models are close:
 
@@ -1327,83 +1364,9 @@ Passing `start_time` and `end_time` through this conversion means the
 span timings are the event timings, not the moments the exporter
 heard about them.
 
-Wired into a config file, one `[[sink]]` table covers every OTel
-signal, alongside the printer or instead of it. The `signals` key
-says which are enabled, shared facts sit at the top of the table,
-and each signal's own tuning nests beneath it:
-
-```toml
-[[sink]]
-type = "wrapture_local.otel_support:sink"
-service_name = "flask-shop"
-signals = ["traces", "metrics"]
-
-[sink.traces]
-sample = 0.1
-
-[sink.metrics]
-export_interval = 5
-
-[sink.environment]
-exporter_otlp_endpoint = "http://localhost:4318"
-exporter_otlp_protocol = "http/protobuf"
-```
-
-The nested tables pass through wrapture's config machinery as plain
-dict keyword arguments; nothing was added to support them. The
-factory composes what the table asks for from the pieces this guide
-already covered: the span sink wrapped in `Sample` when
-`traces.sample` is given, so the trace export is sampled per tree
-while the metrics sink beside it still hears every event, the pair
-delivered through a `Fanout`, whose capture negotiation means a
-metrics-only registration stays at `"none"` while traces raise it to
-`"summary"`.
-
-`[sink.environment]` holds defaults for OTel's own environment
-variables: each key is uppercased, prefixed with `OTEL_` when not
-already, and applied with setdefault before the providers are
-built, so the file can name any of the SDK's documented variables
-without the factory knowing them individually, and a variable set in
-the real environment always wins. That gives the file three
-postures: self-contained (endpoint in the file, runs with no
-environment setup), deployment-owned (no environment table, the real
-environment decides everything), or mixed, defaults in the file with
-the deployment overriding what differs. Named keys such as
-`export_interval` are passed to constructors explicitly and beat
-both spellings. An application that already configures its own
-providers is left alone, and the telemetry flows through the
-exporters the application chose. `OTEL_TRACES_EXPORTER=console` and
-`OTEL_METRICS_EXPORTER=console` dump either signal to standard
-output for a look without a collector; the examples README carries
-the run commands:
-
-```console
-$ cd examples/flask-app
-$ uv run --with flask --with opentelemetry-sdk --with opentelemetry-exporter-otlp \
-    python -m wrapture --config wrapture-otel.toml main.py
-```
-
-Each request then arrives in the backend as one trace: a SERVER root
-span named for the request line, the view handler and its helpers
-nested beneath it with their captured arguments and results, and the
-failing request's tree marked as an error with the `KeyError`
-recorded on the span that raised it.
-
-The metrics signal aggregates the same events instead of exporting
-them individually: request durations into the semantic-convention
-`http.server.request.duration` histogram attributed by method and
-status code, call durations into a per-path histogram whose error
-series split out by exception type, and a counter of operations
-observed beginning. The sink protocol needs nothing added for this;
-the enter and close notifications are exactly the increment points
-instruments want, and the design is the `Aggregate` collector's
-(bounded memory, `"none"` capture on both axes, so nothing is ever
-retained or even captured) with the aggregation handed to the OTel
-SDK. The bound path is safe as a metric attribute precisely because
-the config chose the bindings: the set of values is closed, where
-the raw request URL is not, so requests are attributed by method and
-status only. This pairing is also why `sample` lives under
-`[sink.traces]` rather than as the registration's own gating key: a
-gate on the whole registration would starve the histograms, while
-sampling inside it drops only the span export, keeping the
-always-on cheap signal complete beside the sampled drill-down.
+Everything else about the shipped sink, the `[otel]` table and its
+per-signal tuning, the trace identity claiming that makes files,
+headers and exported spans agree on one id, the metrics and logs
+signals, the provider posture and its warnings, and the fork
+behaviour, lives in the
+[OpenTelemetry export](otel-export.md) guide.

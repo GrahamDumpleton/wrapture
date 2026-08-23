@@ -86,3 +86,10 @@ the underlying commands yourself; run `just --list` to see everything.
 
 - Git commit messages must never include a co-authored-by agent message or
   any similar agent attribution trailer.
+- An AI agent must never commit changes on its own initiative. Finish the
+  piece of work, summarize it, and wait to be told to commit. Permission to
+  commit applies only to the work it was given for; it does not carry
+  forward to later steps of a multi-step plan, each of which needs its own
+  review and its own instruction to commit. Uncommitted changes are how the
+  review happens: once work is committed it can no longer be reviewed as
+  the pending diff, so committing early makes review harder, not easier.

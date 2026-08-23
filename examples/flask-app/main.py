@@ -1,4 +1,4 @@
-"""Serve four requests through the observed Flask app.
+"""Serve five requests through the observed Flask app.
 
 Run from this directory:
 
@@ -6,9 +6,9 @@ Run from this directory:
 
 The test client drives the full WSGI cycle, so each request prints as
 one tree: the request line, the view handler and any helpers nested
-beneath it, and the status line when the body closes. The last
-request asks for an unknown item, so its tree shows the KeyError and
-the 500 it becomes.
+beneath it, and the status line when the body closes. The gadget
+quote logs a big-ticket warning, and the last request asks for an
+unknown item, so its tree shows the KeyError and the 500 it becomes.
 """
 
 from __future__ import annotations
@@ -37,10 +37,11 @@ def main() -> None:
 
     fetch(client, "/")
     fetch(client, "/quote/widget")
+    fetch(client, "/quote/gadget")
     fetch(client, "/export")
     fetch(client, "/quote/missing")
 
-    print("served 4 requests; the trees above are the trace")
+    print("served 5 requests; the trees above are the trace")
 
 
 if __name__ == "__main__":

@@ -298,7 +298,7 @@ class AppliedConfig:
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
         self._captures: list[LogCapture] = []
-        self._trace_previous: tuple[bool, tuple[str, ...]] | None = None
+        self._trace_previous: bool | None = None
         self._sink = sink
         self._windows = tuple(windows)
         self._reverted = False
@@ -495,10 +495,9 @@ class Config:
         only while a run is open. `setup` is the
         SetupEntry callbacks to register. `log` is the LogCapture
         selections to apply, as capture_logs() returns them. `trace`
-        is the trace identity settings, a mapping with `enabled`
-        (default True) and `formats` (default ["w3c"]) keys, applied
-        process-wide and restored on revert; None leaves the
-        process-wide settings alone.
+        is the trace identity settings, a mapping with an `enabled`
+        (default True) key, applied process-wide and restored on
+        revert; None leaves the process-wide setting alone.
         `capture` overrides the
         capture level on every binding the config creates, in the
         forms binding() accepts. `inherit=False` strips wrapture's autowrapt trigger
@@ -548,15 +547,15 @@ class Config:
             except ValueError as exc:
                 raise ConfigError(f"capture: {exc}") from None
 
-        # The trace table normalises to its two settings now, so a
+        # The trace table normalises to its one setting now, so a
         # bad table fails the load rather than the apply.
 
-        self._trace: tuple[bool, tuple[str, ...]] | None = None
+        self._trace: bool | None = None
         if trace is not None:
             if not isinstance(trace, Mapping):
                 raise ConfigError(f"trace must be a table, got {trace!r}")
 
-            unknown = sorted(set(trace) - {"enabled", "formats"})
+            unknown = sorted(set(trace) - {"enabled"})
             if unknown:
                 raise ConfigError(f"trace: unknown keys {unknown}")
 
@@ -566,15 +565,7 @@ class Config:
                     f"trace: enabled must be true or false, got {enabled!r}"
                 )
 
-            formats = _strings(
-                trace.get("formats", ["w3c"]), key="formats", where="trace"
-            )
-            try:
-                _trace._check_formats(formats)
-            except ValueError as exc:
-                raise ConfigError(f"trace: {exc}") from None
-
-            self._trace = (enabled, formats)
+            self._trace = enabled
 
         self._observe = tuple(observe)
         self._sink = sink
@@ -679,7 +670,7 @@ class Config:
             # replaced so revert can restore it.
 
             if self._trace is not None:
-                record._trace_previous = _trace._configure(*self._trace)
+                record._trace_previous = _trace._configure(self._trace)
         except BaseException:
             record.revert()
             raise
@@ -1367,6 +1358,60 @@ def _build_sinks(value: Any, *, anchor: str | None = None) -> Sink:
     return Fanout(*built)
 
 
+def _build_otel(table: Any) -> Sink | None:
+    # The first-class [otel] table: its presence opts in to
+    # OpenTelemetry export, with enabled = false accepted so a stanza
+    # can be kept in the file but switched off. The nested per-signal
+    # tables carry the sink factory's vocabulary unchanged; there is
+    # exactly one export destination blessed with a table of its own,
+    # and every other destination remains a [[sink]] entry.
+
+    if not isinstance(table, dict):
+        raise ConfigError(f"otel must be a table, got {table!r}")
+
+    known = {
+        "enabled",
+        "service_name",
+        "signals",
+        "traces",
+        "metrics",
+        "logs",
+        "environment",
+    }
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise ConfigError(f"otel: unknown keys {unknown}")
+
+    enabled = table.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"otel: enabled must be true or false, got {enabled!r}")
+
+    if not enabled:
+        return None
+
+    # The import is deferred to here so base wrapture never touches
+    # the subpackage: a missing extra fails the load, where a broken
+    # sink already fails loudly, with the fix named rather than a
+    # bare ModuleNotFoundError.
+
+    try:
+        from . import otel
+    except ImportError as exc:
+        raise ConfigError(
+            f"the [otel] table needs the OpenTelemetry packages, which are"
+            f" not installed; install the wrapture[otel] extra ({exc})"
+        ) from exc
+
+    spec = {key: value for key, value in table.items() if key != "enabled"}
+
+    try:
+        built = otel.sink(**spec)
+    except Exception as exc:
+        raise ConfigError(f"otel: building the export sink failed: {exc}") from exc
+
+    return built
+
+
 def _entry_table(
     table: Any, *, section: str, required: tuple[str, ...], optional: tuple[str, ...]
 ) -> dict[str, Any]:
@@ -1401,6 +1446,7 @@ def _config_from(document: Any, location: str) -> Config:
         "capture",
         "observe",
         "sink",
+        "otel",
         "window",
         "setup",
         "log",
@@ -1476,6 +1522,21 @@ def _config_from(document: Any, location: str) -> Config:
     sink = None
     if "sink" in document:
         sink = _build_sinks(document["sink"], anchor=anchor)
+
+    # The [otel] table's export sink registers ahead of everything
+    # the [[sink]] list builds, which then stacks in file order: the
+    # OTel sink must hear a root event before any other sink can
+    # observe its trace identity.
+
+    if "otel" in document:
+        otel_sink = _build_otel(document["otel"])
+        if otel_sink is not None:
+            if sink is None:
+                sink = otel_sink
+            elif isinstance(sink, Fanout):
+                sink = Fanout(otel_sink, *sink._sinks)
+            else:
+                sink = Fanout(otel_sink, sink)
 
     windows: list[Window] = []
     if "window" in document:

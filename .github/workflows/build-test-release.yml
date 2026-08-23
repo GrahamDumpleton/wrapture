@@ -45,6 +45,23 @@ jobs:
       - name: Run tests
         run: uv run --no-default-groups --group test pytest
 
+  # The plain-install path: no OTel packages, keeping honest the
+  # promise that base wrapture neither needs nor touches them. The
+  # whole suite runs; the OTel tests skip themselves and the
+  # missing-extra guard tests run for real.
+  test-no-extra:
+    name: Test plain install (no otel packages)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run tests without the OTel packages
+        run: uv run --exact --no-default-groups --with pytest pytest
+
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
@@ -67,6 +84,7 @@ jobs:
     name: Build sdist and wheel
     needs:
       - test
+      - test-no-extra
       - lint
     runs-on: ubuntu-latest
     steps:

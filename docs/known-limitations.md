@@ -168,6 +168,21 @@ created, which on inheriting builds makes recording depend on pool
 warm-up timing, and elsewhere means no context at all. Treat executor
 work as unrecorded, and expect the gap warning for it.
 
+## A forked child starts with nothing in flight
+
+When a process forks, the child deliberately discards the inherited
+in-flight stack and with it any active trace: those events belong to
+the parent, which will run their bodies and close them, so a child
+that kept the stack would nest its first event under an operation
+completing in another process. Immediately after a fork,
+`current_event()`, `current_trace()` and `trace_headers()` report
+the nothing-in-flight state until new work starts; the child's first
+operation is a genuine root. An operation that was open across the
+fork appears in the parent's record only. The
+[forked worker processes](ad-hoc-tracing.md#forked-worker-processes)
+section of the tracing guide covers what wrapture does at fork and
+how sinks participate.
+
 ## Iteration recording covers generators only
 
 When a recorded call returns a generator or async generator, the event

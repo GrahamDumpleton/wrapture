@@ -57,11 +57,19 @@ docs = [
     "sphinx",
     "sphinx-rtd-theme",
 ]
+# The OpenTelemetry export sinks ship in every wheel; this extra adds
+# the dependencies they import. The http/protobuf exporter is the
+# lighter default; the gRPC exporter is used when installed but not
+# pulled in here.
+otel = [
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 zip-safe = false
-packages = ["wrapture", "wrapture.tools"]
+packages = ["wrapture", "wrapture.otel", "wrapture.tools"]
 
 [tool.setuptools.package-data]
 wrapture = ["py.typed"]
@@ -72,6 +80,11 @@ version = {attr = "wrapture.__version__"}
 [dependency-groups]
 test = [
     "pytest",
+    # The otel extra's packages, so the wrapture.otel subpackage and
+    # its tests run in every test environment (and, through the dev
+    # group, typecheck in the default one).
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
 ]
 dev = [
     {include-group = "test"},
@@ -93,6 +106,13 @@ doctest_optionflags = ["ELLIPSIS"]
 python_version = "3.12"
 strict = true
 files = ["src/wrapture", "tests"]
+
+# The gRPC OTLP exporter is used when installed but is deliberately
+# not a dependency of the otel extra, so it is absent from the dev
+# environment mypy runs in.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.exporter.otlp.proto.grpc.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 88

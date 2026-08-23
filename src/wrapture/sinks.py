@@ -49,7 +49,7 @@ from .capture import (
 )
 from .events import Event, _format_time
 from .exceptions import ConfigWarning, SinkErrorWarning
-from .lifecycle import SINKS, _on_shutdown
+from .lifecycle import SINKS, _on_shutdown, _register_at_fork
 from .outputs import OutputPath, open_output
 from .scheduler import Schedule, every, parse_duration
 
@@ -64,6 +64,11 @@ class Sink:
     protocol stays three methods however many kinds exist. An event
     that is never closed, such as a generator abandoned mid-iteration,
     gets an enter and no exit, which is itself information.
+
+    The naming rule: `on_enter`, `on_exit`, `on_error` and `on_fork`
+    are notifications the machinery delivers; `flush()` (common to
+    any sink that buffers) and `reopen()` (file sinks) are bare-verb
+    commands callers invoke.
 
     The default implementations do nothing; a subclass overrides only
     the notifications it consumes. Notifications run on the thread that
@@ -102,6 +107,13 @@ class Sink:
         """Push any buffered output out. Called for process sinks at
         interpreter shutdown; a sink that buffers overrides this."""
 
+    def on_fork(self) -> None:
+        """Called in a child process just after os.fork(), so the sink
+        can rebuild what fork broke: worker threads do not survive
+        into the child, and inherited descriptors and buffers are
+        shared with the parent. Delivered only in the child, to every
+        registered process sink; the default does nothing."""
+
 
 # The two tiers. Process sinks are deliberately a plain list rather
 # than a contextvar, because a sink meant to observe the whole process
@@ -124,7 +136,8 @@ def add_sink(sink: Sink) -> Sink:
     should stop listening. For a scope that ends, use a timeline. The
     first registration adds flushing the process sinks to what
     shutdown() does at interpreter exit, so the tail of a trace is not
-    lost in a sink's buffers.
+    lost in a sink's buffers, and installs the at-fork handlers that
+    keep recording coherent across os.fork().
 
     Returns the sink, so registration can wrap construction.
     """
@@ -133,6 +146,7 @@ def add_sink(sink: Sink) -> Sink:
         _process_sinks.append(sink)
 
     _on_shutdown("flush process sinks", _flush_process_sinks, phase=SINKS)
+    _register_at_fork()
 
     return sink
 
@@ -1154,6 +1168,22 @@ class JSONLines(Sink):
             self._queue.put(_REOPEN, timeout=5)
         except queue.Full:
             pass
+
+    def on_fork(self) -> None:
+        """Reset for a child process after os.fork(): a fresh lock and
+        queue, and no writer thread, since the parent's did not
+        survive into the child. The next line starts a new writer and
+        expands the path template afresh, so a `{pid}` in the template
+        gives the child a file of its own instead of interleaving with
+        the parent's. The parent flushed before forking, so no queued
+        line is lost or duplicated."""
+
+        self._lock = threading.Lock()
+        self._queue = queue.Queue(maxsize=self._queue.maxsize)
+        self._thread = None
+        self._schedule = None
+        self._started = False
+        self._current = None
 
     def release(self) -> None:
         """Close the current file and hold none until the next line,
