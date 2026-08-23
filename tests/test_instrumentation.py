@@ -1,8 +1,8 @@
 """Tests for instrumentation packages: the Instrumentation base class
-and its instance contract, the [[instrument]] config entry in every
-name form, the checks between entries, version gating, the live
-registry with its one trampoline per trigger, and the
-instrumentation() context manager.
+with its decorated hook methods and instance contract, the
+[[instrument]] config entry in every name form, the checks between
+entries, version gating, the live registry with its one trampoline per
+trigger, and the instrumentation() context manager.
 
 Registered instrumentation is exercised through real dist-info
 directories written under tmp_path and put on sys.path, so entry point
@@ -34,6 +34,7 @@ from wrapture import (
     InstrumentEntry,
     Setting,
     instrumentation,
+    instrumentation_hook,
     load_config,
 )
 from wrapture.instrumentations import _active, _trampolines
@@ -121,7 +122,6 @@ class Shop(Instrumentation):
     """Observe the shop's gateway."""
 
     target = "cfgi_shop"
-    modules = ("cfgi_shop",)
     removable = True
     settings = {
         "threshold": Setting(100, "charges at or below this are not recorded"),
@@ -130,27 +130,29 @@ class Shop(Instrumentation):
 
     seen: list[tuple[str, str | None]] = []
 
-    def apply(self, name: str, module: Any) -> None:
+    @instrumentation_hook("cfgi_shop")
+    def shop(self, name: str, module: Any) -> None:
         Shop.seen.append((name, self.trigger))
 
         label = self.settings["label"]
         charge = wrapture.binding(module.Gateway, "charge", label=label).apply()
 
-        self.on_remove(charge.remove)
+        self.on_cleanup(charge.remove)
 
 
 class TwoTriggers(Instrumentation):
     target = "cfgi_two"
-    modules = ("cfgi_two", "cfgi_two.sub")
     removable = True
 
-    def apply(self, name: str, module: Any) -> None:
+    @instrumentation_hook("cfgi_two")
+    @instrumentation_hook("cfgi_two.sub")
+    def both(self, name: str, module: Any) -> None:
         undone: list[str] = module.undone
 
         def undo(name: str = name) -> None:
             undone.append(name)
 
-        self.on_remove(undo)
+        self.on_cleanup(undo)
 
 
 # ---------------------------------------------------------------------------
@@ -162,9 +164,8 @@ def test_a_subclass_must_declare_a_target() -> None:
     with pytest.raises(ConfigError, match="target must name"):
 
         class Missing(Instrumentation):
-            modules = ("x",)
-
-            def apply(self, name: str, module: Any) -> None:
+            @instrumentation_hook("x")
+            def x(self, name: str, module: Any) -> None:
                 pass
 
 
@@ -174,18 +175,65 @@ def test_a_target_is_one_top_level_name() -> None:
         class Dotted(Instrumentation):
             target = "flask.app"
 
-            def apply(self, name: str, module: Any) -> None:
-                pass
-
 
 def test_every_trigger_must_live_under_the_target() -> None:
     with pytest.raises(ConfigError, match="not under target"):
 
         class Astray(Instrumentation):
             target = "flask"
-            modules = ("flask.app", "werkzeug.routing")
 
-            def apply(self, name: str, module: Any) -> None:
+            @instrumentation_hook("flask.app")
+            def app(self, name: str, module: Any) -> None:
+                pass
+
+            @instrumentation_hook("werkzeug.routing")
+            def routing(self, name: str, module: Any) -> None:
+                pass
+
+
+def test_the_old_modules_class_data_is_refused_with_a_pointer() -> None:
+    with pytest.raises(ConfigError, match="no longer class data"):
+
+        class Old(Instrumentation):
+            target = "flask"
+            modules = ("flask.app",)
+
+
+def test_two_methods_cannot_claim_one_trigger() -> None:
+    with pytest.raises(ConfigError, match="both declare trigger module"):
+
+        class Twice(Instrumentation):
+            target = "flask"
+
+            @instrumentation_hook("flask.app")
+            def first(self, name: str, module: Any) -> None:
+                pass
+
+            @instrumentation_hook("flask.app")
+            def second(self, name: str, module: Any) -> None:
+                pass
+
+
+def test_one_method_cannot_claim_one_trigger_twice() -> None:
+    with pytest.raises(ConfigError, match="declares trigger module .* twice"):
+
+        class Doubled(Instrumentation):
+            target = "flask"
+
+            @instrumentation_hook("flask.app")
+            @instrumentation_hook("flask.app")
+            def app(self, name: str, module: Any) -> None:
+                pass
+
+
+def test_a_hook_method_cannot_shadow_the_base_class_surface() -> None:
+    with pytest.raises(ConfigError, match="shadows an attribute"):
+
+        class Shadow(Instrumentation):
+            target = "flask"
+
+            @instrumentation_hook("flask.app")
+            def apply(self, name: str, module: Any) -> None:  # type: ignore[override]
                 pass
 
 
@@ -196,48 +244,57 @@ def test_settings_must_be_declared_with_setting() -> None:
             target = "flask"
             settings = {"threshold": 100}
 
-            def apply(self, name: str, module: Any) -> None:
-                pass
 
-
-def test_specifiers_are_checked_at_class_load() -> None:
+def test_specifiers_are_checked_early() -> None:
     with pytest.raises(ConfigError, match="not a valid PEP 440 specifier"):
 
         class BadRange(Instrumentation):
             target = "flask"
             supports = "lots"
 
-            def apply(self, name: str, module: Any) -> None:
-                pass
+    # A per-hook specifier fails at decoration, before the class even
+    # finishes being defined.
 
     with pytest.raises(ConfigError, match="not a valid PEP 440 specifier"):
-
-        class BadModuleRange(Instrumentation):
-            target = "flask"
-            modules = {"flask.app": "??"}
-
-            def apply(self, name: str, module: Any) -> None:
-                pass
+        instrumentation_hook("flask.app", supports="??")
 
 
-def test_modules_and_requires_have_their_shapes_checked() -> None:
-    with pytest.raises(ConfigError, match="modules must be"):
+def test_the_decorator_validates_its_arguments() -> None:
+    with pytest.raises(ConfigError, match="must be a trigger module name"):
+        instrumentation_hook("")
 
-        class StringModules(Instrumentation):
-            target = "flask"
-            modules = "flask.app"  # type: ignore[assignment]
+    with pytest.raises(ConfigError, match="removable must be True or False"):
+        instrumentation_hook("flask.app", removable="yes")  # type: ignore[arg-type]
 
-            def apply(self, name: str, module: Any) -> None:
-                pass
 
-    with pytest.raises(ConfigError, match="requires must be"):
+def test_requires_takes_a_bare_string_or_a_sequence() -> None:
+    # The ("werkzeug") missing-comma footgun: a bare string is one
+    # target name, never iterated character by character.
 
-        class StringRequires(Instrumentation):
-            target = "flask"
-            requires = "werkzeug"  # type: ignore[assignment]
+    class One(Instrumentation):
+        target = "cfgi_one"
+        requires: str | list[str] = "cfgi_dep"
 
-            def apply(self, name: str, module: Any) -> None:
-                pass
+        @instrumentation_hook("cfgi_one")
+        def one(self, name: str, module: Any) -> None:
+            pass
+
+    class Several(Instrumentation):
+        target = "cfgi_several"
+        requires: str | list[str] = ["cfgi_dep", "cfgi_other"]
+
+        @instrumentation_hook("cfgi_several")
+        def several(self, name: str, module: Any) -> None:
+            pass
+
+    assert tuple(One.requires) == ("cfgi_dep",)
+    assert tuple(Several.requires) == ("cfgi_dep", "cfgi_other")
+
+    with pytest.raises(ConfigError, match="requires must be target names"):
+
+        class Numeric(Instrumentation):
+            target = "cfgi_numeric"
+            requires = (1,)  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +315,7 @@ def test_construction_resolves_settings_over_the_defaults() -> None:
     assert instance.version == ""
     assert instance.distribution is None
     assert instance.applied == ()
-    assert instance.pending == ()
+    assert instance.pending == ("cfgi_shop",)
     assert instance.trigger is None
 
 
@@ -294,7 +351,8 @@ def test_a_value_of_the_wrong_outer_type_is_refused(
         target = "cfgi_typed"
         settings = {"knob": Setting(default, "a knob")}
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_typed")
+        def typed(self, name: str, module: Any) -> None:
             pass
 
     with pytest.raises(ConfigError, match=f"expects {expected}"):
@@ -311,7 +369,8 @@ def test_the_outer_type_check_has_its_tolerances() -> None:
             "table": Setting({"a": 1}, "a mapping"),
         }
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_tolerant")
+        def tolerant(self, name: str, module: Any) -> None:
             pass
 
     instance = Tolerant(ratio=1, paths=["/x"], extra=object(), table={"b": [1, 2]})
@@ -327,7 +386,6 @@ def test_nothing_inside_a_collection_is_checked() -> None:
 
     class Shaped(Instrumentation):
         target = "cfgi_shaped"
-        modules = ("cfgi_shaped",)
         removable = True
         settings = {"routes": Setting((), "each {path, methods}")}
 
@@ -336,7 +394,8 @@ def test_nothing_inside_a_collection_is_checked() -> None:
                 if not isinstance(route, Mapping) or "path" not in route:
                     raise ConfigError(f"routes: each entry needs a path, got {route!r}")
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_shaped")
+        def shaped(self, name: str, module: Any) -> None:
             pass
 
     Shaped(routes=[{"methods": ["GET"]}])
@@ -354,7 +413,187 @@ def test_setting_description_must_be_a_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# applying: triggers, removal, the instance contract
+# the drivers: apply and remove, direct and dispatched alike
+# ---------------------------------------------------------------------------
+
+
+def test_the_direct_recipe_applies_and_removes() -> None:
+    # The documented testing recipe: construct the class, apply one
+    # trigger by hand, remove it again, with none of wrapture's hook
+    # machinery involved; the same methods wrapture's dispatch calls.
+
+    module = _fake_module("cfgi_shop", Gateway=Gateway)
+    instance = Shop(label="direct")
+
+    instance.apply("cfgi_shop", module)
+    try:
+        assert instance.applied == ("cfgi_shop",)
+        assert instance.pending == ()
+        assert _patched(module.Gateway)
+    finally:
+        instance.remove("cfgi_shop", module)
+
+    assert not _patched(module.Gateway)
+    assert list(instance.applied) == []
+    assert list(instance.pending) == ["cfgi_shop"]
+
+
+def test_apply_refuses_an_undeclared_trigger() -> None:
+    with pytest.raises(ConfigError, match="not a declared trigger module"):
+        Shop().apply("cfgi_shop.other", None)
+
+
+def test_apply_refuses_a_trigger_already_applied() -> None:
+    module = _fake_module("cfgi_shop", Gateway=Gateway)
+    instance = Shop()
+
+    instance.apply("cfgi_shop", module)
+    try:
+        with pytest.raises(ConfigError, match="already applied"):
+            instance.apply("cfgi_shop", module)
+    finally:
+        instance.remove("cfgi_shop", module)
+
+
+def test_remove_of_a_trigger_never_applied_is_a_no_op() -> None:
+    ran: list[str] = []
+
+    class Quiet(Instrumentation):
+        target = "cfgi_quiet"
+        removable = True
+
+        @instrumentation_hook("cfgi_quiet")
+        def quiet(self, name: str, module: Any) -> None:
+            pass
+
+        @quiet.cleanup
+        def unquiet(self, name: str, module: Any) -> None:
+            ran.append(name)
+
+    Quiet().remove("cfgi_quiet", None)
+
+    assert ran == []
+
+
+def test_a_paired_cleanup_method_runs_after_the_callbacks() -> None:
+    order: list[str] = []
+
+    class Paired(Instrumentation):
+        target = "cfgi_paired"
+        removable = True
+
+        @instrumentation_hook("cfgi_paired")
+        def paired(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: order.append("callback one"))
+            self.on_cleanup(lambda: order.append("callback two"))
+
+        @paired.cleanup
+        def unpaired(self, name: str, module: Any) -> None:
+            order.append(f"method {name}")
+
+    module = _fake_module("cfgi_paired")
+    instance = Paired()
+
+    instance.apply("cfgi_paired", module)
+    instance.remove("cfgi_paired", module)
+
+    # Callbacks most recent first, then the paired method.
+
+    assert order == ["callback two", "callback one", "method cfgi_paired"]
+
+
+def test_a_raising_cleanup_method_warns_and_removal_stands() -> None:
+    class Fragile(Instrumentation):
+        target = "cfgi_fragile"
+        removable = True
+
+        @instrumentation_hook("cfgi_fragile")
+        def fragile(self, name: str, module: Any) -> None:
+            pass
+
+        @fragile.cleanup
+        def unfragile(self, name: str, module: Any) -> None:
+            raise RuntimeError("cleanup broke")
+
+    module = _fake_module("cfgi_fragile")
+    instance = Fragile()
+    instance.apply("cfgi_fragile", module)
+
+    with pytest.warns(ConfigWarning, match="cleanup broke"):
+        instance.remove("cfgi_fragile", module)
+
+    assert instance.applied == ()
+
+
+def test_a_stacked_hook_serves_both_triggers_with_the_name_telling_which() -> None:
+    one = _fake_module("cfgi_two", undone=[])
+    _fake_module("cfgi_two.sub", undone=one.undone)
+
+    instance = TwoTriggers()
+    assert instance.pending == ("cfgi_two", "cfgi_two.sub")
+
+    instance.apply("cfgi_two", sys.modules["cfgi_two"])
+    instance.apply("cfgi_two.sub", sys.modules["cfgi_two.sub"])
+    instance.remove("cfgi_two.sub", sys.modules["cfgi_two.sub"])
+    instance.remove("cfgi_two", sys.modules["cfgi_two"])
+
+    assert one.undone == ["cfgi_two.sub", "cfgi_two"]
+
+
+def test_a_hook_cannot_pair_two_cleanup_methods() -> None:
+    with pytest.raises(ConfigError, match="already has a cleanup"):
+
+        class Greedy(Instrumentation):
+            target = "cfgi_greedy"
+
+            @instrumentation_hook("cfgi_greedy")
+            def greedy(self, name: str, module: Any) -> None:
+                pass
+
+            @greedy.cleanup
+            def first(self, name: str, module: Any) -> None:
+                pass
+
+            @greedy.cleanup
+            def second(self, name: str, module: Any) -> None:
+                pass
+
+
+def test_a_subclass_overriding_the_hook_method_replaces_it() -> None:
+    calls: list[str] = []
+
+    class Base(Instrumentation):
+        target = "cfgi_family"
+        removable = True
+
+        @instrumentation_hook("cfgi_family")
+        def family(self, name: str, module: Any) -> None:
+            calls.append("base")
+
+    class Derived(Base):
+        @instrumentation_hook("cfgi_family")
+        def family(self, name: str, module: Any) -> None:
+            calls.append("derived")
+
+    module = _fake_module("cfgi_family")
+
+    instance = Derived()
+    instance.apply("cfgi_family", module)
+    instance.remove("cfgi_family", module)
+
+    assert calls == ["derived"]
+
+    # The base class is untouched: its own hook still runs its own code.
+
+    other = Base()
+    other.apply("cfgi_family", module)
+    other.remove("cfgi_family", module)
+
+    assert calls == ["derived", "base"]
+
+
+# ---------------------------------------------------------------------------
+# applying through a config: triggers, removal, the instance contract
 # ---------------------------------------------------------------------------
 
 
@@ -389,11 +628,11 @@ def test_apply_fires_when_the_trigger_is_imported_later(
 
     class LazyShop(Instrumentation):
         target = "cfgi_lazy_shop"
-        modules = ("cfgi_lazy_shop",)
         removable = True
         fired: list[str] = []
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_lazy_shop")
+        def lazy(self, name: str, module: Any) -> None:
             LazyShop.fired.append(module.__name__)
 
     applied = Config(instrument=[InstrumentEntry(LazyShop)]).apply()
@@ -411,7 +650,7 @@ def test_apply_fires_when_the_trigger_is_imported_later(
         applied.revert()
 
 
-def test_undo_callbacks_run_per_trigger_most_recent_first() -> None:
+def test_cleanup_callbacks_run_per_trigger_most_recent_first() -> None:
     one = _fake_module("cfgi_two", undone=[])
     two = _fake_module("cfgi_two.sub", undone=one.undone)
     del two
@@ -423,7 +662,7 @@ def test_undo_callbacks_run_per_trigger_most_recent_first() -> None:
     applied.revert()
 
     # Triggers come down in reverse firing order, each running the
-    # callbacks its own apply() registered.
+    # callbacks its own hook registered.
 
     assert one.undone == ["cfgi_two.sub", "cfgi_two"]
 
@@ -433,13 +672,13 @@ def test_several_callbacks_for_one_trigger_run_most_recent_first() -> None:
 
     class Many(Instrumentation):
         target = "cfgi_many"
-        modules = ("cfgi_many",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
-            self.on_remove(lambda: order.append("first"))
-            self.on_remove(lambda: order.append("second"))
-            self.on_remove(lambda: order.append("second"))
+        @instrumentation_hook("cfgi_many")
+        def many(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: order.append("first"))
+            self.on_cleanup(lambda: order.append("second"))
+            self.on_cleanup(lambda: order.append("second"))
 
     _fake_module("cfgi_many")
     Config(instrument=[InstrumentEntry(Many)]).apply().revert()
@@ -452,15 +691,15 @@ def test_a_callback_registered_from_configure_runs_at_whole_teardown() -> None:
 
     class Configured(Instrumentation):
         target = "cfgi_configured"
-        modules = ("cfgi_configured",)
         removable = True
 
         def configure(self) -> None:
             assert self.trigger is None
-            self.on_remove(lambda: order.append("whole"))
+            self.on_cleanup(lambda: order.append("whole"))
 
-        def apply(self, name: str, module: Any) -> None:
-            self.on_remove(lambda: order.append(name))
+        @instrumentation_hook("cfgi_configured")
+        def configured(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: order.append(name))
 
     _fake_module("cfgi_configured")
     Config(instrument=[InstrumentEntry(Configured)]).apply().revert()
@@ -476,12 +715,12 @@ def test_a_raising_callback_warns_and_the_rest_still_run() -> None:
 
     class Fragile(Instrumentation):
         target = "cfgi_fragile"
-        modules = ("cfgi_fragile",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
-            self.on_remove(lambda: order.append("kept"))
-            self.on_remove(broken)
+        @instrumentation_hook("cfgi_fragile")
+        def fragile(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: order.append("kept"))
+            self.on_cleanup(broken)
 
     _fake_module("cfgi_fragile")
     applied = Config(instrument=[InstrumentEntry(Fragile)]).apply()
@@ -492,18 +731,19 @@ def test_a_raising_callback_warns_and_the_rest_still_run() -> None:
     assert order == ["kept"]
 
 
-def test_an_overridden_remove_is_the_teardown() -> None:
+def test_a_paired_cleanup_method_is_the_centralised_teardown() -> None:
     calls: list[tuple[str, str]] = []
 
     class Central(Instrumentation):
         target = "cfgi_central"
-        modules = ("cfgi_central",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_central")
+        def central(self, name: str, module: Any) -> None:
             calls.append(("apply", name))
 
-        def remove(self, name: str, module: Any) -> None:
+        @central.cleanup
+        def uncentral(self, name: str, module: Any) -> None:
             calls.append(("remove", module.__name__))
 
     _fake_module("cfgi_central")
@@ -512,9 +752,9 @@ def test_an_overridden_remove_is_the_teardown() -> None:
     assert calls == [("apply", "cfgi_central"), ("remove", "cfgi_central")]
 
 
-def test_on_remove_takes_only_callables() -> None:
+def test_on_cleanup_takes_only_callables() -> None:
     with pytest.raises(TypeError, match="takes a callable"):
-        Shop().on_remove("nope")  # type: ignore[arg-type]
+        Shop().on_cleanup("nope")  # type: ignore[arg-type]
 
 
 def test_an_apply_that_raises_during_config_apply_unwinds_everything() -> None:
@@ -522,11 +762,11 @@ def test_an_apply_that_raises_during_config_apply_unwinds_everything() -> None:
 
     class Broken(Instrumentation):
         target = "cfgi_broken"
-        modules = ("cfgi_broken",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
-            self.on_remove(lambda: undone.append("partial"))
+        @instrumentation_hook("cfgi_broken")
+        def broken(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: undone.append("partial"))
             raise RuntimeError("hook code broke")
 
     _fake_module("cfgi_broken")
@@ -552,10 +792,10 @@ def test_an_apply_that_raises_from_an_import_warns_and_the_import_continues(
 
     class LateBroken(Instrumentation):
         target = "cfgi_late_broken"
-        modules = ("cfgi_late_broken",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_late_broken")
+        def late(self, name: str, module: Any) -> None:
             raise RuntimeError("hook code broke late")
 
     applied = Config(instrument=[InstrumentEntry(LateBroken)]).apply()
@@ -570,20 +810,12 @@ def test_an_apply_that_raises_from_an_import_warns_and_the_import_continues(
         applied.revert()
 
 
-def test_a_class_without_apply_is_refused_at_config_build() -> None:
+def test_a_class_without_hooks_is_refused_at_config_build() -> None:
     class Inert(Instrumentation):
         target = "cfgi_inert"
 
-    with pytest.raises(ConfigError, match="does not define apply"):
+    with pytest.raises(ConfigError, match="declares no trigger modules"):
         Config(instrument=[InstrumentEntry(Inert)])
-
-
-def test_the_base_apply_raises_not_implemented() -> None:
-    class Inert(Instrumentation):
-        target = "cfgi_inert"
-
-    with pytest.raises(NotImplementedError):
-        Inert().apply("cfgi_inert", None)
 
 
 def test_report_lists_instrumentation_and_disabled_entries() -> None:
@@ -603,7 +835,7 @@ def test_report_lists_instrumentation_and_disabled_entries() -> None:
     assert "instrumentation:" in text
     assert (
         "  cfgi_shop [local] target cfgi_shop (no version); applied cfgi_shop;"
-        " removable; 1 undo callbacks" in text
+        " removable; 1 cleanup callbacks" in text
     )
     assert f"  {__name__}:TwoTriggers: disabled" in text
 
@@ -613,10 +845,10 @@ def test_revert_warns_about_an_instrumentation_declared_not_removable() -> None:
 
     class OneWay(Instrumentation):
         target = "cfgi_oneway"
-        modules = ("cfgi_oneway",)
 
-        def apply(self, name: str, module: Any) -> None:
-            self.on_remove(lambda: undone.append(name))
+        @instrumentation_hook("cfgi_oneway")
+        def oneway(self, name: str, module: Any) -> None:
+            self.on_cleanup(lambda: undone.append(name))
 
     _fake_module("cfgi_oneway")
     applied = Config(instrument=[InstrumentEntry(OneWay)]).apply()
@@ -629,6 +861,30 @@ def test_revert_warns_about_an_instrumentation_declared_not_removable() -> None:
     assert undone == ["cfgi_oneway"]
 
 
+def test_revert_names_the_triggers_when_removability_is_mixed() -> None:
+    class Mixed(Instrumentation):
+        target = "cfgi_mixed"
+        removable = True
+
+        @instrumentation_hook("cfgi_mixed")
+        def undoable(self, name: str, module: Any) -> None:
+            pass
+
+        @instrumentation_hook("cfgi_mixed.sticky", removable=False)
+        def sticky(self, name: str, module: Any) -> None:
+            pass
+
+    _fake_module("cfgi_mixed")
+    _fake_module("cfgi_mixed.sticky")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConfigWarning)
+        applied = Config(instrument=[InstrumentEntry(Mixed)]).apply()
+
+    with pytest.warns(ConfigWarning, match="for triggers cfgi_mixed.sticky"):
+        applied.revert()
+
+
 # ---------------------------------------------------------------------------
 # checks between entries and against the live registry
 # ---------------------------------------------------------------------------
@@ -637,9 +893,9 @@ def test_revert_warns_about_an_instrumentation_declared_not_removable() -> None:
 def test_two_enabled_entries_for_one_target_conflict_at_build() -> None:
     class OtherShop(Instrumentation):
         target = "cfgi_shop"
-        modules = ("cfgi_shop.other",)
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_shop.other")
+        def other(self, name: str, module: Any) -> None:
             pass
 
     with pytest.raises(ConfigError, match="both instrument target 'cfgi_shop'"):
@@ -659,16 +915,16 @@ def test_the_target_check_is_also_the_trigger_check() -> None:
 
     class Rival(Instrumentation):
         target = "cfgi_two"
-        modules = ("cfgi_two.sub",)
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_two.sub")
+        def sub(self, name: str, module: Any) -> None:
             pass
 
     class Decoy(Instrumentation):
         target = "cfgi_decoy"
-        modules = ("cfgi_decoy",)
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_decoy")
+        def decoy(self, name: str, module: Any) -> None:
             pass
 
     with pytest.raises(ConfigError, match="both instrument target"):
@@ -680,10 +936,10 @@ def test_the_target_check_is_also_the_trigger_check() -> None:
 def test_a_required_target_must_be_enabled_in_the_same_config() -> None:
     class NeedsShop(Instrumentation):
         target = "cfgi_needy"
-        modules = ("cfgi_needy",)
-        requires = ("cfgi_shop",)
+        requires = "cfgi_shop"
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_needy")
+        def needy(self, name: str, module: Any) -> None:
             pass
 
     with pytest.raises(ConfigError, match="requires an active instrumentation"):
@@ -730,6 +986,87 @@ def test_a_failed_second_apply_leaves_the_first_intact() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the triggers subset
+# ---------------------------------------------------------------------------
+
+
+def test_a_triggers_subset_registers_only_the_named_hooks() -> None:
+    one = _fake_module("cfgi_two", undone=[])
+    _fake_module("cfgi_two.sub", undone=one.undone)
+
+    applied = Config(
+        instrument=[InstrumentEntry(TwoTriggers, triggers="cfgi_two.sub")]
+    ).apply()
+    try:
+        (instance,) = applied.instrumentations
+        assert instance.applied == ("cfgi_two.sub",)
+        assert instance.pending == ()
+    finally:
+        applied.revert()
+
+    assert one.undone == ["cfgi_two.sub"]
+
+
+def test_a_triggers_subset_outside_the_declared_set_is_refused() -> None:
+    with pytest.raises(ConfigError, match="not declared by the class"):
+        Config(instrument=[InstrumentEntry(TwoTriggers, triggers=["cfgi_two.other"])])
+
+
+def test_triggers_must_be_names() -> None:
+    with pytest.raises(ConfigError, match="triggers must be trigger module names"):
+        InstrumentEntry("x", triggers=[1])  # type: ignore[list-item]
+
+    with pytest.raises(ConfigError, match="triggers must be a trigger module name"):
+        InstrumentEntry("x", triggers=1)  # type: ignore[arg-type]
+
+
+def test_the_loader_reads_a_triggers_subset(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[instrument]]
+            name = "{__name__}:TwoTriggers"
+            triggers = ["cfgi_two.sub"]
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    (entry,) = config.instrument
+    assert entry.triggers == ("cfgi_two.sub",)
+
+
+def test_the_subset_gates_removability_for_the_context_manager() -> None:
+    class Partly(Instrumentation):
+        target = "cfgi_partly"
+        removable = True
+
+        @instrumentation_hook("cfgi_partly")
+        def undoable(self, name: str, module: Any) -> None:
+            pass
+
+        @instrumentation_hook("cfgi_partly.sticky", removable=False)
+        def sticky(self, name: str, module: Any) -> None:
+            pass
+
+    _fake_module("cfgi_partly")
+    _fake_module("cfgi_partly.sticky")
+
+    # Whole class: refused, one trigger is not removable.
+
+    with pytest.raises(ConfigError, match="not removable over the triggers"):
+        instrumentation(Partly)
+
+    # Scoped to the removable trigger: no escape hatch needed.
+
+    with instrumentation(Partly, triggers=["cfgi_partly"]) as record:
+        (instance,) = record.instrumentations
+        assert instance.applied == ("cfgi_partly",)
+
+
+# ---------------------------------------------------------------------------
 # name forms: references, registered names, qualified names
 # ---------------------------------------------------------------------------
 
@@ -747,11 +1084,11 @@ def test_a_reference_names_a_local_class(
             """Gateway charges over a threshold."""
 
             target = "cfgi_shop"
-            modules = ("cfgi_shop",)
             removable = True
             settings = {"threshold": wrapture.Setting(100, "cutoff")}
 
-            def apply(self, name, module):
+            @wrapture.instrumentation_hook("cfgi_shop")
+            def shop(self, name, module):
                 module.applied_with = self.settings["threshold"]
         ''',
     )
@@ -809,11 +1146,11 @@ def test_a_registered_name_resolves_through_the_entry_point(
 
         class FlaskishInstrumentation(wrapture.Instrumentation):
             target = "cfgi_flaskish"
-            modules = ("cfgi_flaskish",)
             removable = True
             settings = {"capture_headers": wrapture.Setting(False, "record headers")}
 
-            def apply(self, name, module):
+            @wrapture.instrumentation_hook("cfgi_flaskish")
+            def flaskish(self, name, module):
                 module.instrumented = self.settings["capture_headers"]
         """,
     )
@@ -870,10 +1207,10 @@ def test_a_name_two_distributions_register_needs_qualifying(
 
             class Requestsish(wrapture.Instrumentation):
                 target = "cfgi_requestsish"
-                modules = ("cfgi_requestsish",)
                 removable = True
 
-                def apply(self, name, module):
+                @wrapture.instrumentation_hook("cfgi_requestsish")
+                def requestsish(self, name, module):
                     module.provider = {suffix!r}
             """,
         )
@@ -916,16 +1253,16 @@ def test_loading_a_class_that_imports_its_own_target_warns(
 
         class Eager(wrapture.Instrumentation):
             target = "cfgi_eager_target"
-            modules = ("cfgi_eager_target",)
             removable = True
 
-            def apply(self, name, module):
+            @wrapture.instrumentation_hook("cfgi_eager_target")
+            def eager(self, name, module):
                 pass
         """,
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
-    with pytest.warns(ConfigWarning, match="should import only wrapture") as record:
+    with pytest.warns(ConfigWarning, match="must not import the target") as record:
         Config(instrument=[InstrumentEntry("cfgi_eager_hooks:Eager")])
 
     assert "cfgi_eager_target" in str(record[0].message)
@@ -960,7 +1297,8 @@ def test_target_version_comes_from_the_distribution_behind_the_import_name(
     class Versioned(Instrumentation):
         target = "cfgi_versioned"
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_versioned")
+        def versioned(self, name: str, module: Any) -> None:
             pass
 
     assert Versioned().target_version == "2.5.1"
@@ -976,11 +1314,11 @@ def test_supports_outside_the_installed_version_registers_nothing(
     class Needs2(Instrumentation):
         target = "cfgi_versioned"
         supports = ">=2.0,<4"
-        modules = ("cfgi_versioned",)
         removable = True
         fired = False
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_versioned")
+        def versioned(self, name: str, module: Any) -> None:
             Needs2.fired = True
 
     with pytest.warns(ConfigWarning, match="outside supports '>=2.0,<4'"):
@@ -994,7 +1332,7 @@ def test_supports_outside_the_installed_version_registers_nothing(
         applied.revert()
 
 
-def test_a_per_module_specifier_skips_only_that_trigger(
+def test_a_per_hook_specifier_skips_only_that_trigger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _versioned_target(tmp_path, monkeypatch, version="2.2")
@@ -1004,11 +1342,15 @@ def test_a_per_module_specifier_skips_only_that_trigger(
     class Split(Instrumentation):
         target = "cfgi_versioned"
         supports = ">=2.0"
-        modules = {"cfgi_versioned": None, "cfgi_versioned.sansio": ">=2.3"}
         removable = True
         fired: list[str] = []
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_versioned")
+        def base(self, name: str, module: Any) -> None:
+            Split.fired.append(name)
+
+        @instrumentation_hook("cfgi_versioned.sansio", supports=">=2.3")
+        def sansio(self, name: str, module: Any) -> None:
             Split.fired.append(name)
 
     with pytest.warns(ConfigWarning, match="skips 1 of 2 trigger modules"):
@@ -1025,11 +1367,15 @@ def test_an_unknown_version_skips_only_constrained_triggers() -> None:
 
     class Unversioned(Instrumentation):
         target = "cfgi_unknown"
-        modules = {"cfgi_unknown": None, "cfgi_unknown.new": ">=3"}
         removable = True
         fired: list[str] = []
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_unknown")
+        def base(self, name: str, module: Any) -> None:
+            Unversioned.fired.append(name)
+
+        @instrumentation_hook("cfgi_unknown.new", supports=">=3")
+        def new(self, name: str, module: Any) -> None:
             Unversioned.fired.append(name)
 
     with pytest.warns(ConfigWarning, match="target version unknown"):
@@ -1042,11 +1388,11 @@ def test_an_unknown_version_skips_only_constrained_triggers() -> None:
     class Claims(Instrumentation):
         target = "cfgi_unknown"
         supports = ">=1"
-        modules = ("cfgi_unknown",)
         removable = True
         fired: list[str] = []
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_unknown")
+        def base(self, name: str, module: Any) -> None:
             Claims.fired.append(name)
 
     with pytest.warns(ConfigWarning, match="cannot be checked"):
@@ -1176,9 +1522,12 @@ def test_instrumentation_takes_names_classes_and_pairs(
         assert second.applied == ("cfgi_two", "cfgi_two.sub")
 
 
-def test_keyword_settings_need_exactly_one_item() -> None:
+def test_keyword_settings_and_triggers_need_exactly_one_item() -> None:
     with pytest.raises(ConfigError, match="exactly one item"):
         instrumentation(Shop, TwoTriggers, threshold=1)
+
+    with pytest.raises(ConfigError, match="triggers applies to exactly one item"):
+        instrumentation(Shop, TwoTriggers, triggers=["cfgi_shop"])
 
     with pytest.raises(ConfigError, match="at least one"):
         instrumentation()
@@ -1190,14 +1539,14 @@ def test_keyword_settings_need_exactly_one_item() -> None:
 def test_instrumentation_refuses_an_unremovable_class_unless_allowed() -> None:
     class OneWay(Instrumentation):
         target = "cfgi_oneway"
-        modules = ("cfgi_oneway",)
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_oneway")
+        def oneway(self, name: str, module: Any) -> None:
             pass
 
     _fake_module("cfgi_oneway")
 
-    with pytest.raises(ConfigError, match="declares itself not removable"):
+    with pytest.raises(ConfigError, match="not removable over the triggers"):
         instrumentation(OneWay)
 
     with warnings.catch_warnings():
@@ -1241,10 +1590,10 @@ def test_an_instrumented_scope_cannot_be_entered_twice() -> None:
 def test_repeated_scopes_do_not_accumulate_hooks_for_an_unimported_trigger() -> None:
     class Never(Instrumentation):
         target = "cfgi_never_imported"
-        modules = ("cfgi_never_imported",)
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_never_imported")
+        def never(self, name: str, module: Any) -> None:
             pass
 
     assert "cfgi_never_imported" not in sys.modules
@@ -1270,11 +1619,11 @@ def test_a_released_claim_does_not_fire_when_the_module_finally_arrives(
 
     class Late(Instrumentation):
         target = "cfgi_arrives_late"
-        modules = ("cfgi_arrives_late",)
         removable = True
         fired = False
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_arrives_late")
+        def late(self, name: str, module: Any) -> None:
             Late.fired = True
 
     with instrumentation(Late):
@@ -1296,11 +1645,11 @@ def test_a_released_claim_does_not_fire_when_the_module_finally_arrives(
 
 def test_overlapping_applies_on_two_threads_keep_their_own_trigger() -> None:
     # Two triggers firing concurrently on two threads, as two modules
-    # imported at once would: each apply() sees its own trigger, and
-    # the callbacks each registers are filed under the right module,
-    # so a per-trigger remove() runs only its own. The firing is driven
-    # directly rather than through the import system, whose overlap of
-    # sibling imports varies between Python versions.
+    # imported at once would: each hook sees its own trigger, and the
+    # callbacks each registers are filed under the right module, so a
+    # per-trigger remove() runs only its own. The firing drives the
+    # public apply() directly rather than the import system, whose
+    # overlap of sibling imports varies between Python versions.
 
     barrier = threading.Barrier(2)
     seen: dict[str, str | None] = {}
@@ -1308,19 +1657,20 @@ def test_overlapping_applies_on_two_threads_keep_their_own_trigger() -> None:
 
     class Parallel(Instrumentation):
         target = "cfgi_par"
-        modules = ("cfgi_par.a", "cfgi_par.b")
         removable = True
 
-        def apply(self, name: str, module: Any) -> None:
+        @instrumentation_hook("cfgi_par.a")
+        @instrumentation_hook("cfgi_par.b")
+        def par(self, name: str, module: Any) -> None:
             barrier.wait(timeout=5)
             seen[name] = self.trigger
-            self.on_remove(lambda: undone.append(name))
+            self.on_cleanup(lambda: undone.append(name))
 
     instance = Parallel()
     modules = {name: _fake_module(name) for name in ("cfgi_par.a", "cfgi_par.b")}
 
     threads = [
-        threading.Thread(target=instance._fire, args=(name, module))
+        threading.Thread(target=instance.apply, args=(name, module))
         for name, module in modules.items()
     ]
     for thread in threads:

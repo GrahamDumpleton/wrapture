@@ -74,8 +74,7 @@ class FlaskishInstrumentation(wrapture.Instrumentation):
 
     target = "cfgt_flaskish"
     supports = ">=2.0,<4"
-    modules = {"cfgt_flaskish.app": None, "cfgt_flaskish.sansio": ">=3.5"}
-    requires = ("cfgt_werkzeugish",)
+    requires = "cfgt_werkzeugish"
     removable = True
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
@@ -83,7 +82,12 @@ class FlaskishInstrumentation(wrapture.Instrumentation):
         "timeout": wrapture.Setting(None, "seconds before a slow view is flagged"),
     }
 
-    def apply(self, name, module):
+    @wrapture.instrumentation_hook("cfgt_flaskish.app")
+    def app(self, name, module):
+        pass
+
+    @wrapture.instrumentation_hook("cfgt_flaskish.sansio", supports=">=3.5")
+    def sansio(self, name, module):
         pass
 '''
 
@@ -92,9 +96,9 @@ import wrapture
 
 class WerkzeugishInstrumentation(wrapture.Instrumentation):
     target = "cfgt_werkzeugish"
-    modules = ("cfgt_werkzeugish.routing",)
 
-    def apply(self, name, module):
+    @wrapture.instrumentation_hook("cfgt_werkzeugish.routing")
+    def routing(self, name, module):
         pass
 """
 
@@ -255,11 +259,11 @@ def test_a_config_marks_selected_entries_and_lists_local_ones(
                 """Observe gateway charges over a threshold."""
 
                 target = "cfgt_shop"
-                modules = ("cfgt_shop",)
                 removable = True
                 settings = {"threshold": wrapture.Setting(100, "the cutoff")}
 
-                def apply(self, name, module):
+                @wrapture.instrumentation_hook("cfgt_shop")
+                def shop(self, name, module):
                     pass
             '''
         )
@@ -341,10 +345,10 @@ def test_a_name_two_distributions_register_is_shown_qualified(
 
                 class Requestsish(wrapture.Instrumentation):
                     target = "cfgt_requestsish"
-                    modules = ("cfgt_requestsish",)
                     removable = True
 
-                    def apply(self, name, module):
+                    @wrapture.instrumentation_hook("cfgt_requestsish")
+                    def requestsish(self, name, module):
                         pass
                 """
             )
@@ -370,6 +374,43 @@ def test_a_name_two_distributions_register_is_shown_qualified(
     toml = _run("--toml", capsys=capsys)
     assert 'name = "requestsish@wrapture-instrumentation-a"\n' in toml
     assert "also provided by wrapture-instrumentation-b, enable one" in toml
+
+
+def test_mixed_removability_is_spelled_out_per_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "cfgt_pkg_mixed.py").write_text(
+        textwrap.dedent(
+            """
+            import wrapture
+
+            class Mixed(wrapture.Instrumentation):
+                target = "cfgt_mixed"
+                removable = True
+
+                @wrapture.instrumentation_hook("cfgt_mixed")
+                def undoable(self, name, module):
+                    pass
+
+                @wrapture.instrumentation_hook("cfgt_mixed.sticky", removable=False)
+                def sticky(self, name, module):
+                    pass
+            """
+        )
+    )
+    _install(
+        site,
+        distribution="wrapture-instrumentation-mixed",
+        version="0.1",
+        entries={"mixed": "cfgt_pkg_mixed:Mixed"},
+    )
+    monkeypatch.syspath_prepend(str(site))
+
+    out = _run(capsys=capsys)
+
+    assert "  removable: cfgt_mixed only, not cfgt_mixed.sticky\n" in out
 
 
 # ---------------------------------------------------------------------------

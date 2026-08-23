@@ -1569,9 +1569,9 @@ inside one that no callable boundary covers.
 ## Applying instrumentation in a test
 
 An **instrumentation** is the config layer's unit of packaged
-patching: a subclass of `wrapture.Instrumentation` that declares one
-target package and patches its trigger modules when they are
-imported (the [ad-hoc tracing guide](ad-hoc-tracing.md#instrumentation-code-that-patches-a-target)
+patching: a subclass of `wrapture.Instrumentation` whose decorated
+hook methods patch its trigger modules when they are imported (the
+[ad-hoc tracing guide](ad-hoc-tracing.md#instrumentation-code-that-patches-a-target)
 has the contract). Two kinds of test meet it: a test of an
 application that runs under an instrumentation, and a test of an
 instrumentation package itself.
@@ -1602,20 +1602,26 @@ reverse and neutralises what never fired. The block yields the same
 `AppliedConfig` record a config file produces, so `report()` and
 `instrumentations` are available inside it, and it pairs with
 `timeline()` exactly as above: the tape is a scoped sink, so the
-events the instrumentation's bindings record land on it. Entry
-refuses, before patching anything, an instrumentation that declares
-itself not removable (pass `allow_unremovable=True` to override, for
-a class you know leaves nothing behind) and one whose target another
-applied config already instruments; and because wrapture keeps one
-post-import hook per trigger module process-wide, entering and
-leaving the scope on every test of a suite never accumulates hooks
-for a module that is never imported.
+events the instrumentation's bindings record land on it. The
+`triggers=` keyword, valid with a single item like the keyword
+settings, scopes the application to a subset of the class's declared
+trigger modules, so a multi-trigger class is testable one hook at a
+time. Entry refuses, before patching anything, an instrumentation
+not removable over the triggers in play (pass
+`allow_unremovable=True` to override, for a class you know leaves
+nothing behind) and one whose target another applied config already
+instruments; and because wrapture keeps one post-import hook per
+trigger module process-wide, entering and leaving the scope on every
+test of a suite never accumulates hooks for a module that is never
+imported.
 
 For the second, the class is built to be tested without wrapture's
 hook machinery at all. Construct it (which runs the settings
 validation, so a bad setting is a `ConfigError` a test can assert
 on), call `apply()` with a trigger name and the imported module, and
-call `remove()` afterwards:
+call `remove()` afterwards; these are the same base-class methods
+wrapture's own dispatch drives, so the direct and deferred paths
+cannot behave differently:
 
 ```python
 import flask
@@ -1632,9 +1638,8 @@ def test_the_instrumentation_applies_and_removes():
 ```
 
 [Instrumentation packages](instrumentation-packages.md)
-covers the rest of the author's side: the entry point, the rule that
-the class's module imports only wrapture, and the bindings recipe
-for removal.
+covers the rest of the author's side: the entry point, the hook
+decorator, the import posture, and the bindings recipe for removal.
 
 ## The pytest plugin
 

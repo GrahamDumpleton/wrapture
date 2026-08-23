@@ -1,8 +1,8 @@
 """Instrument FastAPI, entirely under the covers.
 
 A stand-in for what a wrapture-instrumentation-fastapi package would
-ship: one Instrumentation subclass, triggered by the import of
-"fastapi" itself, that instruments every FastAPI application the
+ship: one Instrumentation subclass whose hook, triggered by the import
+of "fastapi" itself, instruments every FastAPI application the
 process ever creates. Nothing here knows the application's module,
 its attribute names, or how many applications the process makes;
 packaged with an entry point, the config would say `[[instrument]]`
@@ -26,7 +26,7 @@ pipeline the instance builds once, lazily, at its first request:
 Both bindings are created with when=False, making them behaviour-only:
 the plumbing is not the trace, so they transform without ever
 recording their own calls. They are applied as one group whose
-remove() is registered with on_remove(), so the instrumentation comes
+remove() is registered with on_cleanup(), so the instrumentation comes
 down again with the config that applied it.
 """
 
@@ -41,10 +41,10 @@ class FastAPIInstrumentation(wrapture.Instrumentation):
     """Request and route handler tracing for FastAPI applications."""
 
     target = "fastapi"
-    modules = ("fastapi",)
     removable = True
 
-    def apply(self, name: str, module: Any) -> None:
+    @wrapture.instrumentation_hook("fastapi")
+    def fastapi(self, name: str, module: Any) -> None:
         def wrap_stack(
             wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
         ) -> Any:
@@ -75,4 +75,4 @@ class FastAPIInstrumentation(wrapture.Instrumentation):
         group = wrapture.bindings(stack_builder=stack_builder, registrar=registrar)
         group.apply()
 
-        self.on_remove(group.remove)
+        self.on_cleanup(group.remove)

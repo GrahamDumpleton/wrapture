@@ -449,11 +449,11 @@ class ClientInstrumentation(wrapture.Instrumentation):
     """Stamp the tenant header on every vendored client request."""
 
     target = "vendored_client"
-    modules = ("vendored_client",)
     removable = True
     settings = {"tenant": wrapture.Setting("", "the tenant to send")}
 
-    def apply(self, name, module):
+    @wrapture.instrumentation_hook("vendored_client")
+    def client(self, name, module):
         tenant = self.settings["tenant"]
 
         def with_tenant(args, kwargs):
@@ -464,17 +464,17 @@ class ClientInstrumentation(wrapture.Instrumentation):
         request.on_call.transforms_args(with_tenant)
         request.apply()
 
-        self.on_remove(request.remove)
+        self.on_cleanup(request.remove)
 ```
 
-`apply()` receives the freshly imported `vendored_client` module, so
+The hook receives the freshly imported `vendored_client` module, so
 `module.Client` is the real class, and the binding is created after
 the import it depends on by construction. The module defining the
 class imports only wrapture, so naming it from the config never
 causes the library to be imported ahead of time. Registering the
-binding's `remove()` with `on_remove()` is what puts the patch inside
-what the config can undo: `AppliedConfig.revert()` calls the class's
-`remove()` for every trigger it applied, most recent first, and the
+binding's `remove()` with `on_cleanup()` is what puts the patch inside
+what the config can undo: `AppliedConfig.revert()` removes every
+trigger it applied, most recent first, and the
 `threshold`-style setting a typo would have silently dropped is
 instead a `ConfigError` at load, because the declaration says which
 keys exist.

@@ -127,7 +127,7 @@ config file, reached only by the references in `wrapture.toml`.
   declaration when the file loads (misspell it and the load fails
   loudly), so of the six charges made only the two over 400 are
   recorded, with the cutoff adjustable in the config file alone. The
-  class registers its binding's removal with `on_remove()`, so the
+  class registers its binding's removal with `on_cleanup()`, so the
   patch comes down again with the config.
 - Two `[[sink]]` entries fan out to a live printer and a JSONLines
   file; a relative sink path is anchored to the config file's

@@ -2,18 +2,23 @@
 patches one target package on wrapture's behalf.
 
 A package (or a module next to a config file) ships an Instrumentation
-subclass: class data says what it is and covers, apply() patches one
-trigger module once that module is imported, and remove() undoes it.
-wrapture discovers subclasses through the `wrapture.instrumentation`
-entry point group or by module:attr reference, validates them, applies
-them from an [[instrument]] config entry or the instrumentation()
-context manager, reports on them, and removes them on revert, without
-knowing where the hook code lives or importing it ahead of the target.
+subclass: class data says what it is and covers, and methods decorated
+with @instrumentation_hook patch one trigger module each once that
+module is imported, registering their undo with on_cleanup(). wrapture
+discovers subclasses through the `wrapture.instrumentation` entry
+point group or by module:attr reference, validates them, applies them
+from an [[instrument]] config entry or the instrumentation() context
+manager, reports on them, and removes them on revert, without knowing
+where the hook code lives or importing it ahead of the target. The
+base class owns apply(name, module) and remove(name, module), so
+wrapture's dispatch and a package's own tests drive the same methods.
 
-The module that defines a subclass imports wrapture and nothing else;
-everything that touches the target lives behind an import inside
-apply() and remove(), so loading the class never defeats
-patch-before-import for the very modules it claims.
+The module that defines a subclass must not import the target it
+patches; loading the class would then defeat patch-before-import for
+the very modules it claims. Hook code lives in a sibling module that
+imports only wrapture at its top level and receives the trigger module
+as a parameter, importing anything more of the target inside the
+functions that need it.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import wrapt
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -81,18 +86,158 @@ def _summary(cls: type) -> str:
     return ""
 
 
+class InstrumentationHookMethod(Protocol):
+    """What @instrumentation_hook returns: the method itself, still
+    callable and usable as the class's method, carrying the `cleanup`
+    decorator that pairs a per-trigger teardown method with it."""
+
+    def __call__(self, instance: Any, name: str, module: Any) -> Any: ...
+
+    cleanup: Callable[[Callable[..., Any]], Callable[..., Any]]
+
+
+@dataclass(frozen=True)
+class _HookDeclaration:
+    # One trigger module declared on a hook method: the name, and the
+    # per-trigger overrides riding on the decorator.
+
+    module: str
+    supports: str | None
+    removable: bool | None
+
+
+@dataclass(frozen=True)
+class _Hook:
+    # One trigger's resolved handler on a class: the method (as the
+    # plain function, called with the instance explicitly), the
+    # declaration it came from, and the paired cleanup method if one
+    # was declared.
+
+    attribute: str
+    fn: Callable[..., Any]
+    declaration: _HookDeclaration
+    cleanup: Callable[..., Any] | None
+
+    @property
+    def module(self) -> str:
+        return self.declaration.module
+
+    @property
+    def supports(self) -> str | None:
+        return self.declaration.supports
+
+    @property
+    def removable(self) -> bool | None:
+        return self.declaration.removable
+
+
+def instrumentation_hook(
+    module: str, *, supports: str | None = None, removable: bool | None = None
+) -> Callable[[Callable[..., Any]], InstrumentationHookMethod]:
+    """Mark a method of an Instrumentation subclass as the hook for one
+    trigger module.
+
+    The decorated method is called as `method(self, name, module)` when
+    the named module is imported (immediately if it already was), with
+    the trigger's name and the module object. The trigger string
+    appears only here; the class's trigger set is derived from its
+    decorated methods, and the method name itself is free. Stack the
+    decorator to serve several triggers with one method, which is why
+    the signature always takes `name`.
+
+    `supports` is a PEP 440 specifier gating this one trigger on the
+    target's installed version, for a module that only exists from some
+    version on; the class's own `supports` is the target-level range.
+    `removable` overrides the class's `removable` claim for this one
+    trigger; the class-level claim consumers see is true only when
+    every trigger in play is removable.
+
+    The returned method carries a `cleanup` decorator pairing a
+    per-trigger teardown method with it, for undo that does not
+    decompose into on_cleanup() callbacks:
+
+        @wrapture.instrumentation_hook("flask.app")
+        def flask_app(self, name, module): ...
+
+        @flask_app.cleanup
+        def remove_flask_app(self, name, module): ...
+
+    On removal the on_cleanup() callbacks registered during the hook
+    run first, most recent first, then the paired cleanup method.
+    """
+
+    if not isinstance(module, str) or not module:
+        raise ConfigError(
+            f"instrumentation_hook: module must be a trigger module name,"
+            f" got {module!r}"
+        )
+    if supports is not None:
+        _check_specifier(supports, f"instrumentation_hook({module!r}): supports")
+    if removable is not None and not isinstance(removable, bool):
+        raise ConfigError(
+            f"instrumentation_hook({module!r}): removable must be True or"
+            f" False, got {removable!r}"
+        )
+
+    def mark(fn: Callable[..., Any]) -> InstrumentationHookMethod:
+        if not callable(fn):
+            raise ConfigError(
+                f"instrumentation_hook({module!r}) decorates a method, got {fn!r}"
+            )
+
+        declarations: list[_HookDeclaration] | None = getattr(
+            fn, "_wrapture_hook_triggers", None
+        )
+
+        # First decoration: attach the declaration list and the cleanup
+        # pairing decorator; a stacked decoration appends to the list.
+
+        if declarations is None:
+            declarations = []
+            fn._wrapture_hook_triggers = declarations  # type: ignore[attr-defined]
+            fn._wrapture_hook_cleanup = None  # type: ignore[attr-defined]
+
+            def pair(cleanup_fn: Callable[..., Any]) -> Callable[..., Any]:
+                if not callable(cleanup_fn):
+                    raise ConfigError(
+                        f"@{fn.__name__}.cleanup decorates a method, got {cleanup_fn!r}"
+                    )
+                if fn._wrapture_hook_cleanup is not None:  # type: ignore[attr-defined]
+                    raise ConfigError(
+                        f"hook method {fn.__name__!r} already has a cleanup"
+                        f" method paired with it"
+                    )
+                fn._wrapture_hook_cleanup = cleanup_fn  # type: ignore[attr-defined]
+                return cleanup_fn
+
+            fn.cleanup = pair  # type: ignore[attr-defined]
+
+        if any(declared.module == module for declared in declarations):
+            raise ConfigError(
+                f"hook method {fn.__name__!r} declares trigger module {module!r} twice"
+            )
+
+        declarations.append(_HookDeclaration(module, supports, removable))
+        return cast(InstrumentationHookMethod, fn)
+
+    return mark
+
+
 class Instrumentation:
     """Instrumentation for one target package, shipped as a subclass.
 
     Class data declares what the instrumentation is and covers: the
-    `target` import name, the trigger `modules` under it, the version
-    range it `supports`, other targets it `requires`, whether it is
-    `removable`, and the `settings` it takes. The instance is
-    wrapture's per-application record, handed to the hooks as self:
-    `apply(name, module)` is called once per trigger module when that
-    module is imported, `remove(name, module)` undoes it. The module
-    defining a subclass imports only wrapture; anything touching the
-    target is imported inside apply() and remove().
+    `target` import name, the version range it `supports`, other
+    targets it `requires`, whether it is `removable`, and the
+    `settings` it takes. The trigger modules are declared by methods
+    decorated with `@wrapture.instrumentation_hook`, one hook per
+    trigger, and the base class owns `apply(name, module)` and
+    `remove(name, module)`: wrapture's dispatch and a package's own
+    tests call the same methods, so the direct testing recipe and the
+    deferred import path behave identically. The module defining a
+    subclass must not import the target; the hooks module beside it
+    imports only wrapture at its top level, and anything more of the
+    target is imported inside the hook functions that need it.
     """
 
     # -- class data the subclass declares ------------------------------
@@ -101,25 +246,29 @@ class Instrumentation:
     # name (or the target, for a class named by reference), description
     # from the distribution's summary (or the class docstring's first
     # line), version from the distribution (or none, for a local class).
+    # A class in a multi-target distribution should set description,
+    # since the distribution's summary describes the whole collection.
 
     name: str = ""
     description: str = ""
     version: str = ""
 
     # Coverage. target is exactly one top-level import name and every
-    # trigger module must live under it; supports is a PEP 440
-    # specifier against the target's installed version; modules may be
-    # a mapping carrying a per-module specifier for a module that only
-    # exists from some version on; requires names other targets that
-    # must have an active instrumentation in the same config.
+    # declared trigger module must live under it; supports is a PEP 440
+    # specifier against the target's installed version (per-trigger
+    # ranges ride on the instrumentation_hook decorator); requires
+    # names other targets that must have an active instrumentation in
+    # the same config, a single name or a sequence of them.
 
     target: str = ""
     supports: str = ""
-    modules: tuple[str, ...] | Mapping[str, str | None] = ()
-    requires: tuple[str, ...] = ()
+    requires: str | Sequence[str] = ()
 
     # The claim report() and revert() trust: a package must say it can
-    # undo itself. Callbacks registered with on_remove() run either way.
+    # undo itself. This is the default for every trigger; a hook's
+    # removable= overrides it per trigger, and the class-level claim
+    # consumers see is true only when every trigger in play is.
+    # Callbacks registered with on_cleanup() run either way.
 
     removable: bool = False
 
@@ -128,6 +277,11 @@ class Instrumentation:
     # that shadows this one for instance access.
 
     settings: Mapping[str, Any] = {}
+
+    # The per-class hook table, trigger module name to _Hook, built by
+    # _check_class from the decorated methods when the class is defined.
+
+    _hooks: Mapping[str, _Hook] = {}
 
     # -- construction: wrapture's, not the subclass's -------------------
 
@@ -171,10 +325,10 @@ class Instrumentation:
         self._applied: list[str] = []
         self._modules: dict[str, Any] = {}
         self._callbacks: list[tuple[str | None, Callable[[], Any]]] = []
-        self._triggers: tuple[str, ...] = ()
+        self._triggers: tuple[str, ...] = tuple(type(self)._hooks)
         self._target_version = _target_version(cls.target)
 
-    # -- methods the subclass overrides --------------------------------
+    # -- the optional one-time hook the subclass overrides --------------
 
     def configure(self) -> None:
         """Optional one-time work after construction and before any
@@ -182,25 +336,80 @@ class Instrumentation:
         ConfigError, which surfaces at config time), register a sink,
         prepare state. The default does nothing."""
 
-    def apply(self, name: str, module: Any) -> None:
-        """Patch one trigger module. Called once per trigger, when that
-        module is imported (immediately if it already was), with the
-        trigger's name and the module object. Import the hook code here,
-        patch through wrapture or otherwise, and register the undo with
-        on_remove() unless remove() is overridden. Required."""
+    # -- applying and removing: the same doors for wrapture and tests ---
 
-        raise NotImplementedError(
-            f"{type(self).__name__} does not define apply(name, module)"
-        )
+    def apply(self, name: str, module: Any) -> None:
+        """Apply one trigger: run its hook method with the trigger set
+        for this thread, so on_cleanup() files undo under it, and
+        record the trigger as applied.
+
+        Called by wrapture once per trigger when its module is imported
+        (immediately if it already was), and directly by a package's
+        own tests, with identical behaviour. A name the class does not
+        declare, or a trigger already applied, raises ConfigError. A
+        hook that raises has the callbacks it registered run at once,
+        so its partial work does not linger, and the error propagates.
+        """
+
+        hook = type(self)._hooks.get(name)
+        if hook is None:
+            declared = sorted(type(self)._hooks)
+            raise ConfigError(
+                f"instrumentation {self.name!r}: {name!r} is not a declared"
+                f" trigger module; the declared triggers are {declared}"
+            )
+
+        with self._lock:
+            if name in self._applied:
+                raise ConfigError(
+                    f"instrumentation {self.name!r}: trigger {name!r} is"
+                    f" already applied"
+                )
+
+        self._local.trigger = name
+        try:
+            hook.fn(self, name, module)
+        except BaseException:
+            self._local.trigger = None
+            _run_callbacks(self._take_callbacks(name), self, name)
+            raise
+        finally:
+            self._local.trigger = None
+
+        with self._lock:
+            self._applied.append(name)
+            self._modules[name] = module
 
     def remove(self, name: str, module: Any) -> None:
-        """Undo one trigger's patches. Called for each trigger whose
-        apply() ran, in reverse order on revert. The default runs the
-        callbacks registered with on_remove() during that trigger's
-        apply(), most recent first, continuing past one that raises;
-        override it for a centralised teardown."""
+        """Undo one trigger: forget it as applied, run the on_cleanup()
+        callbacks registered during its hook (most recent first), then
+        its paired cleanup method if the hook declared one.
+
+        Called for each applied trigger, in reverse order, on revert,
+        and directly by tests. A trigger that is not applied is a
+        no-op. A callback or cleanup method that raises is warned
+        about and the removal continues.
+        """
+
+        with self._lock:
+            if name not in self._applied:
+                return
+            self._applied.remove(name)
+            self._modules.pop(name, None)
 
         _run_callbacks(self._take_callbacks(name), self, name)
+
+        hook = type(self)._hooks.get(name)
+        if hook is not None and hook.cleanup is not None:
+            try:
+                hook.cleanup(self, name, module)
+            except Exception as exc:
+                warnings.warn(
+                    f"instrumentation {self.name!r}: cleanup method for"
+                    f" {name!r} raised {exc!r}; continuing",
+                    ConfigWarning,
+                    stacklevel=2,
+                )
 
     # -- API available on self -----------------------------------------
 
@@ -228,28 +437,29 @@ class Instrumentation:
 
     @property
     def trigger(self) -> str | None:
-        """The trigger module whose apply() is running on this thread,
-        so on_remove() can tag callbacks without being told; None
-        outside apply()."""
+        """The trigger module whose hook is running on this thread, so
+        on_cleanup() can tag callbacks without being told; None outside
+        a hook. Inside a hook the `name` parameter is the same value.
+        """
 
         value: str | None = getattr(self._local, "trigger", None)
         return value
 
-    def on_remove(self, callback: Callable[[], Any]) -> None:
+    def on_cleanup(self, callback: Callable[[], Any]) -> None:
         """Register an undo callback against the trigger currently
         applying, or against the whole instrumentation when called
-        outside apply() (from configure(), say).
+        outside a hook (from configure(), say).
 
         Call it as many times as there are things to undo: every
-        callback registered for a trigger runs from the default
-        remove(), most recent first, continuing past one that raises;
+        callback registered for a trigger runs when that trigger is
+        removed, most recent first, continuing past one that raises;
         its return value is ignored, so a binding's remove() or a
         group's passes straight in. No dedupe, the same callable twice
         runs twice. Thread-safe.
         """
 
         if not callable(callback):
-            raise TypeError(f"on_remove() takes a callable, got {callback!r}")
+            raise TypeError(f"on_cleanup() takes a callable, got {callback!r}")
 
         with self._lock:
             self._callbacks.append((self.trigger, callback))
@@ -268,36 +478,44 @@ class Instrumentation:
         self.version = resolved.version
         self.distribution = resolved.distribution
 
-    def _fire(self, name: str, module: Any) -> None:
-        # The trampoline target. Runs apply() with the trigger set for
-        # this thread, then records the trigger; an apply() that raises
-        # has the callbacks it registered run at once so its partial
-        # work does not linger, and the error propagates to the caller.
+    def _removable_over(self, names: Iterable[str] | None = None) -> bool:
+        # The effective removability claim over a set of triggers, each
+        # hook's removable= over the class default; over the registered
+        # triggers when none are given, and the bare class claim when
+        # the set is empty.
 
-        self._local.trigger = name
-        try:
-            self.apply(name, module)
-        except BaseException:
-            self._local.trigger = None
-            _run_callbacks(self._take_callbacks(name), self, name)
-            raise
-        finally:
-            self._local.trigger = None
+        cls = type(self)
+        chosen = tuple(names) if names is not None else self._triggers
+        if not chosen:
+            return cls.removable
 
-        with self._lock:
-            self._applied.append(name)
-            self._modules[name] = module
+        return all(
+            hook.removable if hook.removable is not None else cls.removable
+            for name in chosen
+            if (hook := cls._hooks.get(name)) is not None
+        )
+
+    def _unremovable_triggers(self) -> tuple[str, ...]:
+        # The registered triggers whose effective claim is False, for
+        # the revert warning to name.
+
+        cls = type(self)
+        return tuple(
+            name
+            for name in self._triggers
+            if (hook := cls._hooks.get(name)) is not None
+            and not (hook.removable if hook.removable is not None else cls.removable)
+        )
 
     def _teardown(self) -> None:
-        # Call remove() per fired trigger, most recent first, then the
-        # whole-instrumentation callbacks; snapshot under the lock, run
-        # outside it. A remove() that raises is warned about and the
-        # teardown continues.
+        # Call remove() per applied trigger, most recent first, then
+        # the whole-instrumentation callbacks; snapshot under the lock,
+        # run outside it. A remove() that raises is warned about and
+        # the teardown continues.
 
         with self._lock:
             names = list(reversed(self._applied))
-            modules = {name: self._modules.pop(name) for name in names}
-            self._applied.clear()
+            modules = {name: self._modules[name] for name in names}
 
         for name in names:
             try:
@@ -313,6 +531,8 @@ class Instrumentation:
         _run_callbacks(self._take_callbacks(None), self, None)
 
         with self._lock:
+            self._applied.clear()
+            self._modules.clear()
             self._callbacks.clear()
 
     def _take_callbacks(self, name: str | None) -> list[Callable[[], Any]]:
@@ -348,8 +568,16 @@ class Instrumentation:
         parts.append(f"applied {', '.join(applied)}" if applied else "applied none")
         if pending:
             parts.append(f"pending {', '.join(pending)}")
-        parts.append("removable" if type(self).removable else "not removable")
-        parts.append(f"{self._callback_count()} undo callbacks")
+
+        if self._removable_over():
+            parts.append("removable")
+        else:
+            partial = self._unremovable_triggers()
+            if partial and len(partial) < len(self._triggers):
+                parts.append(f"not removable ({', '.join(partial)})")
+            else:
+                parts.append("not removable")
+        parts.append(f"{self._callback_count()} cleanup callbacks")
 
         return "; ".join(parts)
 
@@ -365,7 +593,7 @@ def _run_callbacks(
         except Exception as exc:
             scope = f"for {name!r}" if name else "for the whole instrumentation"
             warnings.warn(
-                f"instrumentation {instance.name!r}: undo callback"
+                f"instrumentation {instance.name!r}: cleanup callback"
                 f" {callback!r} {scope} raised {exc!r}; continuing",
                 ConfigWarning,
                 stacklevel=4,
@@ -402,43 +630,92 @@ def _check_class(cls: type[Instrumentation]) -> None:
     if not isinstance(cls.removable, bool):
         raise ConfigError(f"{where}: removable must be True or False")
 
-    # Triggers: a sequence of names, or a mapping of name to optional
-    # specifier; every name under the target.
+    # A subclass carrying the old contract's class data is refused with
+    # a pointer at the new shape rather than silently ignored.
 
-    modules = cls.modules
-    if isinstance(modules, Mapping):
-        specifiers = dict(modules)
-    elif isinstance(modules, str) or not isinstance(modules, Sequence):
+    if "modules" in vars(cls):
         raise ConfigError(
-            f"{where}: modules must be a tuple of module names or a mapping"
-            f" of module name to version specifier, got {modules!r}"
+            f"{where}: modules is no longer class data; declare each trigger"
+            f" with an @instrumentation_hook method instead"
         )
-    else:
-        specifiers = dict.fromkeys(modules)
 
-    for name, specifier in specifiers.items():
-        if not isinstance(name, str) or not name:
-            raise ConfigError(f"{where}: modules must be module names, got {name!r}")
-        if name != target and not name.startswith(f"{target}."):
-            raise ConfigError(
-                f"{where}: trigger module {name!r} is not under target {target!r};"
-                f" an instrumentation covers one target and every trigger"
-                f" must live under it"
-            )
-        if specifier is not None:
-            _check_specifier(specifier, f"{where}: modules[{name!r}]")
+    # Triggers: collect the decorated hook methods, the subclass's own
+    # first and then inherited ones, each attribute name resolved once
+    # along the MRO so a subclass overriding a hook method replaces it.
+
+    hooks: dict[str, _Hook] = {}
+    seen_attributes: set[str] = set()
+
+    for klass in cls.__mro__:
+        if klass in (Instrumentation, object):
+            continue
+
+        for attribute, value in vars(klass).items():
+            if attribute in seen_attributes:
+                continue
+            seen_attributes.add(attribute)
+
+            declarations = getattr(value, "_wrapture_hook_triggers", None)
+            if not declarations:
+                continue
+
+            # A hook method must not shadow the base class surface: a
+            # method named apply would replace the driver it needs.
+
+            if hasattr(Instrumentation, attribute):
+                raise ConfigError(
+                    f"{where}: hook method {attribute!r} shadows an attribute"
+                    f" of the Instrumentation base class; rename the method"
+                )
+
+            cleanup = getattr(value, "_wrapture_hook_cleanup", None)
+
+            # Stacked decorators apply bottom-up, so the recorded order
+            # is reversed to read top-down as the source does.
+
+            for declaration in reversed(declarations):
+                name = declaration.module
+                if name != target and not name.startswith(f"{target}."):
+                    raise ConfigError(
+                        f"{where}: trigger module {name!r} is not under target"
+                        f" {target!r}; an instrumentation covers one target"
+                        f" and every trigger must live under it"
+                    )
+
+                other = hooks.get(name)
+                if other is not None:
+                    raise ConfigError(
+                        f"{where}: hook methods {other.attribute!r} and"
+                        f" {attribute!r} both declare trigger module {name!r}"
+                    )
+
+                hooks[name] = _Hook(attribute, value, declaration, cleanup)
+
+    cls._hooks = hooks
 
     if cls.supports:
         _check_specifier(cls.supports, f"{where}: supports")
 
+    # requires: a single target name or a sequence of them, normalised
+    # to a tuple so a bare string means one name and is never iterated
+    # character by character.
+
     requires = cls.requires
-    if isinstance(requires, str) or not isinstance(requires, Sequence):
-        raise ConfigError(f"{where}: requires must be a tuple of target names")
-    for required in requires:
+    normalised: tuple[str, ...]
+    if isinstance(requires, str):
+        normalised = (requires,) if requires else ()
+    elif isinstance(requires, Sequence):
+        normalised = tuple(requires)
+    else:
+        raise ConfigError(
+            f"{where}: requires must be a target name or a sequence of them"
+        )
+    for required in normalised:
         if not isinstance(required, str) or not required:
             raise ConfigError(
                 f"{where}: requires must be target names, got {required!r}"
             )
+    cls.requires = normalised
 
     if not isinstance(cls.settings, Mapping):
         raise ConfigError(f"{where}: settings must be a mapping of name to Setting")
@@ -587,10 +864,11 @@ def _check_loaded(obj: Any, *, reference: str, where: str) -> type[Instrumentati
             f" Instrumentation subclass"
         )
 
-    if obj.apply is Instrumentation.apply:
+    if not obj._hooks:
         raise ConfigError(
             f"{where}: {reference!r} resolved to {obj.__qualname__}, which"
-            f" does not define apply(name, module)"
+            f" declares no trigger modules; mark one or more methods with"
+            f" @wrapture.instrumentation_hook"
         )
 
     return obj
@@ -624,10 +902,9 @@ def _load_safely(
         warnings.warn(
             f"{where}: loading {reference!r} imported {imported}, which the"
             f" instrumentation itself claims as its target or triggers; the"
-            f" module defining the class should import only wrapture, with"
-            f" anything touching the target imported inside apply() and"
-            f" remove(), or the patches land after the import they were"
-            f" meant to precede",
+            f" module defining the class must not import the target, and its"
+            f" hooks module imports only wrapture at top level, or the"
+            f" patches land after the import they were meant to precede",
             ConfigWarning,
             stacklevel=4,
         )
@@ -636,17 +913,11 @@ def _load_safely(
 
 
 def _trigger_names(cls: type[Instrumentation]) -> tuple[str, ...]:
-    modules = cls.modules
-    if isinstance(modules, Mapping):
-        return tuple(modules)
-    return tuple(modules)
+    return tuple(cls._hooks)
 
 
 def _trigger_specifiers(cls: type[Instrumentation]) -> dict[str, str | None]:
-    modules = cls.modules
-    if isinstance(modules, Mapping):
-        return dict(modules)
-    return dict.fromkeys(modules)
+    return {name: hook.supports for name, hook in cls._hooks.items()}
 
 
 def _resolve_reference(reference: str, *, where: str) -> _Resolved:
@@ -930,7 +1201,11 @@ class InstrumentEntry:
     itself. `settings` are the values for the instrumentation's
     declared settings, the entry's extra keys in the file; an unknown
     name or a value of the wrong outer type is a ConfigError when the
-    config is built. `enabled = False` keeps the entry but applies
+    config is built. `triggers` optionally names a subset of the
+    class's declared trigger modules to register, a single name or a
+    sequence of them, for testing hooks in isolation or excluding one
+    hook of a large instrumentation; a name the class does not declare
+    is a ConfigError. `enabled = False` keeps the entry but applies
     nothing: still validated, but taking part in no conflict check and
     satisfying no requirement, and listed as disabled by report().
     """
@@ -938,6 +1213,7 @@ class InstrumentEntry:
     name: str | type[Instrumentation]
     enabled: bool = True
     settings: Mapping[str, Any] = field(default_factory=dict)
+    triggers: str | Sequence[str] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.name, type):
@@ -967,6 +1243,29 @@ class InstrumentEntry:
             )
 
         object.__setattr__(self, "settings", dict(self.settings))
+
+        # triggers: a single name or a sequence, normalised to a tuple,
+        # a bare string meaning one name; membership in the class's
+        # declared set is checked when the config resolves the class.
+
+        triggers = self.triggers
+        normalised: tuple[str, ...]
+        if isinstance(triggers, str):
+            normalised = (triggers,) if triggers else ()
+        elif isinstance(triggers, Sequence):
+            normalised = tuple(triggers)
+        else:
+            raise ConfigError(
+                f"instrument entry {self.label!r}: triggers must be a trigger"
+                f" module name or a sequence of them, got {triggers!r}"
+            )
+        for trigger in normalised:
+            if not isinstance(trigger, str) or not trigger:
+                raise ConfigError(
+                    f"instrument entry {self.label!r}: triggers must be trigger"
+                    f" module names, got {trigger!r}"
+                )
+        object.__setattr__(self, "triggers", normalised)
 
     @property
     def label(self) -> str:
@@ -1005,6 +1304,15 @@ def _plan_entries(entries: Sequence[InstrumentEntry]) -> tuple[_Planned, ...]:
         where = f"instrument entry {entry.label!r}"
         resolved = _resolve(entry.name, where=where)
         _resolve_settings(resolved.cls, entry.settings, where)
+
+        declared = set(resolved.cls._hooks)
+        unknown = sorted(set(entry.triggers) - declared)
+        if unknown:
+            raise ConfigError(
+                f"{where}: triggers {unknown} are not declared by the class;"
+                f" the declared triggers are {sorted(declared)}"
+            )
+
         planned.append(_Planned(entry, resolved))
 
     _check_between(planned)
@@ -1078,7 +1386,7 @@ class _Claim:
 
         name = getattr(module, "__name__", "?")
         try:
-            self.instance._fire(name, module)
+            self.instance.apply(name, module)
         except Exception as exc:
             # Loud during apply, warn-and-continue from inside an
             # application import: observation must never fail the
@@ -1237,7 +1545,14 @@ def _apply_planned(planned: Sequence[_Planned], record: AppliedConfig) -> None:
 
         instance.configure()
 
+        # An entry's triggers subset excludes hooks outright: they are
+        # neither registered nor warned about, unlike a version gate.
+
         plans = _plan(type(instance), instance.target_version)
+        chosen = item.entry.triggers
+        if chosen:
+            plans = [plan for plan in plans if plan.name in chosen]
+
         skipped = [plan for plan in plans if plan.skipped is not None]
         if skipped:
             details = "; ".join(f"{plan.name}: {plan.skipped}" for plan in skipped)
@@ -1270,11 +1585,17 @@ def _revert_applied(applied: Sequence[_Applied]) -> None:
         _release(holder.claims)
         _deactivate(instance)
 
-        if not type(instance).removable:
+        if not instance._removable_over():
+            partial = instance._unremovable_triggers()
+            scope = (
+                f" for triggers {', '.join(partial)}"
+                if partial and len(partial) < len(instance._triggers)
+                else ""
+            )
             warnings.warn(
                 f"instrumentation {instance.name!r} declares itself not"
-                f" removable; its undo callbacks run, but whatever else it"
-                f" patched may remain in place",
+                f" removable{scope}; its cleanup callbacks run, but whatever"
+                f" else it patched may remain in place",
                 ConfigWarning,
                 stacklevel=3,
             )
@@ -1312,21 +1633,27 @@ class Instrumented:
 
 
 def instrumentation(
-    *items: Any, allow_unremovable: bool = False, **settings: Any
+    *items: Any,
+    allow_unremovable: bool = False,
+    triggers: str | Sequence[str] | None = None,
+    **settings: Any,
 ) -> Instrumented:
     """Apply one or more instrumentations for the duration of a block.
 
     Each item is an instrumentation name (bare, qualified as
     `name@distribution`, or a module:attr reference), an Instrumentation
     subclass, or an `(item, settings)` pair; with exactly one item its
-    settings may be passed as keyword arguments instead. Entry refuses,
-    before patching anything, an instrumentation declared not removable
-    (pass `allow_unremovable=True` to override) and one whose target
-    another applied config already instruments. Triggers already
-    imported apply on entry, the rest when their module arrives; exit
-    removes everything in reverse and neutralises what never fired.
-    The block yields the AppliedConfig record, so pairs with timeline()
-    and window() as any other config does.
+    settings may be passed as keyword arguments instead. `triggers`,
+    valid with exactly one item like the keyword settings, names a
+    subset of the class's declared trigger modules to register, so a
+    package's tests can apply one hook in isolation. Entry refuses,
+    before patching anything, an instrumentation not removable over
+    the triggers in play (pass `allow_unremovable=True` to override)
+    and one whose target another applied config already instruments.
+    Triggers already imported apply on entry, the rest when their
+    module arrives; exit removes everything in reverse and neutralises
+    what never fired. The block yields the AppliedConfig record, so
+    pairs with timeline() and window() as any other config does.
     """
 
     from .config import Config
@@ -1352,18 +1679,38 @@ def instrumentation(
         (only,) = entries
         entries = [InstrumentEntry(only.name, settings={**only.settings, **settings})]
 
+    if triggers is not None:
+        if len(entries) != 1:
+            raise ConfigError("instrumentation(): triggers applies to exactly one item")
+        (only,) = entries
+        entries = [
+            InstrumentEntry(only.name, settings=only.settings, triggers=triggers)
+        ]
+
     if not entries:
         raise ConfigError("instrumentation() needs at least one instrumentation")
 
     config = Config(instrument=entries)
 
+    # The removability gate is evaluated over the triggers the entry
+    # will actually register: a partly removable class is scopeable to
+    # a subset of its removable triggers without the escape hatch.
+
     if not allow_unremovable:
         for item in config._instrument_planned:
-            if not item.resolved.cls.removable:
+            cls = item.resolved.cls
+            chosen = item.entry.triggers or tuple(cls._hooks)
+            effective = all(
+                hook.removable if hook.removable is not None else cls.removable
+                for name in chosen
+                if (hook := cls._hooks.get(name)) is not None
+            )
+            if chosen and not effective or not chosen and not cls.removable:
                 raise ConfigError(
                     f"instrumentation {item.resolved.name!r} declares itself not"
-                    f" removable, so it cannot be scoped to a block; pass"
-                    f" allow_unremovable=True to apply it anyway"
+                    f" removable over the triggers in play, so it cannot be"
+                    f" scoped to a block; pass allow_unremovable=True to apply"
+                    f" it anyway"
                 )
 
     return Instrumented(config)

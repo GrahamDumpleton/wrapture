@@ -232,10 +232,10 @@ import can install it on every instance at construction:
 ```python
 class FlaskInstrumentation(wrapture.Instrumentation):
     target = "flask"
-    modules = ("flask",)
     removable = True
 
-    def apply(self, name, module):
+    @wrapture.instrumentation_hook("flask")
+    def flask(self, name, module):
         def wrap_app(wrapped, instance, args, kwargs):
             outcome = wrapped(*args, **kwargs)
             instance.wsgi_app = wrapture.WSGIMiddleware(
@@ -246,7 +246,7 @@ class FlaskInstrumentation(wrapture.Instrumentation):
         constructor = wrapture.binding(module.Flask, "__init__", when=False)
         constructor.on_call.decorates(wrap_app).apply()
 
-        self.on_remove(constructor.remove)
+        self.on_cleanup(constructor.remove)
 ```
 
 The `when=False` makes this a behaviour-only binding: it installs the
