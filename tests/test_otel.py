@@ -614,6 +614,46 @@ def test_a_logged_exception_maps_to_exception_attributes(
     assert "missing" in str(record.attributes["exception.message"])
 
 
+@wrapture.observed
+def _chore() -> str:
+    return "done"
+
+
+def test_span_times_come_from_the_sinks_pinned_clock(
+    tmp_path: Path, exported: Any
+) -> None:
+    # The recording path delivers on_enter before stamping
+    # event.started, so the sink must take the start from its own
+    # pinned clock rather than letting the SDK stamp wall-clock now:
+    # start and end then live on one timeline, and a short span can
+    # never come out negative however far the wall clock drifts from
+    # perf_counter after the pinning. Shifting the pinned offset must
+    # move both ends of the span together.
+
+    import time
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nsignals = ["traces"]\n')
+
+    config = load_config(source)
+    sink: Any = config.sink
+
+    hour = 3_600_000_000_000_000
+    sink._epoch_offset_ns += hour
+
+    applied = config.apply()
+    try:
+        _chore()
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+
+    assert span.start_time is not None and span.end_time is not None
+    assert span.start_time > time.time_ns() + hour // 2
+    assert span.end_time >= span.start_time
+
+
 # ---------------------------------------------------------------------------
 # the fork story
 # ---------------------------------------------------------------------------

@@ -120,11 +120,23 @@ class OpenTelemetrySink(wrapture.Sink):
         if context is None and slot is not None and slot.headers and not slot.claimed:
             context = self._remote_parent(slot)
 
+        # The recording path stamps event.started just after on_enter
+        # is delivered, so its bookkeeping is not charged to the
+        # observed code; at this moment it is still None, and the
+        # start must be taken from this sink's own pinned clock. The
+        # SDK's fallback (wall-clock now) would put the start and the
+        # close-time end on two different clocks, and their drift
+        # since the pinning would make short spans come out negative.
+
+        start_time = self._to_epoch_ns(event.started)
+        if start_time is None:
+            start_time = self._epoch_offset_ns + int(time.perf_counter() * 1e9)
+
         span = self._tracer.start_span(
             name=self._name(event),
             context=context,
             kind=SpanKind.SERVER if event.kind == "request" else SpanKind.INTERNAL,
-            start_time=self._to_epoch_ns(event.started),
+            start_time=start_time,
             attributes=self._enter_attributes(event),
             record_exception=False,
             set_status_on_exception=False,
