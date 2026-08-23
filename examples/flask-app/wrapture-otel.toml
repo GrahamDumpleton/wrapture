@@ -44,7 +44,7 @@ signals = ["traces", "metrics", "logs"]
 # the trace export, decided once per tree at its root, while the
 # metrics below still hear every event: the always-on cheap signal
 # stays complete beside the sampled drill-down. Commented out here
-# because the four-request demo wants all its traces; uncomment for
+# because the five-request demo wants all its traces; uncomment for
 # real traffic volumes.
 
 # [otel.traces]

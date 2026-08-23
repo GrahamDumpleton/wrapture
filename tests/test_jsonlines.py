@@ -21,7 +21,8 @@ from typing import Any
 
 import pytest
 
-from wrapture import ConfigWarning, JSONLines, Sink, binding
+import wrapture
+from wrapture import ConfigWarning, JSONLines, Sink, binding, load_events
 from wrapture.sinks import _scoped_sinks
 
 
@@ -153,6 +154,42 @@ def test_a_raising_call_serialises_its_exception(tmp_path: Path) -> None:
     assert line["exception"] == {"type": "TimeoutError", "message": "gateway offline"}
     assert "result" not in line
     assert line["duration"] >= 0.0
+
+
+def test_a_noted_exception_serialises_with_its_offset_and_reloads(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace.jsonl"
+    sink = JSONLines(trace)
+    process = binding(Processor, "process")
+    handled = TimeoutError("gateway offline")
+
+    def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        result = wrapped(*args, **kwargs)
+        wrapture.note_exception(handled)
+        return result
+
+    process.on_call.decorates(noting)
+
+    with process, listening(sink):
+        Processor().process()
+
+    sink.close()
+    (line,) = [line for line in read_lines(trace) if line["path"].endswith("process")]
+
+    # The note rides the line as type, message and the seconds since
+    # the event started; there is no escaped exception.
+
+    assert "exception" not in line
+    (caught,) = line["caught"]
+    assert caught["type"] == "TimeoutError"
+    assert caught["message"] == "gateway offline"
+    assert 0.0 <= caught["offset"] <= line["duration"]
+
+    # The reloaded record carries it unchanged, for the exporters.
+
+    (record,) = [r for r in load_events(trace) if r["path"].endswith("process")]
+    assert record["caught"] == line["caught"]
 
 
 def test_returned_none_stays_distinguishable_from_nothing_captured(

@@ -47,7 +47,7 @@ from .capture import (
     summarize,
     type_name,
 )
-from .events import Event, _format_time
+from .events import Event, _caught_types, _format_time
 from .exceptions import ConfigWarning, SinkErrorWarning
 from .lifecycle import SINKS, _on_shutdown, _register_at_fork
 from .outputs import OutputPath, open_output
@@ -273,6 +273,17 @@ def _notify_exit(event: Event, active: tuple[Sink, ...]) -> None:
 
 
 def _notify_error(event: Event, active: tuple[Sink, ...]) -> None:
+    # An exception noted against the event with note_exception() and
+    # then escaping it appears once, as the escape: every error path
+    # passes through here after setting event.exception, so this is
+    # the one place the same-object note is dropped from `caught`.
+
+    if event.caught and event.exception is not None:
+        escaped = event.exception
+        event.caught = tuple(
+            caught for caught in event.caught if caught.exception is not escaped
+        )
+
     _deliver("on_error", event, active)
 
 
@@ -334,8 +345,10 @@ class Printer(Sink):
     One line when an operation begins, indented by nesting depth, and a
     closing line with the outcome and how long it took: `->` for a
     result, `!!` for an exception, matching the markers tape.tree()
-    uses. This is the live view of a trace, for watching calls while
-    they run; tree() is the tidy reconstruction afterwards.
+    uses; an exception caught inside the scope and noted with
+    note_exception() follows the outcome as its own `!!` marker. This
+    is the live view of a trace, for watching calls while they run;
+    tree() is the tidy reconstruction afterwards.
 
     Writes to `stream` when one is given (any text-writable object: an
     open file, sys.stdout, an io.StringIO), or appends to the file at
@@ -486,8 +499,13 @@ class Printer(Sink):
         if event.kind == "log":
             return
 
+        # A noted exception earns the closing line even when there is
+        # no result or timing to report, since it is the only place
+        # the failure can be shown.
+
         suffix = self._suffix(event)
-        if event.result is MISSING and not suffix:
+        caught = "".join(f" !! {name}" for name in _caught_types(event))
+        if event.result is MISSING and not suffix and not caught:
             return
 
         indent = "  " * event.depth
@@ -495,20 +513,24 @@ class Printer(Sink):
         where = event.label or event.path
 
         if event.result is MISSING:
-            self._write(f"{pad}{indent}{where}{suffix}")
+            self._write(f"{pad}{indent}{where}{caught}{suffix}")
             return
 
         injected = " (injected)" if event.injected else ""
-        self._write(f"{pad}{indent}{where} -> {event.result!r}{injected}{suffix}")
+        self._write(
+            f"{pad}{indent}{where} -> {event.result!r}{injected}{caught}{suffix}"
+        )
 
     def on_error(self, event: Event) -> None:
-        """Print the exception the operation raised."""
+        """Print the exception the operation raised, followed by any
+        noted against it."""
 
         indent = "  " * event.depth
         pad = " " * len(_wall_clock()) + " " if self._timestamps else ""
         where = event.label or event.path
         exception = type(event.exception).__name__
-        self._write(f"{pad}{indent}{where} !! {exception}{self._suffix(event)}")
+        caught = "".join(f" !! {name}" for name in _caught_types(event))
+        self._write(f"{pad}{indent}{where} !! {exception}{caught}{self._suffix(event)}")
 
     def flush(self) -> None:
         """Flush the destination; lines are already flushed as written,
@@ -880,6 +902,21 @@ def _event_record(event: Event) -> dict[str, Any]:
             "type": type(event.exception).__name__,
             "message": str(event.exception),
         }
+
+    # Noted exceptions carry their moment as an offset from the event's
+    # start: the line already has `started`, and a raw perf_counter
+    # value means nothing outside the process that took it.
+
+    if event.caught:
+        started = event.started
+        record["caught"] = [
+            {
+                "type": type(caught.exception).__name__,
+                "message": str(caught.exception),
+                "offset": (caught.at - started) if started is not None else None,
+            }
+            for caught in event.caught
+        ]
 
     if event.value is not MISSING:
         record["value"] = _jsonable(event.value)

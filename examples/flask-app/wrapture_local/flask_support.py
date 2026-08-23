@@ -8,7 +8,7 @@ application-factory pattern; packaged with an entry point, the config
 would say `[[setup]]` with `group = "wrapture_flask"` and nothing
 else.
 
-Two patches, both at Flask's own choke points:
+Three patches, all at Flask's own choke points:
 
 - Flask.__init__ installs the recording WSGI middleware on each new
   instance's wsgi_app attribute, the documented place Flask
@@ -19,10 +19,18 @@ Two patches, both at Flask's own choke points:
   request, wherever the view came from: module functions, closures,
   blueprints from other modules. observed() is idempotent, so a view
   registered twice is not wrapped twice.
+- Flask.handle_exception is the only place a view's exception can be
+  seen after Flask catches it: wsgi_app catches around the dispatch
+  and hands the exception here, which returns the 500 response, so
+  the request itself completes normally. The binding notes the
+  exception against the enclosing request event with
+  note_exception(), so the request shows the failure beside its
+  status: as a `!!` marker on the printed line, and as an exception
+  event with error status on the exported span.
 
-Both bindings are created with when=False, making them behaviour-only:
-the plumbing is not the trace, so they transform without ever
-recording their own calls.
+All three bindings are created with when=False, making them
+behaviour-only: the plumbing is not the trace, so they act without
+ever recording their own calls.
 """
 
 from __future__ import annotations
@@ -63,3 +71,22 @@ def instrument(module: Any) -> None:
 
     registrar = wrapture.binding(module.Flask, "add_url_rule", when=False)
     registrar.on_call.transforms_args(wrap_view).apply()
+
+    def note_failure(
+        wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        # The exception is the handler's one positional argument. Aim
+        # the note at the request the middleware recorded, not at this
+        # call, which is not recorded anyway; outside a request (a
+        # handler invoked with nothing recording) this is a no-op.
+
+        exception = args[0] if args else kwargs.get("e")
+        if exception is not None:
+            wrapture.note_exception(
+                exception, event=wrapture.current_event(kind="request")
+            )
+
+        return wrapped(*args, **kwargs)
+
+    handler = wrapture.binding(module.Flask, "handle_exception", when=False)
+    handler.on_call.decorates(note_failure).apply()

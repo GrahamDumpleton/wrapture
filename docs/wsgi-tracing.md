@@ -256,6 +256,54 @@ repository's
 [examples directory](https://github.com/GrahamDumpleton/wrapture/tree/main/examples)
 is this pattern in full.
 
+## When the framework catches the exception
+
+A request whose view raises rarely shows the exception on the request
+event. The framework catches it around the dispatch, hands it to an
+error handler (`Flask.handle_exception`, Django's
+`handle_uncaught_exception`), and the handler returns the 500
+response, so the middleware sees the application return normally:
+the request event closes with `'500 INTERNAL SERVER ERROR'` as its
+result and no exception, and only the view's own event, if the view
+is observed, shows the `KeyError` escaping. The request did fail,
+and the one place the failure can be seen is the handler, where the
+exception arrives as an argument.
+
+`note_exception()` is the call for that place, and the error handler
+is the third choke point a framework hook binds:
+
+```python
+def note_failure(wrapped, instance, args, kwargs):
+    wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+    return wrapped(*args, **kwargs)
+
+wrapture.binding(module.Flask, "handle_exception", when=False) \
+    .on_call.decorates(note_failure).apply()
+```
+
+`current_event(kind="request")` aims the note past the handler's own
+call at the nearest enclosing request event, the one the middleware
+recorded, which no binding of the hook's own created; with nothing
+recording, or the handler invoked outside a request, the call is a
+no-op. The request then says both things at once, on the printed
+line, on the tape and on an exported span: it answered 500, and the
+`KeyError` was why.
+
+```text
+GET /quote/missing (myapp.wsgi_app)
+  myapp.quoted(item='missing')
+  myapp.quoted !! KeyError [78us]
+myapp.wsgi_app -> '500 INTERNAL SERVER ERROR' !! KeyError [2.7ms, body 11us over 1 chunk]
+```
+
+The view's event and the request's both carry the same `KeyError`,
+one as the escape and one as the note, because two scopes failed for
+the same reason; `tape.for_binding(...).raising(KeyError)` finds
+either. The [unit testing
+guide](unit-testing.md#noting-a-caught-exception) has the full
+semantics of the call, and the flask-app example binds
+`handle_exception` exactly this way.
+
 ## Protocol obligations, honoured
 
 The middleware sits between server and application, so it carries the

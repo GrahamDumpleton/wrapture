@@ -8,7 +8,9 @@ The test client drives the full WSGI cycle, so each request prints as
 one tree: the request line, the view handler and any helpers nested
 beneath it, and the status line when the body closes. The gadget
 quote logs a big-ticket warning, and the last request asks for an
-unknown item, so its tree shows the KeyError and the 500 it becomes.
+unknown item, so its tree shows the KeyError escaping the view and,
+on the request's own closing line, the 500 it becomes with the
+KeyError noted beside it.
 """
 
 from __future__ import annotations

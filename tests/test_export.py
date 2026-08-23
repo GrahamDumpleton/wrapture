@@ -21,6 +21,7 @@ from wrapture import (
     chrome_trace,
     load_events,
     mermaid,
+    note_exception,
     timeline,
 )
 from wrapture.sinks import _event_record
@@ -48,20 +49,35 @@ class Model:
     status = "draft"
 
 
+class Handler:
+    def dispatch(self) -> str:
+        # The framework shape: the failure is caught and noted against
+        # this scope, which then completes normally.
+
+        try:
+            return Gateway().refund(2)
+        except TimeoutError as exc:
+            note_exception(exc)
+            return "handled"
+
+
 @pytest.fixture
 def traced() -> Any:
     process = binding(Processor, "process")
     charge = binding(Gateway, "charge")
     refund = binding(Gateway, "refund")
     status = binding(Model, "status")
+    dispatch = binding(Handler, "dispatch")
 
-    with timeline(process, charge, refund, status) as tape:
+    with timeline(process, charge, refund, status, dispatch) as tape:
         Processor().process()
 
         with pytest.raises(TimeoutError):
             Gateway().refund(1)
 
         Model().status = "published"
+
+        Handler().dispatch()
 
     return tape
 
@@ -89,7 +105,24 @@ def test_chrome_trace_nests_slices_on_a_thread_lane(traced: Any) -> None:
     assert min(entry["ts"] for entry in slices.values()) == 0
 
     assert parent["args"]["result"] == "ch_500"
-    assert slices["Gateway.refund"]["args"]["exception"]["type"] == "TimeoutError"
+
+    # An escaped exception and a noted one both reach the detail pane.
+
+    refunds = [
+        entry
+        for entry in trace["traceEvents"]
+        if entry["ph"] == "X" and entry["name"] == "Gateway.refund"
+    ]
+    assert all(e["args"]["exception"]["type"] == "TimeoutError" for e in refunds)
+    assert len(refunds) == 2
+
+    dispatch = slices["Handler.dispatch"]
+    assert dispatch["args"]["result"] == "handled"
+    assert "exception" not in dispatch["args"]
+    (caught,) = dispatch["args"]["caught"]
+    assert caught["type"] == "TimeoutError"
+    assert caught["message"] == "gateway offline"
+    assert 0.0 <= caught["offset"] <= dispatch["dur"] / 1e6
 
 
 def test_chrome_trace_names_the_thread_lanes(traced: Any) -> None:
@@ -192,7 +225,9 @@ def test_canonical_is_a_stable_architectural_fingerprint(traced: Any) -> None:
         f"call {__name__}:Processor.process\n"
         f"  call {__name__}:Gateway.charge\n"
         f"call {__name__}:Gateway.refund !! TimeoutError\n"
-        f"set {__name__}:Model.status"
+        f"set {__name__}:Model.status\n"
+        f"call {__name__}:Handler.dispatch !! TimeoutError\n"
+        f"  call {__name__}:Gateway.refund !! TimeoutError"
     )
 
 
@@ -234,6 +269,13 @@ def test_mermaid_renders_the_trace_as_a_sequence_diagram(traced: Any) -> None:
     assert "    P1-->>-caller: return" in lines
     assert "    P2-->>-caller: TimeoutError" in lines
     assert "    caller->>+P3: status (set)" in lines
+
+    # A noted exception follows the outcome: the scope returned, and
+    # it failed.
+
+    assert "    participant P4 as Handler" in lines
+    assert "    P2-->>-P4: TimeoutError" in lines
+    assert "    P4-->>-caller: return !! TimeoutError" in lines
 
 
 def test_mermaid_disambiguates_clashing_short_names() -> None:

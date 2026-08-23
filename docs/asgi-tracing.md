@@ -243,6 +243,36 @@ fastapi-app example in the repository's
 is this pattern in full, pairing the middleware with `observed()` on
 the route handlers.
 
+## When the framework catches the exception
+
+As on the WSGI side, a handler that raises rarely shows the exception
+on the request event: the framework's exception middleware catches
+it, hands it to an error handler that produces the 500 response, and
+the request event closes with a 500 status as its result and no
+exception. The failure is visible only in the handler the framework
+passes the exception to, and `note_exception()` from a behaviour
+bound there, aimed with `current_event(kind="request")`, carries it
+to the request event the middleware recorded; an ASGI request event
+is of the same kind, so the aiming is the same:
+
+```python
+def note_failure(wrapped, instance, args, kwargs):
+    wrapture.note_exception(args[-1], event=wrapture.current_event(kind="request"))
+    return wrapped(*args, **kwargs)
+```
+
+The request then shows its status and the exception together, on the
+printed line (`-> '500 Internal Server Error' !! KeyError`), on the
+tape, where `raising(KeyError)` finds it, and as an exception event
+with error status on its exported span. The [WSGI
+page](wsgi-tracing.md#when-the-framework-catches-the-exception) has
+the full discussion and the [unit testing
+guide](unit-testing.md#noting-a-caught-exception) the semantics of
+the call; which method to bind is the framework's business (the
+handler its exception middleware invokes, and the index of the
+exception among its arguments), and a hook that binds it is the
+third choke point beside construction and route registration.
+
 ## Protocol obligations, honoured
 
 The middleware sits between server and application, so it carries an

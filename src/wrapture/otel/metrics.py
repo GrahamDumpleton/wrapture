@@ -99,9 +99,13 @@ class OpenTelemetryMetricsSink(wrapture.Sink):
         )
 
     def on_exit(self, event: Event) -> None:
-        """Record the completed operation's duration."""
+        """Record the completed operation's duration; one carrying a
+        noted exception is attributed by the first one's type, so the
+        error rate counts failures the code handled itself."""
 
-        self._record(event, error=None)
+        caught = event.caught
+        error = type(caught[0].exception).__name__ if caught else None
+        self._record(event, error=error)
 
     def on_error(self, event: Event) -> None:
         """Record the failed operation's duration, attributed by the

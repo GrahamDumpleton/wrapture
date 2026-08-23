@@ -84,6 +84,7 @@ _SLICE_ARGS = (
     "forwarded",
     "result",
     "exception",
+    "caught",
     "value",
     "previous",
     "items",
@@ -174,8 +175,10 @@ def canonical(source: TraceSource) -> str:
     """Render events as a canonical text tree for snapshot tests.
 
     One event per line, indented by nesting: the kind, the path, `!!`
-    with the exception type for a failure, and `(injected)` for an
-    outcome supplied by behaviour rather than the real code.
+    with the exception type for a failure, `(injected)` for an
+    outcome supplied by behaviour rather than the real code, and one
+    further `!!` marker per exception caught inside the scope and
+    noted with note_exception(), as tree() draws them.
     Everything unstable between runs (sequence numbers, timings,
     captured values, thread identity) is left out, so the output is an
     architectural fingerprint: snapshot it once, and a change that
@@ -197,6 +200,9 @@ def canonical(source: TraceSource) -> str:
 
         if record.get("injected"):
             line += " (injected)"
+
+        for caught in record.get("caught") or ():
+            line += f" !! {caught['type']}"
 
         lines.append(line)
 
@@ -229,8 +235,10 @@ def mermaid(source: TraceSource) -> str:
     Participants are the containers (classes and modules), messages
     are the members called on them in recorded order, with activation
     bars for nesting; a normal completion returns `return`, a failure
-    returns the exception type, and attribute events carry their kind,
-    such as `status (set)`. Mermaid renders natively on GitHub and in
+    returns the exception type, an exception caught inside the scope
+    and noted with note_exception() follows the outcome as `!!` and
+    its type (`return !! KeyError`), and attribute events carry their
+    kind, such as `status (set)`. Mermaid renders natively on GitHub and in
     most documentation tooling, so the output drops straight into a
     pull request comment or a docs page. Best kept to small traces:
     sequence diagrams stop being readable beyond a few dozen events.
@@ -291,6 +299,8 @@ def mermaid(source: TraceSource) -> str:
 
         exception = record.get("exception")
         outcome = exception["type"] if exception is not None else "return"
+        for caught in record.get("caught") or ():
+            outcome += f" !! {caught['type']}"
         lines.append(f"    {callee}-->>-{caller}: {outcome}")
 
     for root in roots:
