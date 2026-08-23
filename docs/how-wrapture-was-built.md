@@ -1,17 +1,18 @@
 # How wrapture was built
 
-Every line of code and documentation in wrapture, this page included,
-was written by an AI assistant working under my direction. I want to be
-upfront about that, and equally upfront that this was not a one-shot
-prompt and a pile of generated code. It was a long, deliberate
+I am Graham Dumpleton, the author of wrapture, and also of wrapt and
+mod_wsgi. Every line of code and documentation in wrapture, this page
+included, was written by an AI assistant working under my direction. I
+want to be upfront about that, and equally upfront that this was not a
+one-shot prompt and a pile of generated code. It was a long, deliberate
 endeavour, and I think the process is what makes the result worth
 trusting or not, so this page explains it.
 
 ## The itch
 
-I am the author of [wrapt](https://github.com/GrahamDumpleton/wrapt),
-the library wrapture is built on, and have spent a good part of two
-decades on the mechanics of monkey patching in Python. For much of that
+Through [wrapt](https://github.com/GrahamDumpleton/wrapt), the library
+wrapture is built on, I have spent a good part of two decades on the
+mechanics of monkey patching in Python. For much of that
 time I have carried a quiet dissatisfaction with `unittest.mock`: not
 that it is bad, but that it falls a little short on correctness. A
 fabricated object answers every method and verifies nothing, a patched
@@ -82,6 +83,3 @@ with the facts in hand rather than discover them later. If AI
 involvement rules wrapture out for you, then wrapture is not for you,
 and no hard feelings whatsoever. The code of wrapt, written the old
 way, remains underneath.
-
-Graham Dumpleton
-(author of wrapt and mod_wsgi)
