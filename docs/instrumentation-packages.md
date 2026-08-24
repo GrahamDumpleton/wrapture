@@ -378,3 +378,25 @@ module imported its own target shows the warning described above.
 their file, every entry disabled and every setting commented out at
 its default, which is also a quick check that the descriptions read
 well where they will be read.
+
+## The wrapture-instrumentation package
+
+Everything above is the contract for writing an instrumentation
+package; [wrapture-instrumentation](https://github.com/GrahamDumpleton/wrapture-instrumentation)
+is the package built on it, maintained alongside wrapture itself. It
+currently provides instrumentation for Flask (requests, views,
+lifecycle callbacks, error handling and template rendering as one
+tree per request) and Jinja2 (renders in all their forms, with the
+loading pipeline beneath them), with more targets to come.
+
+```console
+$ pip install wrapture-instrumentation
+```
+
+installs the entries; enabling one is an `[[instrument]]` entry in
+the config file, or `wrapture.instrumentation("flask", "jinja2")` in
+code. What each target records, its settings and its capture
+decisions are documented in a per-target README inside the package,
+linked from the
+[project README](https://github.com/GrahamDumpleton/wrapture-instrumentation#readme),
+and the listing tool above enumerates whatever is installed.
