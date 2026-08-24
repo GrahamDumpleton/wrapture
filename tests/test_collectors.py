@@ -236,7 +236,7 @@ def test_aggregate_counts_a_noted_exception_as_an_error() -> None:
     dispatch = binding(Shop, "dispatch")
 
     def noting(wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: Any) -> str:
-        wrapture.note_exception(args[0], event=wrapture.current_event(binding=dispatch))
+        wrapture.current_event(binding=dispatch).note_exception(args[0])
         return "500"
 
     handle = binding(Shop, "handle_error").on_call.decorates(noting)

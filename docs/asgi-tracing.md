@@ -32,6 +32,19 @@ uvicorn or hypercorn:
 application = wrapture.ASGIMiddleware(application)
 ```
 
+The standalone constructor carries the recording options the binding
+mode would otherwise supply, under the same names: `when=` decides
+per request whether to record, the application running and answering
+either way, as a callable taking the scope or a glob string or list
+of glob strings naming request paths not to record
+(`when=["/health", "/static/*"]`, matched against `scope["path"]`);
+`capture_args=` is the capture policy for the request's descriptive
+data, where `redact()` masks query parameters by name over and above
+the built-in sensitive set; `capture_result=` the policy for the
+status-line result. An explicit option wins over the bound binding's
+value where both exist. The [WSGI page](wsgi-tracing.md) discusses
+the same options in more detail.
+
 Only HTTP is observed. Websocket and lifespan scopes pass through
 the middleware completely untouched: they do not fit the
 request-and-response shape of the `"request"` event, and would want
@@ -257,7 +270,7 @@ is of the same kind, so the aiming is the same:
 
 ```python
 def note_failure(wrapped, instance, args, kwargs):
-    wrapture.note_exception(args[-1], event=wrapture.current_event(kind="request"))
+    wrapture.current_event(kind="request").note_exception(args[-1])
     return wrapped(*args, **kwargs)
 ```
 

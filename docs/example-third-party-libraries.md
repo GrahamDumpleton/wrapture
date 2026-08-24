@@ -97,7 +97,7 @@ only the `headers` keyword is different by the time it does:
 
 >>> request = wrapture.binding(Client, "request")
 >>> request.on_call.transforms_args(with_tenant)
-<CallBehaviour of <Binding 'Client.request' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Client.request' callable unapplied>>
 
 ```
 
@@ -108,7 +108,7 @@ with whatever the caller passed:
 
 ```python
 >>> request.apply()
-<Binding 'Client.request' callable active>
+<Binding '__main__:Client.request' callable active>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {'X-Tenant': 'acme'}, 'timeout': 30}
 >>> client.request("GET", "/orders", headers={"Accept": "text/csv"})
@@ -142,13 +142,13 @@ are counted:
 
 ```python
 >>> request.suspend()
-<Binding 'Client.request' callable active suspended>
+<Binding '__main__:Client.request' callable active suspended>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {}, 'timeout': 30}
 >>> request.suspended_calls
 1
 >>> request.resume()
-<Binding 'Client.request' callable active>
+<Binding '__main__:Client.request' callable active>
 
 ```
 
@@ -170,7 +170,7 @@ the patch itself never leaves the method:
 ...     return args, {**kwargs, "headers": headers}
 
 >>> request.on_call.passes_through().transforms_args(with_other_tenant)
-<CallBehaviour of <Binding 'Client.request' callable active>>
+<CallBehaviour of <Binding '__main__:Client.request' callable active>>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {'X-Tenant': 'globex'}, 'timeout': 30}
 
@@ -198,7 +198,7 @@ retry working:
 ...         return wrapped(*args, **kwargs)
 
 >>> request.on_call.decorates(retry_once)
-<CallBehaviour of <Binding 'Client.request' callable active>>
+<CallBehaviour of <Binding '__main__:Client.request' callable active>>
 
 >>> class DropsFirst:
 ...     def __init__(self) -> None:
@@ -226,7 +226,7 @@ be applied again:
 
 ```python
 >>> request.remove()
-<Binding 'Client.request' callable unapplied>
+<Binding '__main__:Client.request' callable unapplied>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {}, 'timeout': 30}
 
@@ -244,9 +244,9 @@ override. Used as a context manager, it is a scoped clamp:
 ```python
 >>> timeout = wrapture.binding(Client, "timeout")
 >>> timeout
-<Binding 'Client.timeout' attribute unapplied>
+<Binding '__main__:Client.timeout' attribute unapplied>
 >>> timeout.on_get.transforms(lambda value: min(value, 5))
-<GetBehaviour of <Binding 'Client.timeout' attribute unapplied>>
+<GetBehaviour of <Binding '__main__:Client.timeout' attribute unapplied>>
 
 >>> with timeout:
 ...     client.timeout = 120
@@ -321,7 +321,7 @@ False
 
 >>> import vendored_client
 >>> installed
-[<Binding 'Client.request' callable active>]
+[<Binding 'vendored_client:Client.request' callable active>]
 >>> vendored_client.Client().request("GET", "/orders")
 {'method': 'GET', 'path': '/orders', 'headers': {'X-Tenant': 'acme'}}
 
@@ -380,8 +380,8 @@ A `Printer` sink shows each call as it happens:
 
 >>> with audited:
 ...     _ = client.request("GET", "/orders", token="s3cr3t")
-Client.request(method='GET', path='/orders', headers=None, token='<redacted>')
-Client.request -> '<dict>'
+__main__:Client.request(method='GET', path='/orders', headers=None, token='<redacted>')
+__main__:Client.request -> '<dict>'
 
 >>> wrapture.remove_sink(printer)
 
@@ -403,7 +403,7 @@ function is its `__wrapped__`, so a bypass is a direct call to that:
 ```python
 >>> request = wrapture.binding(Client, "request")
 >>> request.on_call.transforms_args(with_tenant).apply()
-<Binding 'Client.request' callable active>
+<Binding '__main__:Client.request' callable active>
 
 >>> request.wrapper.__wrapped__(client, "GET", "/health")
 {'method': 'GET', 'url': 'https://api.example/health', 'headers': {}, 'timeout': 30}
@@ -411,7 +411,7 @@ function is its `__wrapped__`, so a bypass is a direct call to that:
 {'method': 'GET', 'url': 'https://api.example/health', 'headers': {'X-Tenant': 'acme'}, 'timeout': 30}
 
 >>> request.remove()
-<Binding 'Client.request' callable unapplied>
+<Binding '__main__:Client.request' callable unapplied>
 
 ```
 

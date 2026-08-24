@@ -231,7 +231,9 @@ def test_filter_forwards_only_accepted_events() -> None:
     charge = binding(Gateway, "charge")
     refund = binding(Gateway, "refund")
 
-    narrowed = Filter(lambda event: event.label == "Gateway.charge", probe)
+    narrowed = Filter(
+        lambda event: event.path == "test_sink_library:Gateway.charge", probe
+    )
 
     with charge, refund, listening(narrowed):
         gateway = Gateway()
@@ -243,7 +245,7 @@ def test_filter_forwards_only_accepted_events() -> None:
     # The refund produced neither an enter nor an error downstream.
 
     assert probe.kinds() == ["enter", "exit"]
-    assert probe.notified[0][1].label == "Gateway.charge"
+    assert probe.notified[0][1].path == "test_sink_library:Gateway.charge"
 
 
 def test_the_filter_decision_is_made_at_enter_and_sticks() -> None:
@@ -279,9 +281,9 @@ def test_depth_forwards_only_the_top_levels() -> None:
     # charge at depth 1 is cut.
 
     assert probe.kinds() == ["enter", "exit"]
-    assert [event.label for _, event in probe.notified] == [
-        "Processor.process",
-        "Processor.process",
+    assert [event.path for _, event in probe.notified] == [
+        "test_sink_library:Processor.process",
+        "test_sink_library:Processor.process",
     ]
 
 
@@ -314,11 +316,11 @@ def test_a_kept_tree_flows_through_whole() -> None:
     with process, charge, listening(sample):
         Processor().process()
 
-    assert [(kind, event.label) for kind, event in probe.notified] == [
-        ("enter", "Processor.process"),
-        ("enter", "Gateway.charge"),
-        ("exit", "Gateway.charge"),
-        ("exit", "Processor.process"),
+    assert [(kind, event.path) for kind, event in probe.notified] == [
+        ("enter", "test_sink_library:Processor.process"),
+        ("enter", "test_sink_library:Gateway.charge"),
+        ("exit", "test_sink_library:Gateway.charge"),
+        ("exit", "test_sink_library:Processor.process"),
     ]
 
 

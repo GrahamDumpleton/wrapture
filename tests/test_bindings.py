@@ -280,11 +280,16 @@ def test_mode_is_detected_from_the_target() -> None:
     assert binding("os.path", "join").mode == "callable"
 
 
-def test_a_string_target_labels_with_the_module_name() -> None:
-    # Not the string's repr: 'os.path'.join would leak quotes into
-    # every printed event.
+def test_an_unnamed_binding_has_no_label_and_shows_its_path() -> None:
+    # No label is derived: events fall back to the path, so a name
+    # with a colon in it is always the real module:qualname location,
+    # and repr shows the same string.
 
-    assert binding("os.path", "join").label == "os.path.join"
+    unnamed = binding("os.path", "join")
+
+    assert unnamed.label is None
+    assert unnamed.path == "os.path:join"
+    assert "os.path:join" in repr(unnamed)
 
 
 def test_a_string_target_may_spell_the_owner_with_a_colon() -> None:
@@ -296,7 +301,7 @@ def test_a_string_target_may_spell_the_owner_with_a_colon() -> None:
     dotted = binding(__name__, "Gateway.charge")
 
     assert colon.name == dotted.name == "Gateway.charge"
-    assert colon.label == dotted.label == f"{__name__}.Gateway.charge"
+    assert colon.label is None and dotted.label is None
     assert colon.path == dotted.path == f"{__name__}:Gateway.charge"
 
     with colon.on_call.returns({"id": "stub"}):
@@ -414,7 +419,7 @@ def test_a_group_takes_only_bindings_and_never_relabels_them() -> None:
         rate=binding(Ledger, "rate", mode="attribute", label="the rate"),
     )
 
-    assert group.charge.label == "Gateway.charge"
+    assert group.charge.label is None
     assert group.rate.label == "the rate"
     assert group.rate.mode == "attribute"
 
@@ -570,12 +575,12 @@ def test_discover_accepts_a_sequence_of_patterns() -> None:
 
 def test_discover_accepts_a_string_target() -> None:
     # The string spelling matches a config observe target, and the
-    # bindings keep it, so their labels read as the config layer's do.
+    # bindings keep it, so their paths read as the config layer's do.
 
     group = discover(f"{__name__}:Billing", "charge")
 
     assert group.charge.name == "Billing.charge"
-    assert group.charge.label == f"{__name__}.Billing.charge"
+    assert group.charge.path == f"{__name__}:Billing.charge"
 
 
 def test_discover_on_a_module_selects_only_its_own_functions(
@@ -606,7 +611,7 @@ def test_discover_on_a_module_selects_only_its_own_functions(
     group = discover("bndtest_widgets", "*")
 
     assert {bnd.name for bnd in group} == {"parse", "render"}
-    assert group.parse.label == "bndtest_widgets.parse"
+    assert group.parse.path == "bndtest_widgets:parse"
 
 
 def test_discover_group_applies_and_removes_as_a_unit() -> None:

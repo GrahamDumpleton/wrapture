@@ -85,9 +85,11 @@ from .timeline import (
 )
 
 
-def _describe(fn: Any) -> tuple[str, str]:
-    # Derive the path and label from the callable itself, the same
-    # module:qualname convention bindings derive from their target.
+def _describe(fn: Any) -> str:
+    # Derive the path from the callable itself, the same
+    # module:qualname convention bindings derive from their target. No
+    # label is derived: an unnamed observation records label None and
+    # every consumer falls back to the path.
 
     module = getattr(fn, "__module__", None) or "observed"
     qualname = (
@@ -96,7 +98,7 @@ def _describe(fn: Any) -> tuple[str, str]:
         or "callable"
     )
 
-    return f"{module}:{qualname}", f"{module}.{qualname}"
+    return f"{module}:{qualname}"
 
 
 class BoundObservedCallable(
@@ -132,7 +134,7 @@ class ObservedCallable(
         wrapped: Callable[..., Any],
         *,
         path: str,
-        label: str,
+        label: str | None,
         capture_args: CapturePolicy | None,
         capture_result: CapturePolicy | None,
         stack: int | None,
@@ -157,6 +159,7 @@ class ObservedCallable(
 
         self._self_path = path
         self._self_label = label
+        self._self_display = label or path
         self._self_precheck = precheck
         self._self_capture_args = capture_args
         self._self_capture_result = capture_result
@@ -170,7 +173,7 @@ class ObservedCallable(
         self._self_gap_warned = False
 
     def __repr__(self) -> str:
-        return f"<{type(self).__name__} {self._self_label!r}>"
+        return f"<{type(self).__name__} {self._self_display!r}>"
 
     # -- identity ----------------------------------------------------------
 
@@ -181,8 +184,9 @@ class ObservedCallable(
         return self._self_path
 
     @property
-    def label(self) -> str:
-        """The display name events record under."""
+    def label(self) -> str | None:
+        """The assigned display name, or None when none was given, in
+        which case events fall back to the path."""
 
         return self._self_label
 
@@ -236,7 +240,7 @@ class ObservedCallable(
         tape = _current_tape()
         if tape is None:
             raise RuntimeError(
-                f"{self._self_label}: events are only recorded inside a timeline()"
+                f"{self._self_display}: events are only recorded inside a timeline()"
             )
 
         return tape.for_binding(self)
@@ -249,7 +253,7 @@ class ObservedCallable(
         if not self._self_gap_warned:
             self._self_gap_warned = True
             warnings.warn(
-                f"{self._self_label}: an observed call ran on a thread with"
+                f"{self._self_display}: an observed call ran on a thread with"
                 f" no recording context while a timeline was active"
                 f" elsewhere, so it was not recorded. To record work on"
                 f" this thread, wrap its target with wrapture.propagate(...)."
@@ -469,23 +473,29 @@ def observed(
     object when the proxy sits on a class, and accepts a boolean in
     place of the predicate as binding() does.
 
-    The label identifies the observation, and that is what makes
-    dynamic application safe. The callable's full wrapper chain is
-    inspected with wrapt's wrapper_chain(), which sees through proxies
-    and functools.wraps() decorators alike; an ObservedCallable layer
-    already carrying the same label means this observation is applied,
-    however deeply a later wrapper buried it, and the callable is
-    returned unchanged (exactly as given, with any such later wrappers
-    intact), the label's options standing. With no label given the
-    derived name serves, which keeps the wrap-in-place idiom,
+    The assigned label, or the derived module:qualname path when no
+    label is given, identifies the observation, and that is what
+    makes dynamic application safe. The callable's full wrapper chain
+    is inspected with wrapt's wrapper_chain(), which sees through
+    proxies and functools.wraps() decorators alike; an
+    ObservedCallable layer already carrying the same identity means
+    this observation is applied, however deeply a later wrapper
+    buried it, and the callable is returned unchanged (exactly as
+    given, with any such later wrappers intact), that layer's options
+    standing. The derived path keeps the wrap-in-place idiom,
     registry[k] = observed(registry[k]), safe to run any number of
-    times; but the derived name reads introspection off the object
-    handed in, which an interleaved third-party wrapper may fail to
-    preserve, so wherever double wrapping is a real risk, give a
-    pre-determined label. Distinct labels stack: each layer records
-    its own event, one nested under the other. Stacking by accident
-    under different labels cannot be told from intent, so it is not an
-    error; it shows up honestly as double counting in the results.
+    times; but it reads introspection off the object handed in, which
+    an interleaved third-party wrapper may fail to preserve, so
+    wherever double wrapping is a real risk, give a pre-determined
+    label. Distinct identities stack: each layer records its own
+    event, one nested under the other. Stacking by accident cannot be
+    told from intent, so it is not an error; it shows up honestly as
+    double counting in the results.
+
+    No label is derived from the callable: an unnamed observation
+    records label None and every renderer falls back to the path, so
+    a printed name with a colon in it is always the real
+    module:qualname location.
     """
 
     # Called with only options, hand back the decorator that captures
@@ -528,24 +538,28 @@ def observed(
             f" kwargs), or None, got {when!r}"
         )
 
-    path, derived = _describe(fn)
-    effective = label or derived
+    path = _describe(fn)
 
-    # Dedupe by label across the full wrapper chain: finding this
-    # label on an ObservedCallable layer anywhere in the chain means
-    # this observation is already applied, and fn goes back exactly as
+    # Dedupe by identity across the full wrapper chain: the identity is
+    # the assigned label, or the derived path when unnamed, so finding
+    # it on an ObservedCallable layer anywhere in the chain means this
+    # observation is already applied, and fn goes back exactly as
     # given. The isinstance check is precise even against proxy
     # __class__ transparency, since only a layer whose real type is
     # ObservedCallable matches.
 
+    identity = label or path
+
     for layer in wrapper_chain(fn):
-        if isinstance(layer, ObservedCallable) and layer.label == effective:
+        if isinstance(layer, ObservedCallable) and (layer.label or layer.path) == (
+            identity
+        ):
             return cast(ObservedCallable, fn)
 
     return ObservedCallable(
         fn,
         path=path,
-        label=effective,
+        label=label,
         capture_args=_resolve_policy(
             capture_args if capture_args is not None else capture
         ),

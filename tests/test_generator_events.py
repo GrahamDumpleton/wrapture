@@ -123,8 +123,8 @@ def test_body_calls_nest_under_the_generator_event() -> None:
             consumer.handle(item)
 
     generator_event = tape.all[0]
-    fetch_events = [e for e in tape.all if e.label == "Feed.fetch"]
-    handle_events = [e for e in tape.all if e.label == "Consumer.handle"]
+    fetch_events = [e for e in tape.all if e.path.endswith(":Feed.fetch")]
+    handle_events = [e for e in tape.all if e.path.endswith(":Consumer.handle")]
 
     # fetch() runs inside the generator body, so it nests under the
     # generator's event. handle() runs in the consumer between yields,

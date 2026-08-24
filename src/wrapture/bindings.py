@@ -684,13 +684,19 @@ class Binding:
 
         if slot:
             self._path = self._slot_path(target, name)
-            self._label = label or self._slot_label(target, name)
         elif mode == "mapping":
             self._path = self._bare_path(target, name)
-            self._label = label or self._bare_label(target, name)
         else:
             self._path = _derive_path(target, name)
-            self._label = label or self._default_label(target, name)
+
+        # The label is only ever an assigned name; when none was given
+        # the events carry label None and every consumer falls back to
+        # the path, so a name with a colon in it is always the real
+        # module:qualname location. The display string is what error
+        # messages call the binding either way.
+
+        self._label = label
+        self._display = label or self._path
 
         # The mapping whose content a mapping binding substitutes: the
         # object at the location, or the entry an item= slot names.
@@ -703,11 +709,11 @@ class Binding:
                 held = slot_read(self._owner, self._slot_kind, self._slot)
                 if held is MISSING:
                     raise KeyError(
-                        f"{self._label}: the mapping has no entry {self._slot!r}"
+                        f"{self._display}: the mapping has no entry {self._slot!r}"
                     )
             else:
                 held = resolve_owner(target, name)
-            self._mapping = check_mapping(self._label, held)
+            self._mapping = check_mapping(self._display, held)
 
         # Capture policy overrides. None means follow whatever the sink
         # consuming the events declares; capture= is shorthand for both
@@ -768,17 +774,6 @@ class Binding:
         self._injects: dict[str, bool] = {}
 
     @staticmethod
-    def _default_label(target: Any, name: str) -> str:
-        # A string target is already the module's name; anything else
-        # is asked for its own name, with repr as the last resort.
-
-        if isinstance(target, str):
-            return f"{target}.{name}"
-
-        owner = getattr(target, "__name__", None) or repr(target)
-        return f"{owner}.{name}"
-
-    @staticmethod
     def _check_slot_options(
         attr: str | None,
         item: Any,
@@ -837,36 +832,6 @@ class Binding:
                 f" capture_result=, stack= and when= do not apply to it"
             )
 
-    def _slot_label(self, target: Any, name: str) -> str:
-        # An owner given as an object with no name of its own (an
-        # instance, os.environ) is labelled by its type: a repr can be
-        # arbitrarily long and, carrying an address, unstable.
-
-        if name:
-            owner = self._default_label(target, name)
-        elif isinstance(target, str):
-            owner = target
-        else:
-            owner = getattr(target, "__name__", None) or type(target).__qualname__
-
-        if self._slot_kind == "attr":
-            return f"{owner}.{self._slot}"
-
-        return f"{owner}[{self._slot!r}]"
-
-    def _bare_label(self, target: Any, name: str) -> str:
-        # The label of the object at a location with no slot: the
-        # member's own label when there are steps, else the object's
-        # name or, failing that, its type, as for a slot's owner.
-
-        if name:
-            return self._default_label(target, name)
-
-        if isinstance(target, str):
-            return target
-
-        return getattr(target, "__name__", None) or type(target).__qualname__
-
     def _bare_path(self, target: Any, name: str) -> str:
         if name:
             return _derive_path(target, name)
@@ -913,7 +878,14 @@ class Binding:
         return self._path
 
     @property
-    def label(self) -> str:
+    def label(self) -> str | None:
+        """The assigned display name, or None when none was given.
+
+        Events carry this verbatim; consumers fall back to the path
+        when it is None, so a derived module:qualname name is never
+        respelled into a label.
+        """
+
         return self._label
 
     @property
@@ -944,7 +916,7 @@ class Binding:
         if self._suspended:
             state += " suspended"
 
-        return f"<Binding {self._label!r} {self._mode} {state}>"
+        return f"<Binding {self._display!r} {self._mode} {state}>"
 
     # -- behaviour namespaces ----------------------------------------------
 
@@ -960,7 +932,7 @@ class Binding:
         article = "an" if self._mode == "attribute" else "a"
 
         return WrongModeError(
-            f"{name} is not available: {self._label} is {article}"
+            f"{name} is not available: {self._display} is {article}"
             f" {self._mode!r} binding; use {suggestion}"
         )
 
@@ -1081,7 +1053,7 @@ class Binding:
 
         if self.applied:
             raise AlreadyAppliedError(
-                f"{self._label} is already applied. Use either"
+                f"{self._display} is already applied. Use either"
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
@@ -1185,7 +1157,7 @@ class Binding:
         original = slot_read(self._owner, "item", self._slot)
         if original is MISSING:
             raise KeyError(
-                f"{self._label}: the mapping has no entry {self._slot!r} to wrap"
+                f"{self._display}: the mapping has no entry {self._slot!r} to wrap"
             )
 
         wrapper = factory(original)
@@ -1213,7 +1185,7 @@ class Binding:
             slot_write(self._owner, "item", self._slot, self._prior)
         elif not missing_ok:
             raise ValueError(
-                f"{self._label}: the mapping entry no longer holds the wrapper"
+                f"{self._display}: the mapping entry no longer holds the wrapper"
             )
 
         self._prior = MISSING
@@ -1288,7 +1260,7 @@ class Binding:
         if not self._gap_warned:
             self._gap_warned = True
             warnings.warn(
-                f"{self._label}: an observed operation ran on a thread"
+                f"{self._display}: an observed operation ran on a thread"
                 f" with no recording context while a timeline was active"
                 f" elsewhere, so it was not recorded (behaviour still"
                 f" applied). To record work on this thread, wrap its"
@@ -1317,20 +1289,20 @@ class Binding:
 
         if self._mode in _HOLDING_MODES:
             raise WrongModeError(
-                f"{self._label} is a {self._mode} binding and records nothing;"
+                f"{self._display} is a {self._mode} binding and records nothing;"
                 f" there are no events to read"
             )
 
         if self._apply_count == 0:
             raise NeverAppliedError(
-                f"{self._label} was never applied; call apply() or use it"
+                f"{self._display} was never applied; call apply() or use it"
                 f" as a context manager"
             )
 
         tape = _current_tape()
         if tape is None:
             raise RuntimeError(
-                f"{self._label}: events are only recorded inside a timeline()"
+                f"{self._display}: events are only recorded inside a timeline()"
             )
 
         return tape.for_binding(self)
@@ -1373,13 +1345,13 @@ class Binding:
                 raise WrongModeError(
                     f"hides() is not available on a mapping binding; a"
                     f" mapping's absent content is empty content, so use"
-                    f" overrides({{}}) on {self._label}"
+                    f" overrides({{}}) on {self._display}"
                 )
 
             if self._mode == "value" and verb == "updates":
                 raise WrongModeError(
                     f"updates() is only available on a mapping binding"
-                    f" (mode='mapping'); {self._label} holds one slot, so"
+                    f" (mode='mapping'); {self._display} holds one slot, so"
                     f" use overrides(value)"
                 )
 
@@ -1394,7 +1366,7 @@ class Binding:
             )
             article = "an" if self._mode == "attribute" else "a"
             raise WrongModeError(
-                f"{verb}() is only available on {wanted}; {self._label} is"
+                f"{verb}() is only available on {wanted}; {self._display} is"
                 f" {article} {self._mode!r} binding"
             )
 
@@ -1453,7 +1425,7 @@ class Binding:
 
         if not isinstance(values, Mapping):
             raise TypeError(
-                f"{self._label}: {verb}() on a mapping binding takes a"
+                f"{self._display}: {verb}() on a mapping binding takes a"
                 f" mapping of entries, got {type(values).__name__}"
             )
 
@@ -1538,7 +1510,7 @@ class Binding:
     def _expects(self, kind: str, count: int) -> Self:
         if self._mode in _HOLDING_MODES:
             raise WrongModeError(
-                f"{self._label} is a {self._mode} binding and records nothing;"
+                f"{self._display} is a {self._mode} binding and records nothing;"
                 f" it cannot carry an expectation"
             )
 
@@ -1589,7 +1561,7 @@ class Binding:
                     log.assert_at_least(count)
             except AssertionError as exc:
                 raise ExpectationNotMetError(
-                    f"declared expectation on {self._label} not met: {exc}"
+                    f"declared expectation on {self._display} not met: {exc}"
                 ) from None
 
     # -- wrapper -----------------------------------------------------------
@@ -1979,7 +1951,7 @@ class Binding:
         try:
             signature.bind(*args, **kwargs)
         except TypeError as exc:
-            raise TypeError(f"{self._label} (stubbed): {exc}") from None
+            raise TypeError(f"{self._display} (stubbed): {exc}") from None
 
     def _completed(self, operation: str, phase: Phase | None, event: Event) -> None:
         """Show a completed operation to the phase's until= predicate,
@@ -2084,7 +2056,7 @@ class Binding:
         with self._phase_lock:
             if phase.successor is None:
                 raise SequenceExhaustedError(
-                    f"{self._label}: the returns_from() sequence of phase"
+                    f"{self._display}: the returns_from() sequence of phase"
                     f" {phase.index} is exhausted and no phase follows it;"
                     f" add one with then() or supply an endless sequence"
                 )
@@ -2147,7 +2119,7 @@ class Binding:
 
         if len(phased) > 1:
             raise ValueError(
-                f"{self._label} has phases on {', '.join(sorted(phased))};"
+                f"{self._display} has phases on {', '.join(sorted(phased))};"
                 f" use the operation's namespace, e.g. on_get.phase"
             )
 

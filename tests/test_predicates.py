@@ -131,7 +131,7 @@ def test_predicate_consultations_are_never_themselves_recorded() -> None:
     with timeline(charge, note) as tape:
         Gateway().charge(500)
 
-    assert [event.label for event in tape.all] == ["Gateway.charge"]
+    assert [event.path for event in tape.all] == ["test_predicates:Gateway.charge"]
 
 
 def test_a_generator_call_is_decided_once_at_construction() -> None:

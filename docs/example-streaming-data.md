@@ -133,7 +133,7 @@ generator's return value, `None` here:
 ...     print(tape.tree())
 ...     event = pages.events.first
 [1, 2, 3, 4, 5]
-Catalogue.pages(cursor=0)  -> None
+__main__:Catalogue.pages(cursor=0)  -> None
 
 >>> event.items, event.result
 (3, None)
@@ -152,7 +152,7 @@ is the honest signal that the iteration never finished:
 ...     print(tape.tree())
 ...     event = pages.events.first
 {'id': 3, 'name': 'item-3'}
-Catalogue.pages(cursor=0)
+__main__:Catalogue.pages(cursor=0)
 
 >>> event.items, event.result is wrapture.MISSING
 (2, True)
@@ -200,7 +200,7 @@ enough here:
 
 ```python
 >>> pages.on_call.transforms_result(watch)
-<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
 
 >>> with pages:
 ...     collect_ids(catalogue.pages())
@@ -282,7 +282,7 @@ in the injected error rather than exhaustion:
 
 ```python
 >>> pages.on_call.passes_through().transforms_result(flaky)
-<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
 
 >>> with wrapture.timeline(pages) as tape:
 ...     out: list[str] = []
@@ -290,7 +290,7 @@ in the injected error rather than exhaustion:
 ...     print(tape.tree())
 ...     event = pages.events.raising(OSError).first
 2
-Catalogue.pages(cursor=0)  !! OSError
+__main__:Catalogue.pages(cursor=0)  !! OSError
 
 >>> out
 ['1,item-1', '2,item-2']
@@ -323,7 +323,7 @@ to check that the exporter counts rows and not pages:
 <IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>
 
 >>> pages.on_call.passes_through().transforms_result(thin)
-<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
 
 >>> with pages:
 ...     Exporter().write(catalogue.pages(), out := [])
@@ -345,7 +345,7 @@ touching `Catalogue` at all:
 
 ```python
 >>> pages.on_call.passes_through()
-<CallBehaviour of <Binding 'Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
 
 >>> cursors.clear(); outcomes.clear()
 
@@ -353,7 +353,7 @@ touching `Catalogue` at all:
 >>> write.on_call.transforms_args(
 ...     lambda args, kwargs: ((watch(args[0]), *args[1:]), kwargs)
 ... )
-<CallBehaviour of <Binding 'Exporter.write' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Exporter.write' callable unapplied>>
 
 >>> with write:
 ...     Exporter().write(catalogue.pages(), [])

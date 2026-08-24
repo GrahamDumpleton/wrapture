@@ -45,16 +45,16 @@ def test_a_slot_makes_a_value_binding() -> None:
     key = binding(os.environ, item="WRAPTURE_KEY")
 
     assert timeout.mode == key.mode == "value"
-    assert timeout.label == "wrapture_test_config.TIMEOUT"
+    assert timeout.label is None
     assert timeout.path == "wrapture_test_config:TIMEOUT"
-    assert key.label == "_Environ['WRAPTURE_KEY']"
-    assert binding("os", "environ", item="K").label == "os.environ['K']"
+    assert key.path == "os:_Environ['WRAPTURE_KEY']"
+    assert binding("os", "environ", item="K").path == "os:environ['K']"
     assert binding("os:environ", item="K").path == "os:environ['K']"
     assert binding(config, "SETTINGS", item="currency").path == (
         "wrapture_test_config:SETTINGS['currency']"
     )
     assert timeout.wrapper is None
-    assert repr(timeout) == "<Binding 'wrapture_test_config.TIMEOUT' value unapplied>"
+    assert repr(timeout) == "<Binding 'wrapture_test_config:TIMEOUT' value unapplied>"
 
 
 def test_slot_keywords_are_validated() -> None:
@@ -406,7 +406,7 @@ def test_a_callable_in_a_mapping_is_wrapped_in_place() -> None:
 
     handler = binding(sys.modules[__name__], "HANDLERS", item="GET", mode="callable")
     assert handler.mode == "callable"
-    assert handler.label == f"{__name__}.HANDLERS['GET']"
+    assert handler.label is None
     assert handler.path == f"{__name__}:HANDLERS['GET']"
 
     handler.on_call.raises(RuntimeError("unavailable"))

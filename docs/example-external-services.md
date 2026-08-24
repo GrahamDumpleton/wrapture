@@ -116,7 +116,7 @@ call with a canned receipt and never reaches the real method, so
 ```python
 >>> charge = wrapture.binding(PaymentClient, "charge")
 >>> charge.on_call.returns({"id": "ch_TEST", "amount": 500, "currency": "USD"})
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 
 >>> with charge:
 ...     service.place("o-1", 500)
@@ -141,7 +141,7 @@ pass its tests on the strength of the stub:
 ...     service.client.charge(500, memo="gift")
 Traceback (most recent call last):
     ...
-TypeError: PaymentClient.charge (stubbed): got an unexpected keyword argument 'memo'
+TypeError: __main__:PaymentClient.charge (stubbed): got an unexpected keyword argument 'memo'
 
 ```
 
@@ -153,7 +153,7 @@ raised, it is what the service does about it, and that code is real:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 
 >>> with charge:
 ...     service.place("o-2", 300)
@@ -173,7 +173,7 @@ nothing carries over from the first, so it starts empty:
 ```python
 >>> recovered = charge.on_call.then(after=2)
 >>> recovered.returns({"id": "ch_RETRY", "amount": 300, "currency": "USD"})
-<CallPhase 1 of 'PaymentClient.charge'>
+<CallPhase 1 of '__main__:PaymentClient.charge'>
 
 >>> with charge:
 ...     [service.place(f"o-{n}", 300)["status"] for n in (5, 6, 7)]
@@ -192,7 +192,7 @@ would replay the outage for the next test. This one is done with it:
 
 ```python
 >>> charge.on_call.reset()
-<Binding 'PaymentClient.charge' callable unapplied>
+<Binding '__main__:PaymentClient.charge' callable unapplied>
 
 ```
 
@@ -205,7 +205,7 @@ down to the network edge, and the real `charge()` runs above it:
 ```python
 >>> post = wrapture.binding(PaymentClient, "_post")
 >>> post.on_call.returns({"id": "ch_LIVE_9f2"})
-<CallBehaviour of <Binding 'PaymentClient._post' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient._post' callable unapplied>>
 
 >>> with post:
 ...     service.place("o-3", 250)
@@ -231,9 +231,9 @@ do not depend on what a live gateway happened to return:
 
 ```python
 >>> charge.on_call.transforms_args(lambda args, kwargs: (args, {**kwargs, "currency": "EUR"}))
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 >>> charge.on_call.transforms_result(lambda receipt: {**receipt, "id": "ch_TEST"})
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 
 >>> with post, charge:
 ...     service.client.charge(250)
@@ -253,17 +253,17 @@ as an event, with real arguments, real results and real nesting:
 
 ```python
 >>> charge.on_call.passes_through()
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 >>> refund = wrapture.binding(PaymentClient, "refund")
 
 >>> with wrapture.timeline(charge, refund, post) as tape:
 ...     _ = service.place("o-5", 700)
 ...     _ = service.cancel("o-5")
 ...     print(tape.tree())
-PaymentClient.charge(amount=700, currency='USD')  -> {'id': 'ch_LIVE_9f2', 'amount': 700, 'currency': 'USD'}
-  PaymentClient._post(path='/charges', payload={'amount': 700, 'currency': 'USD'})  -> {'id': 'ch_LIVE_9f2'} (injected)
-PaymentClient.refund(charge_id='ch_LIVE_9f2')  -> {'id': 'ch_LIVE_9f2', 'charge': 'ch_LIVE_9f2'}
-  PaymentClient._post(path='/charges/ch_LIVE_9f2/refund', payload={})  -> {'id': 'ch_LIVE_9f2'} (injected)
+__main__:PaymentClient.charge(amount=700, currency='USD')  -> {'id': 'ch_LIVE_9f2', 'amount': 700, 'currency': 'USD'}
+  __main__:PaymentClient._post(path='/charges', payload={'amount': 700, 'currency': 'USD'})  -> {'id': 'ch_LIVE_9f2'} (injected)
+__main__:PaymentClient.refund(charge_id='ch_LIVE_9f2')  -> {'id': 'ch_LIVE_9f2', 'charge': 'ch_LIVE_9f2'}
+  __main__:PaymentClient._post(path='/charges/ch_LIVE_9f2/refund', payload={})  -> {'id': 'ch_LIVE_9f2'} (injected)
 
 ```
 
@@ -298,7 +298,7 @@ so, printing the events it looked at if it is wrong:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 
 >>> with wrapture.timeline(charge, refund):
 ...     _ = service.place("o-7", 400)
@@ -318,7 +318,7 @@ cancelled paid order:
 
 ```python
 >>> charge.on_call.passes_through()
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 >>> _ = charge.expect_once()
 >>> _ = refund.expect_once()
 
@@ -338,15 +338,15 @@ block:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding 'PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
 
 >>> with wrapture.timeline(charge, refund, post):
 ...     _ = service.place("o-9", 900)
 ...     _ = service.cancel("o-9")
 Traceback (most recent call last):
     ...
-wrapture.exceptions.ExpectationNotMetError: declared expectation on PaymentClient.refund not met: expected exactly 1 event(s), got 0
-<EventLog PaymentClient.refund: 0 event(s)>
+wrapture.exceptions.ExpectationNotMetError: declared expectation on __main__:PaymentClient.refund not met: expected exactly 1 event(s), got 0
+<EventLog __main__:PaymentClient.refund: 0 event(s)>
     (no events)
 
 ```

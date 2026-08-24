@@ -345,7 +345,7 @@ class _Behaviour[R]:
 
     def __repr__(self) -> str:
         index = 0 if self._phase is None else self._phase.index
-        return f"<{type(self).__name__} {index} of {self._binding._label!r}>"
+        return f"<{type(self).__name__} {index} of {self._binding._display!r}>"
 
     def _current(self) -> Phase:
         """The phase this namespace configures."""

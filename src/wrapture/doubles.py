@@ -262,11 +262,12 @@ def stub(
     # is what makes a never-awaited warning name the target.
 
     if mimics is not None:
-        path, derived = _describe(mimics)
-        effective = label or derived
+        path = _describe(mimics)
+        display = label or path
+        fallback = label or path.rpartition(":")[2]
 
-        stand_in.__name__ = getattr(mimics, "__name__", effective)
-        stand_in.__qualname__ = getattr(mimics, "__qualname__", effective)
+        stand_in.__name__ = getattr(mimics, "__name__", fallback)
+        stand_in.__qualname__ = getattr(mimics, "__qualname__", fallback)
 
         # The borrowed signature rides on the stand-in, where every
         # consumer already looks: introspection through the proxy,
@@ -278,11 +279,17 @@ def stub(
         except (TypeError, ValueError):
             pass
     else:
-        effective = label or "stub"
-        path = f"stub:{effective}"
+        # A bare stub has no call site to derive from, so its path is
+        # the standard instance fallback, the type of the callable
+        # itself: a colon path that resolves, to the class that says
+        # "fabricated double", while the label carries which one.
 
-        stand_in.__name__ = effective
-        stand_in.__qualname__ = effective
+        label = label or "stub"
+        display = label
+        path = f"{StubCallable.__module__}:{StubCallable.__qualname__}"
+
+        stand_in.__name__ = label
+        stand_in.__qualname__ = label
 
     # Strict checking only when there is a signature to check against:
     # a rejected call raises before it is recorded or counted, as with
@@ -304,12 +311,12 @@ def stub(
             try:
                 signature.bind(*args, **kwargs)
             except TypeError as exc:
-                raise TypeError(f"{effective} (stubbed): {exc}") from None
+                raise TypeError(f"{display} (stubbed): {exc}") from None
 
     double = StubCallable(
         stand_in,
         path=path,
-        label=effective,
+        label=label,
         capture_args=None,
         capture_result=None,
         stack=None,

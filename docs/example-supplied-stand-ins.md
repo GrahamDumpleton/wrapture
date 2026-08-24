@@ -152,8 +152,8 @@ parameter name:
 ...     pipeline.run(["job-1"])
 ...     hook.events.with_args(job="job-1", outcome="sent").assert_once()
 1
-<EventLog __main__.on_complete[job='job-1', outcome='sent']: 1 event(s)>
-    __main__.on_complete(job='job-1', outcome='sent')
+<EventLog __main__:on_complete[job='job-1', outcome='sent']: 1 event(s)>
+    __main__:on_complete(job='job-1', outcome='sent')
 
 ```
 

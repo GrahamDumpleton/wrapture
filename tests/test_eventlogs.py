@@ -304,7 +304,7 @@ def test_filters_compose_and_chain_the_label() -> None:
 
         narrowed = charge.events.with_args(amount=700).raising()
         assert narrowed.count == 0
-        assert narrowed.label == "Gateway.charge[amount=700][raising]"
+        assert narrowed.label == "test_eventlogs:Gateway.charge[amount=700][raising]"
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +382,8 @@ def test_assert_once_and_times_fail_with_the_events_shown() -> None:
 
         message = str(failure.value)
         assert "expected exactly 3 event(s), got 1" in message
-        assert "<EventLog Gateway.charge: 1 event(s)>" in message
-        assert "Gateway.charge(amount=500, currency='USD')" in message
+        assert "<EventLog test_eventlogs:Gateway.charge: 1 event(s)>" in message
+        assert "test_eventlogs:Gateway.charge(amount=500, currency='USD')" in message
 
 
 def test_assert_never_failure_shows_the_offending_events() -> None:
@@ -429,10 +429,13 @@ def test_an_over_narrowed_log_falls_back_to_what_was_discarded() -> None:
 
         message = str(failure.value)
         assert "expected exactly 1 event(s), got 0" in message
-        assert "<EventLog Gateway.charge[amount=999]: 0 event(s)>" in message
+        assert (
+            "<EventLog test_eventlogs:Gateway.charge[amount=999]: 0 event(s)>"
+            in message
+        )
         assert "(no events)" in message
         assert "filtered from:" in message
-        assert "Gateway.charge(amount=500, currency='USD')" in message
+        assert "test_eventlogs:Gateway.charge(amount=500, currency='USD')" in message
 
 
 def test_fallback_walks_past_empty_intermediate_logs() -> None:
@@ -446,7 +449,7 @@ def test_fallback_walks_past_empty_intermediate_logs() -> None:
 
         message = str(failure.value)
         assert "filtered from:" in message
-        assert "<EventLog Gateway.charge: 1 event(s)>" in message
+        assert "<EventLog test_eventlogs:Gateway.charge: 1 event(s)>" in message
 
 
 def test_no_fallback_when_nothing_was_ever_recorded() -> None:
@@ -511,8 +514,8 @@ def test_repr_prints_the_events() -> None:
         Gateway().charge(500)
 
         shown = repr(charge.events)
-        assert "<EventLog Gateway.charge: 1 event(s)>" in shown
-        assert "Gateway.charge(amount=500, currency='USD')" in shown
+        assert "<EventLog test_eventlogs:Gateway.charge: 1 event(s)>" in shown
+        assert "test_eventlogs:Gateway.charge(amount=500, currency='USD')" in shown
 
         empty = repr(charge.events.raising())
         assert "0 event(s)" in empty

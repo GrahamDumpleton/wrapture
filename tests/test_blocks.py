@@ -168,7 +168,7 @@ def test_an_escaping_exception_is_recorded_and_propagates() -> None:
 
 def test_inert_when_nothing_listens() -> None:
     with wrapture.block("nobody-listening", cost=1):
-        assert wrapture.current_event() is None
+        assert not wrapture.current_event()
 
 
 def test_a_sink_that_uses_a_block_does_not_recurse() -> None:
@@ -417,9 +417,9 @@ def test_within_sees_deep_descendants_not_just_direct_children() -> None:
     view = tape.within(tape.blocks("work").first)
 
     view.for_binding(leaf).assert_once()
-    assert [event.label for event in view.all] == [
-        "test_blocks.caller",
-        "test_blocks.leaf",
+    assert [event.path for event in view.all] == [
+        "test_blocks:caller",
+        "test_blocks:leaf",
     ]
 
 
@@ -471,7 +471,7 @@ def test_within_tree_draws_from_the_margin() -> None:
                 leaf()
 
     assert tape.within(tape.blocks("work").first).tree() == (
-        "block: step\n  test_blocks.leaf()  -> 'done'"
+        "block: step\n  test_blocks:leaf()  -> 'done'"
     )
 
 
@@ -523,7 +523,7 @@ def test_the_tree_gains_narrative_structure() -> None:
             pass
 
     assert tape.tree() == (
-        "block: first request\n  test_blocks.leaf()  -> 'done'\nblock: second request"
+        "block: first request\n  test_blocks:leaf()  -> 'done'\nblock: second request"
     )
 
 

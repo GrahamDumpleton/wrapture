@@ -102,7 +102,7 @@ listening, they record nothing:
 >>> service.apply()
 <BindingGroup ['handle', 'quote', 'lookup']>
 >>> service.handle
-<Binding 'Shop.handle' callable active>
+<Binding '__main__:Shop.handle' callable active>
 
 ```
 
@@ -356,7 +356,7 @@ Releasing everything the page applied:
 >>> service.remove()
 <BindingGroup ['handle', 'quote', 'lookup']>
 >>> service.handle
-<Binding 'Shop.handle' callable unapplied>
+<Binding '__main__:Shop.handle' callable unapplied>
 >>> outputs.cleanup()
 
 ```

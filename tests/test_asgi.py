@@ -165,7 +165,7 @@ def test_request_line_display() -> None:
             wrapped(_scope(query_string=b"expand=items"), server.receive, server.send)
         )
 
-    assert str(tape.all[0]) == (f"GET /orders/42?expand=items ({__name__}.application)")
+    assert str(tape.all[0]) == (f"GET /orders/42?expand=items ({__name__}:application)")
 
 
 def test_calls_nest_under_the_request() -> None:
@@ -726,3 +726,72 @@ def test_observe_entry_accepts_asgi_mode_with_name_only() -> None:
 def test_observe_entry_rejects_asgi_mode_with_match() -> None:
     with pytest.raises(ConfigError, match="mode requires name"):
         ObserveEntry(target=__name__, match="app*", mode="asgi")
+
+
+# ---------------------------------------------------------------------------
+# the standalone recording options
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_when_globs_skip_matching_paths() -> None:
+    # A glob list names paths not to record; the application still
+    # runs and answers, matching when= everywhere: the predicate
+    # decides recording only.
+
+    wrapped = ASGIMiddleware(application, when=["/health", "/static/*"])
+
+    with timeline() as tape:
+        server = _Server()
+        asyncio.run(wrapped(_scope(path="/health"), server.receive, server.send))
+        assert server.body == b"hello world"
+
+        server = _Server()
+        asyncio.run(wrapped(_scope(path="/orders/1"), server.receive, server.send))
+
+    (event,) = tape.all
+    assert event.data["path"] == "/orders/1"
+
+
+def test_standalone_when_callable_sees_the_scope() -> None:
+    wrapped = ASGIMiddleware(
+        application, when=lambda scope: scope["path"].startswith("/orders")
+    )
+
+    with timeline() as tape:
+        server = _Server()
+        asyncio.run(wrapped(_scope(path="/metrics"), server.receive, server.send))
+        server = _Server()
+        asyncio.run(wrapped(_scope(path="/orders/9"), server.receive, server.send))
+
+    (event,) = tape.all
+    assert event.data["path"] == "/orders/9"
+
+
+def test_standalone_capture_args_redacts_query_parameters() -> None:
+    wrapped = ASGIMiddleware(application, capture_args=redact("voucher"))
+
+    with timeline() as tape:
+        server = _Server()
+        asyncio.run(
+            wrapped(
+                _scope(query_string=b"voucher=SECRET50&limit=5"),
+                server.receive,
+                server.send,
+            )
+        )
+
+    assert tape.all[0].data["query"] == "voucher=<redacted>&limit=5"
+
+
+def test_standalone_capture_result_none_omits_the_status_result() -> None:
+    from wrapt import MISSING
+
+    wrapped = ASGIMiddleware(application, capture_result="none")
+
+    with timeline() as tape:
+        server = _Server()
+        asyncio.run(wrapped(_scope(), server.receive, server.send))
+
+    event = tape.all[0]
+    assert event.result is MISSING
+    assert event.finished
