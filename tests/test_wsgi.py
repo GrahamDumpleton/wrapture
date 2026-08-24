@@ -146,7 +146,7 @@ def test_request_line_display() -> None:
             wrapped(_environ(QUERY_STRING="expand=items"), server.start_response)
         )
 
-    assert str(tape.all[0]) == (f"GET /orders/42?expand=items ({__name__}.application)")
+    assert str(tape.all[0]) == (f"GET /orders/42?expand=items ({__name__}:application)")
 
 
 def test_calls_nest_under_the_request() -> None:
@@ -666,3 +666,107 @@ def test_observe_entry_rejects_wsgi_mode_with_match() -> None:
 def test_observe_entry_rejects_unknown_modes() -> None:
     with pytest.raises(ConfigError, match="mode must be omitted, 'wsgi' or 'asgi'"):
         ObserveEntry(target=__name__, name="application", mode="grpc")
+
+
+# ---------------------------------------------------------------------------
+# the standalone recording options
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_when_globs_skip_matching_paths() -> None:
+    # A glob list names paths not to record; the application still
+    # runs and answers, matching when= everywhere: the predicate
+    # decides recording only.
+
+    wrapped = WSGIMiddleware(application, when=["/health", "/static/*"])
+
+    with timeline() as tape:
+        for path in ("/health", "/static/logo.png"):
+            server = _Server()
+            body = server.consume(
+                wrapped(_environ(PATH_INFO=path), server.start_response)
+            )
+            assert body == b"hello world"
+            assert server.status == "200 OK"
+
+        server = _Server()
+        server.consume(wrapped(_environ(PATH_INFO="/orders/1"), server.start_response))
+
+    (event,) = tape.all
+    assert event.data["path"] == "/orders/1"
+
+
+def test_standalone_when_takes_a_single_glob_string() -> None:
+    wrapped = WSGIMiddleware(application, when="/health")
+
+    with timeline() as tape:
+        server = _Server()
+        server.consume(wrapped(_environ(PATH_INFO="/health"), server.start_response))
+
+    assert tape.all == []
+
+
+def test_standalone_when_callable_sees_the_environ() -> None:
+    # The standalone callable takes the environ directly, unlike the
+    # binding-internal convention.
+
+    wrapped = WSGIMiddleware(
+        application, when=lambda environ: environ["PATH_INFO"].startswith("/orders")
+    )
+
+    with timeline() as tape:
+        server = _Server()
+        server.consume(wrapped(_environ(PATH_INFO="/metrics"), server.start_response))
+        server = _Server()
+        server.consume(wrapped(_environ(PATH_INFO="/orders/9"), server.start_response))
+
+    (event,) = tape.all
+    assert event.data["path"] == "/orders/9"
+
+
+def test_standalone_when_rejects_a_bad_value() -> None:
+    with pytest.raises(ValueError, match="glob string"):
+        WSGIMiddleware(application, when=42)
+
+
+def test_standalone_options_win_over_the_binding() -> None:
+    # An explicit option beats the bound binding's value: the binding
+    # says never record, the constructor's predicate says record.
+
+    silent = binding(__name__, "application", mode="wsgi", when=False)
+    wrapped = WSGIMiddleware(application, binding=silent, when=lambda environ: True)
+
+    with timeline() as tape:
+        server = _Server()
+        server.consume(wrapped(_environ(), server.start_response))
+
+    assert len(tape.all) == 1
+
+
+def test_standalone_capture_args_redacts_query_parameters() -> None:
+    wrapped = WSGIMiddleware(application, capture_args=redact("voucher"))
+
+    with timeline() as tape:
+        server = _Server()
+        server.consume(
+            wrapped(
+                _environ(QUERY_STRING="voucher=SECRET50&limit=5"),
+                server.start_response,
+            )
+        )
+
+    assert tape.all[0].data["query"] == "voucher=<redacted>&limit=5"
+
+
+def test_standalone_capture_result_none_omits_the_status_result() -> None:
+    from wrapt import MISSING
+
+    wrapped = WSGIMiddleware(application, capture_result="none")
+
+    with timeline() as tape:
+        server = _Server()
+        server.consume(wrapped(_environ(), server.start_response))
+
+    event = tape.all[0]
+    assert event.result is MISSING
+    assert event.finished

@@ -74,11 +74,11 @@ awaited. The notifier's `await` works unchanged against the stub:
 ...     send.events.with_args(user="ana").assert_once()
 ...     send.events.finished().assert_times(2)
 2
-<EventLog PushClient.send[user='ana']: 1 event(s)>
-    PushClient.send(user='ana', message='hello')
-<EventLog PushClient.send[finished]: 2 event(s)>
-    PushClient.send(user='ana', message='hello')
-    PushClient.send(user='ben', message='hello')
+<EventLog __main__:PushClient.send[user='ana']: 1 event(s)>
+    __main__:PushClient.send(user='ana', message='hello')
+<EventLog __main__:PushClient.send[finished]: 2 event(s)>
+    __main__:PushClient.send(user='ana', message='hello')
+    __main__:PushClient.send(user='ben', message='hello')
 
 ```
 
@@ -94,8 +94,8 @@ and the partial-result behaviour is tested with the real control flow:
 ...     asyncio.run(notifier.broadcast(["ana", "ben", "cal"], "hello"))
 ...     send.events.raising(TimeoutError).assert_once()
 1
-<EventLog PushClient.send[raising=TimeoutError]: 1 event(s)>
-    PushClient.send(user='ben', message='hello')
+<EventLog __main__:PushClient.send[raising=TimeoutError]: 1 event(s)>
+    __main__:PushClient.send(user='ben', message='hello')
 
 >>> _ = send.on_call.reset()
 
@@ -133,11 +133,11 @@ one line, `pending()`:
 ...     send.events.assert_once()
 ...     send.events.pending().assert_once()
 ...     send.events.finished().assert_never()
-<EventLog PushClient.send: 1 event(s)>
-    PushClient.send(user='ana', message='nudge')
-<EventLog PushClient.send[pending]: 1 event(s)>
-    PushClient.send(user='ana', message='nudge')
-<EventLog PushClient.send[finished]: 0 event(s)>
+<EventLog __main__:PushClient.send: 1 event(s)>
+    __main__:PushClient.send(user='ana', message='nudge')
+<EventLog __main__:PushClient.send[pending]: 1 event(s)>
+    __main__:PushClient.send(user='ana', message='nudge')
+<EventLog __main__:PushClient.send[finished]: 0 event(s)>
     (no events)
 
 ```
@@ -180,10 +180,10 @@ without caring how the scheduler interleaved it:
 ...     send.events.finished().assert_times(3)
 ...     sorted(event.arguments["user"] for event in send.events)
 3
-<EventLog PushClient.send[finished]: 3 event(s)>
-    PushClient.send(user='ana', message='hi')
-    PushClient.send(user='ben', message='hi')
-    PushClient.send(user='cal', message='hi')
+<EventLog __main__:PushClient.send[finished]: 3 event(s)>
+    __main__:PushClient.send(user='ana', message='hi')
+    __main__:PushClient.send(user='ben', message='hi')
+    __main__:PushClient.send(user='cal', message='hi')
 ['ana', 'ben', 'cal']
 
 ```
@@ -206,8 +206,8 @@ same rule: the outcome arrives the way the real protocol delivers it.
 ...     asyncio.run(collect(PushClient()))
 ...     receipts.events.finished().assert_once()
 ['r-1', 'r-2']
-<EventLog PushClient.receipts[finished]: 1 event(s)>
-    PushClient.receipts(batch='batch-9')
+<EventLog __main__:PushClient.receipts[finished]: 1 event(s)>
+    __main__:PushClient.receipts(batch='batch-9')
 
 ```
 

@@ -315,8 +315,8 @@ def test_a_nested_timeline_records_onto_the_outer_tape_too() -> None:
     # Scoped sinks stack rather than shadow: the outer scope stays
     # listening, so both tapes hold the event.
 
-    assert [event.label for event in inner.all] == ["Gateway.charge"]
-    assert [event.label for event in outer.all] == ["Gateway.charge"]
+    assert [event.path for event in inner.all] == ["test_timeline:Gateway.charge"]
+    assert [event.path for event in outer.all] == ["test_timeline:Gateway.charge"]
 
 
 # ---------------------------------------------------------------------------
@@ -341,10 +341,10 @@ def test_roots_returns_only_top_level_events() -> None:
 
     roots = tape.roots()
 
-    assert [event.label for event in roots] == ["Processor.process"]
-    assert [event.label for event in tape.all] == [
-        "Processor.process",
-        "Gateway.charge",
+    assert [event.path for event in roots] == ["test_timeline:Processor.process"]
+    assert [event.path for event in tape.all] == [
+        "test_timeline:Processor.process",
+        "test_timeline:Gateway.charge",
     ]
 
 
@@ -360,10 +360,12 @@ def test_tree_renders_nesting_results_and_failures() -> None:
 
     lines = tape.tree().splitlines()
 
-    assert lines[0].startswith("Processor.process(")
+    assert lines[0].startswith("test_timeline:Processor.process(")
     assert lines[0].endswith("-> {'id': 'ch_500', 'amount': 500}")
-    assert lines[1].startswith("  Gateway.charge(")
-    assert lines[2] == "Gateway.refund(amount=100)  !! TimeoutError (injected)"
+    assert lines[1].startswith("  test_timeline:Gateway.charge(")
+    assert lines[2] == (
+        "test_timeline:Gateway.refund(amount=100)  !! TimeoutError (injected)"
+    )
 
 
 def test_tree_shows_a_get_event_value_once() -> None:
@@ -375,7 +377,10 @@ def test_tree_shows_a_get_event_value_once() -> None:
     with timeline(retries) as tape:
         _ = Settings().retries
 
-    assert tape.tree() == "get Settings.retries -> 3"
+    assert tape.tree() == (
+        "get test_timeline:test_tree_shows_a_get_event_value_once"
+        ".<locals>.Settings.retries -> 3"
+    )
 
 
 def test_tree_of_an_empty_tape_is_empty() -> None:
@@ -439,9 +444,11 @@ def test_assert_order_failure_names_where_it_stalled() -> None:
         tape.assert_order(charge, record)
 
     message = str(failure.value)
-    assert "stalled waiting for Ledger.record (position 2 of 2)" in message
+    assert (
+        "stalled waiting for test_timeline:Ledger.record (position 2 of 2)" in message
+    )
     assert "actual timeline:" in message
-    assert "Gateway.charge(amount=500)" in message
+    assert "test_timeline:Gateway.charge(amount=500)" in message
 
 
 def test_assert_order_failure_on_a_binding_that_never_recorded() -> None:
@@ -501,9 +508,9 @@ def test_assert_order_log_step_stalls_when_not_enough_match() -> None:
     with pytest.raises(AssertionError) as failure:
         tape.assert_order(charge_500, charge_500)
 
-    assert "stalled waiting for Gateway.charge[amount=500] (position 2 of 2)" in str(
-        failure.value
-    )
+    assert (
+        "stalled waiting for test_timeline:Gateway.charge[amount=500] (position 2 of 2)"
+    ) in str(failure.value)
 
 
 def test_assert_order_log_from_another_tape_never_matches() -> None:
@@ -566,8 +573,11 @@ def test_assert_order_consecutive_fails_on_a_named_event_between() -> None:
 
     message = str(failure.value)
     assert "expected consecutive events" in message
-    assert "after Gateway.charge[amount=500] (position 1 of 2)" in message
-    assert "saw Gateway.charge(amount=1) where Ledger.record" in message
+    assert "after test_timeline:Gateway.charge[amount=500] (position 1 of 2)" in message
+    assert (
+        "saw test_timeline:Gateway.charge(amount=1) where"
+        " test_timeline:Ledger.record" in message
+    )
     assert "(position 2 of 2) was expected" in message
     assert "actual timeline:" in message
 
@@ -614,10 +624,10 @@ def test_assert_order_exact_requires_nothing_before_or_after() -> None:
         tape.assert_order(
             tape.for_binding(charge).matching(second_charge), record, exact=True
         )
-    assert "saw Gateway.charge(amount=500) before" in str(leading.value)
-    assert "Gateway.charge[matching=second_charge] (position 1 of 2)" in str(
-        leading.value
-    )
+    assert "saw test_timeline:Gateway.charge(amount=500) before" in str(leading.value)
+    assert (
+        "test_timeline:Gateway.charge[matching=second_charge] (position 1 of 2)"
+    ) in str(leading.value)
 
     # A filtered log makes the binding's other events visible.
 
@@ -625,7 +635,10 @@ def test_assert_order_exact_requires_nothing_before_or_after() -> None:
         Gateway().charge(500)
         Gateway().charge(1)
 
-    with pytest.raises(AssertionError, match="saw Gateway.charge\\(amount=1\\) after"):
+    with pytest.raises(
+        AssertionError,
+        match="saw test_timeline:Gateway.charge\\(amount=1\\) after",
+    ):
         tape.assert_order(tape.for_binding(charge).with_args(amount=500), exact=True)
 
 

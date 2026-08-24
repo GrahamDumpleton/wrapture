@@ -131,8 +131,8 @@ trace is intact up to the moment of a crash or hang.
 >>> printer = wrapture.add_sink(wrapture.Printer(sys.stdout))
 
 >>> Gateway().charge(500)
-Gateway.charge(amount=500, currency='USD')
-Gateway.charge -> 'ch_500' [...]
+__main__:Gateway.charge(amount=500, currency='USD')
+__main__:Gateway.charge -> 'ch_500' [...]
 'ch_500'
 
 >>> wrapture.remove_sink(printer)
@@ -564,8 +564,8 @@ surface, four pieces that read as one:
   with, so the scope completes normally, is noted against the event
   as a `caught` entry, marking the operation failed for every sink
   and filter without touching control flow. Equally safe to call
-  unconditionally; `event=` aims it past the in-flight event at the
-  unit of work that failed.
+  unconditionally; `current_event()` with its filters aims either
+  verb past the in-flight event at the unit of work that failed.
 - **`WSGIMiddleware` and `ASGIMiddleware`** wrap the application
   object at the edge in code,
   `application = wrapture.WSGIMiddleware(application)`, grouping
@@ -1005,22 +1005,25 @@ to an error handler that returns normally (`Flask.handle_exception`,
 Django's `handle_uncaught_exception`, Celery's `on_failure`), so the
 request or task that failed completes with a result and no
 exception; the handler is the only code that can be bound, and
-`wrapture.note_exception(exc, event=...)` from a behaviour on it is
+noting through a `current_event()` handle from a behaviour on it is
 how the failure reaches the event that actually failed. The aiming
-rule: `event=wrapture.current_event(kind="request")` when the unit
-of work is a request wrapture's own middleware recorded, which no
-binding of yours created, and
-`event=wrapture.current_event(binding=self.task_call)` when it is
-an event of the instrumentation's own binding (a Celery
+rule: `wrapture.current_event(kind="request").note_exception(exc)`
+when the unit of work is a request wrapture's own middleware
+recorded, which no binding of yours created, and
+`current_event(binding=self.task_call).note_exception(exc)` when it
+is an event of the instrumentation's own binding (a Celery
 instrumentation's `Task.__call__`, say), the handle it already
-holds. Both return the nearest enclosing match, `None` when the
-handler runs with nothing enclosing it. A handler that fires after
-the unit of work has closed cannot note against it: the sinks have
-already heard that event close, so the note is refused with a
-`ConfigWarning` naming the event and the exception, which tells you
-the failure needs recording another way. The [unit testing
-guide](unit-testing.md#noting-a-caught-exception) has the full
-semantics.
+holds. Both select the nearest enclosing match; when nothing
+matches the handle is empty and the note quietly does nothing, so
+the call needs no guard. The bare `wrapture.note_exception(exc)`
+and `wrapture.annotate(**data)` are shortcuts for the same verbs on
+`current_event()` with no filters, one mental model throughout. A
+handler that fires after the unit of work has closed cannot note
+against it: the sinks have already heard that event close, so the
+note is refused with a `ConfigWarning` naming the event and the
+exception, which tells you the failure needs recording another way.
+The [unit testing guide](unit-testing.md#noting-a-caught-exception)
+has the full semantics.
 
 ### Code next to the config file
 

@@ -45,7 +45,7 @@ def test_calls_record_with_a_derived_path_and_label() -> None:
     (event,) = tape.all
     assert event.kind == "call"
     assert event.path == f"{__name__}:greet"
-    assert event.label == f"{__name__}.greet"
+    assert event.label is None
     assert event.arguments == {"name": "world", "punctuation": "!"}
     assert event.result == "hello world!"
 
@@ -93,7 +93,7 @@ def test_the_factory_form_options_apply() -> None:
         assert bare() == "b"
 
     (event,) = tape.all
-    assert event.label is not None and event.label.endswith(".bare")
+    assert event.label is None and event.path.endswith(".bare")
 
 
 def test_the_factory_form_dedupes_by_label() -> None:

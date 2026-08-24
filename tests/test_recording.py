@@ -53,7 +53,7 @@ def test_a_call_records_one_event_with_its_details() -> None:
 
     assert event.kind == "call"
     assert event.path == f"{Gateway.__module__}:Gateway.charge"
-    assert event.label == "Gateway.charge"
+    assert event.label is None
     assert event.binding is charge
     assert event.instance is gateway
     assert event.seq > 0
@@ -138,8 +138,9 @@ def test_nested_calls_record_a_tree() -> None:
 
     outer, inner = tape.all
 
-    assert outer.label == "Gateway.charge"
-    assert inner.label == "Ledger.record"
+    assert outer.path == f"{Gateway.__module__}:Gateway.charge"
+    assert inner.path == f"{Ledger.__module__}:Ledger.record"
+    assert outer.label is None and inner.label is None
     assert inner.parent_id == outer.seq
     assert inner.depth == 1
     assert tape.children_of(outer) == [inner]
@@ -280,9 +281,14 @@ def test_group_members_record_with_their_own_labels() -> None:
         Gateway().charge(500)
 
     # A group never relabels its members: the keyword is only the name
-    # a member is reached by, the label stays the binding's own.
+    # a member is reached by. An unnamed member's label stays None and
+    # its identity is the path.
 
-    assert [e.label for e in tape.all] == ["Gateway.charge", "Ledger.record"]
+    assert [e.label for e in tape.all] == [None, None]
+    assert [e.path.rpartition(":")[2] for e in tape.all] == [
+        "Gateway.charge",
+        "Ledger.record",
+    ]
     assert [e.path for e in tape.all] == [
         f"{Gateway.__module__}:Gateway.charge",
         f"{Ledger.__module__}:Ledger.record",
@@ -343,8 +349,8 @@ def test_calls_inside_a_coroutine_body_nest_under_its_event() -> None:
 
     outer, inner = tape.all
 
-    assert outer.label == "AsyncGateway.charge"
-    assert inner.label == "Ledger.record"
+    assert outer.path == f"{AsyncGateway.__module__}:AsyncGateway.charge"
+    assert inner.path == f"{Ledger.__module__}:Ledger.record"
     assert inner.parent_id == outer.seq
     assert tape.children_of(outer) == [inner]
 

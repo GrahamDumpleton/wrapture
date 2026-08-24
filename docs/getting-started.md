@@ -30,7 +30,7 @@ to apply at that call site. Define something to bind to:
 
 >>> charge = wrapture.binding(Gateway, "charge")
 >>> charge
-<Binding 'Gateway.charge' callable unapplied>
+<Binding '__main__:Gateway.charge' callable unapplied>
 
 ```
 
@@ -40,7 +40,7 @@ repr always tells you its state:
 
 ```python
 >>> charge.on_call.returns({"id": "stub"})
-<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied>>
 
 >>> gateway = Gateway()
 >>> gateway.charge(500)
@@ -53,7 +53,7 @@ patch, and from then on the configured behaviour answers:
 
 ```python
 >>> charge.apply()
-<Binding 'Gateway.charge' callable active>
+<Binding '__main__:Gateway.charge' callable active>
 >>> gateway.charge(500)
 {'id': 'stub'}
 
@@ -64,11 +64,11 @@ even while other code is calling the method:
 
 ```python
 >>> charge.suspend()
-<Binding 'Gateway.charge' callable active suspended>
+<Binding '__main__:Gateway.charge' callable active suspended>
 >>> gateway.charge(500)
 {'id': 'ch_500', 'amount': 500}
 >>> charge.resume()
-<Binding 'Gateway.charge' callable active>
+<Binding '__main__:Gateway.charge' callable active>
 
 ```
 
@@ -76,7 +76,7 @@ And removing it restores the original exactly:
 
 ```python
 >>> charge.remove()
-<Binding 'Gateway.charge' callable unapplied>
+<Binding '__main__:Gateway.charge' callable unapplied>
 >>> gateway.charge(500)
 {'id': 'ch_500', 'amount': 500}
 
@@ -104,7 +104,7 @@ case substitution-based tools cannot express:
 ```python
 >>> pinned = wrapture.binding(Gateway, "charge")
 >>> pinned.on_call.transforms_result(lambda r: {**r, "id": "ch_TEST"})
-<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied>>
 
 >>> with pinned:
 ...     gateway.charge(500)
@@ -147,9 +147,9 @@ tape as an event, nested the way the calls actually nested:
 >>> with wrapture.timeline(place, charge, record) as tape:
 ...     _ = OrderService().place(500)
 ...     print(tape.tree())
-OrderService.place(amount=500)  -> {'id': 'ch_500', 'amount': 500}
-  Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
-  Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> 'led_ch_500'
+__main__:OrderService.place(amount=500)  -> {'id': 'ch_500', 'amount': 500}
+  __main__:Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
+  __main__:Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> 'led_ch_500'
 
 ```
 

@@ -267,7 +267,7 @@ def test_annotations_filter_like_anything_else() -> None:
 
 
 def test_annotate_outside_recording_is_a_silent_no_op() -> None:
-    assert current_event() is None
+    assert not current_event()
     annotate(rows=1)
 
 
@@ -278,7 +278,7 @@ def test_current_event_names_the_innermost_call() -> None:
         wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
         event = current_event()
-        assert event is not None
+        assert event
         seen.append(event.label or event.path)
         return wrapped(*args, **kwargs)
 
@@ -287,7 +287,7 @@ def test_current_event_names_the_innermost_call() -> None:
     with timeline(record):
         Ledger().record(["a"])
 
-    assert seen == ["Ledger.record"]
+    assert seen == ["test_capture:Ledger.record"]
 
 
 # ---------------------------------------------------------------------------

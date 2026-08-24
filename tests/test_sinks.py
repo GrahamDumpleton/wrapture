@@ -221,7 +221,10 @@ def test_a_process_sink_hears_worker_threads_with_nesting_intact() -> None:
             remove_sink(probe)
 
     entered = [event for kind, event in probe.notified if kind == "enter"]
-    assert [event.label for event in entered] == ["Worker.outer", "Worker.inner"]
+    assert [event.path for event in entered] == [
+        "test_sinks:Worker.outer",
+        "test_sinks:Worker.inner",
+    ]
 
     # The thread carried no timeline context, but the process tier is a
     # plain list visible everywhere, and nesting within the thread is
@@ -414,7 +417,7 @@ def test_printer_prints_the_call_and_its_outcome() -> None:
         Gateway().charge(500)
 
     assert output.getvalue() == (
-        "Gateway.charge(amount=500)\nGateway.charge -> 'ch_500'\n"
+        "test_sinks:Gateway.charge(amount=500)\ntest_sinks:Gateway.charge -> 'ch_500'\n"
     )
 
 
@@ -427,10 +430,10 @@ def test_printer_indents_by_depth_and_marks_errors() -> None:
         Processor().process()
 
     assert output.getvalue() == (
-        "Processor.process()\n"
-        "  Gateway.refund(amount=1)\n"
-        "  Gateway.refund !! TimeoutError\n"
-        "Processor.process -> 'ok'\n"
+        "test_sinks:Processor.process()\n"
+        "  test_sinks:Gateway.refund(amount=1)\n"
+        "  test_sinks:Gateway.refund !! TimeoutError\n"
+        "test_sinks:Processor.process -> 'ok'\n"
     )
 
 
@@ -441,7 +444,7 @@ def test_printer_skips_the_outcome_line_when_nothing_was_captured() -> None:
     with charge, listening(Printer(output, timing=False)):
         Gateway().charge(500)
 
-    assert output.getvalue() == "Gateway.charge()\n"
+    assert output.getvalue() == "test_sinks:Gateway.charge()\n"
 
 
 def test_printer_times_closing_lines_by_default() -> None:
@@ -454,10 +457,14 @@ def test_printer_times_closing_lines_by_default() -> None:
 
     lines = output.getvalue().splitlines()
 
-    assert lines[0] == "Processor.process()"
-    assert lines[1] == "  Gateway.refund(amount=1)"
-    assert re.fullmatch(r"  Gateway.refund !! TimeoutError \[\d+us\]", lines[2])
-    assert re.fullmatch(r"Processor.process -> 'ok' \[[\d.]+(us|ms|s)\]", lines[3])
+    assert lines[0] == "test_sinks:Processor.process()"
+    assert lines[1] == "  test_sinks:Gateway.refund(amount=1)"
+    assert re.fullmatch(
+        r"  test_sinks:Gateway.refund !! TimeoutError \[\d+us\]", lines[2]
+    )
+    assert re.fullmatch(
+        r"test_sinks:Processor.process -> 'ok' \[[\d.]+(us|ms|s)\]", lines[3]
+    )
 
 
 def test_printer_still_closes_a_timed_line_with_no_captured_result() -> None:
@@ -469,8 +476,8 @@ def test_printer_still_closes_a_timed_line_with_no_captured_result() -> None:
 
     lines = output.getvalue().splitlines()
 
-    assert lines[0] == "Gateway.charge()"
-    assert re.fullmatch(r"Gateway.charge \[\d+us\]", lines[1])
+    assert lines[0] == "test_sinks:Gateway.charge()"
+    assert re.fullmatch(r"test_sinks:Gateway.charge \[\d+us\]", lines[1])
 
 
 class Streamer:
@@ -492,7 +499,8 @@ def test_printer_shows_the_body_split_for_a_streamed_result() -> None:
     unit = r"[\d.]+(us|ms|s)"
 
     assert re.fullmatch(
-        rf"Streamer.stream -> None \[{unit}, body {unit} over 3 items\]", closing
+        rf"test_sinks:Streamer.stream -> None \[{unit}, body {unit} over 3 items\]",
+        closing,
     )
 
 
@@ -507,10 +515,10 @@ def test_printer_timestamps_opening_lines_and_pads_the_rest() -> None:
     lines = output.getvalue().splitlines()
     clock = r"\d\d:\d\d:\d\d\.\d\d\d"
 
-    assert re.fullmatch(clock + r" Processor.process\(\)", lines[0])
-    assert re.fullmatch(clock + r"   Gateway.refund\(amount=1\)", lines[1])
-    assert lines[2] == " " * 13 + "  Gateway.refund !! TimeoutError"
-    assert lines[3] == " " * 13 + "Processor.process -> 'ok'"
+    assert re.fullmatch(clock + r" test_sinks:Processor.process\(\)", lines[0])
+    assert re.fullmatch(clock + r"   test_sinks:Gateway.refund\(amount=1\)", lines[1])
+    assert lines[2] == " " * 13 + "  test_sinks:Gateway.refund !! TimeoutError"
+    assert lines[3] == " " * 13 + "test_sinks:Processor.process -> 'ok'"
 
 
 def test_printer_appends_to_a_file_at_path(tmp_path: Path) -> None:
@@ -528,7 +536,8 @@ def test_printer_appends_to_a_file_at_path(tmp_path: Path) -> None:
     printer.close()
 
     assert target.read_text() == (
-        "earlier\nGateway.charge(amount=500)\nGateway.charge -> 'ch_500'\n"
+        "earlier\ntest_sinks:Gateway.charge(amount=500)\n"
+        "test_sinks:Gateway.charge -> 'ch_500'\n"
     )
 
     # Lines after close are dropped rather than reopening the file.
@@ -536,7 +545,7 @@ def test_printer_appends_to_a_file_at_path(tmp_path: Path) -> None:
     with charge, listening(printer):
         Gateway().charge(1)
 
-    assert target.read_text().count("Gateway.charge(") == 1
+    assert target.read_text().count("test_sinks:Gateway.charge(") == 1
 
 
 def test_printer_opens_the_file_lazily(tmp_path: Path) -> None:
@@ -577,8 +586,8 @@ def test_printer_path_is_a_template_and_reopen_moves_on(
     first = tmp_path / "logs" / "printer-1700000000.log"
     second = tmp_path / "logs" / "printer-1700000060.log"
 
-    assert first.read_text().count("Gateway.charge(") == 1
-    assert second.read_text().count("Gateway.charge(") == 1
+    assert first.read_text().count("test_sinks:Gateway.charge(") == 1
+    assert second.read_text().count("test_sinks:Gateway.charge(") == 1
     assert printer.path == str(second)
 
 
@@ -599,5 +608,5 @@ def test_printer_defaults_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
         Gateway().charge(500)
 
     captured = capsys.readouterr()
-    assert "Gateway.charge(amount=500)" in captured.err
+    assert "test_sinks:Gateway.charge(amount=500)" in captured.err
     assert captured.out == ""

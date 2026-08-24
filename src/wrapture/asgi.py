@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
-from .capture import NONE, CapturePolicy, _capture_value, _level_of
+from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
 from .events import Event
 from .sinks import (
     _active_sinks,
@@ -56,7 +56,7 @@ from .sinks import (
 )
 from .stacks import _capture as _capture_stack
 from .timeline import _pop, _push, _timelines_active
-from .wsgi import _REDACTED, _captured_query, _describe, _Hooks
+from .wsgi import _REDACTED, _captured_query, _describe, _Hooks, _request_predicate
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -202,6 +202,13 @@ def _content_headers(event: Event, headers: Iterable[Any]) -> None:
                 event.data["content_length"] = text
 
 
+def _scope_path(scope: Any) -> str:
+    # The path as recorded on the event: scope["path"] is already the
+    # full decoded path.
+
+    return str(scope.get("path", ""))
+
+
 class ASGIMiddleware(CallableObjectProxy[Any]):
     """ASGI middleware that records each request as one event.
 
@@ -222,6 +229,23 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
     and peer in its data, body message count and streaming timing as
     iteration fields, and every binding that fires while handling the
     request nested beneath it.
+
+    The standalone constructor carries the recording options a
+    mode="asgi" binding would otherwise supply; an explicit option
+    wins over the bound binding's value.
+
+    - `when` decides per request whether to record, behaviour still
+      applying when it declines: a callable taking the scope and
+      returning a boolean, or a glob string or iterable of glob
+      strings naming request paths not to record ("/health",
+      "/static/*"), matched against the path as recorded
+      (scope["path"]). Booleans pass as with when= elsewhere: False
+      never records.
+
+    - `capture_args` is the capture policy for the request's
+      descriptive data, the query string foremost, where redact()
+      masks parameters by name; `capture_result` the policy for the
+      status-line result.
     """
 
     def __init__(
@@ -230,17 +254,31 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         *,
         binding: Binding | None = None,
         label: str | None = None,
+        when: Any = None,
+        capture_args: CapturePolicy | str | None = None,
+        capture_result: CapturePolicy | str | None = None,
     ) -> None:
         super().__init__(application)
 
         if binding is not None:
-            path, derived = binding._path, binding._label
+            path = binding._path
+            label = label or binding._label
         else:
-            path, derived = _describe(application)
+            path = _describe(application)
 
         self._self_binding = binding
         self._self_path = path
-        self._self_label = label or derived
+        self._self_label = label
+
+        # The standalone options mirror what a mode="asgi" binding
+        # carries, for the middleware an instrumentation package builds
+        # itself: an explicit option wins, else the bound binding's
+        # value, else the default. when= is normalized here to the
+        # internal convention, so __call__ treats both sources alike.
+
+        self._self_when = _request_predicate(when, _scope_path)
+        self._self_capture_args = _resolve_policy(capture_args)
+        self._self_capture_result = _resolve_policy(capture_result)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> Any:
         binding = self._self_binding
@@ -264,7 +302,9 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # when=False makes this a behaviour-only binding: it never
         # records, counts nothing, and takes no part in gap detection.
 
-        when = binding._when if binding is not None else None
+        when = self._self_when
+        if when is None and binding is not None:
+            when = binding._when
 
         active = _active_sinks()
         recording = when is not False and bool(active) and not _in_recorder.get()
@@ -288,8 +328,9 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
             finally:
                 _in_recorder.reset(guard)
 
-            if not wanted and binding is not None:
-                binding._filtered_calls += 1
+            if not wanted:
+                if binding is not None:
+                    binding._filtered_calls += 1
                 recording = False
 
         # The untouched fast path: nothing recording and no behaviour
@@ -307,7 +348,9 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         event: Event | None = None
 
         if recording:
-            args_policy = binding._capture_args if binding is not None else None
+            args_policy = self._self_capture_args
+            if args_policy is None and binding is not None:
+                args_policy = binding._capture_args
             if args_policy is None:
                 args_policy = _required_policy(active, "capture_args")
 
@@ -497,7 +540,9 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # stays pushed for the whole coroutine, streaming included:
         # the application does all its work inside this await.
 
-        result_policy = binding._capture_result if binding is not None else None
+        result_policy = self._self_capture_result
+        if result_policy is None and binding is not None:
+            result_policy = binding._capture_result
         if result_policy is None:
             result_policy = _required_policy(active, "capture_result")
 

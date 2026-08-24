@@ -93,8 +93,8 @@ def test_chrome_trace_nests_slices_on_a_thread_lane(traced: Any) -> None:
         entry["name"]: entry for entry in trace["traceEvents"] if entry["ph"] == "X"
     }
 
-    parent = slices["Processor.process"]
-    child = slices["Gateway.charge"]
+    parent = slices["test_export:Processor.process"]
+    child = slices["test_export:Gateway.charge"]
 
     # The child slice sits inside the parent's interval, on the same
     # thread lane, and timestamps are normalised to start at zero.
@@ -111,12 +111,12 @@ def test_chrome_trace_nests_slices_on_a_thread_lane(traced: Any) -> None:
     refunds = [
         entry
         for entry in trace["traceEvents"]
-        if entry["ph"] == "X" and entry["name"] == "Gateway.refund"
+        if entry["ph"] == "X" and entry["name"] == "test_export:Gateway.refund"
     ]
     assert all(e["args"]["exception"]["type"] == "TimeoutError" for e in refunds)
     assert len(refunds) == 2
 
-    dispatch = slices["Handler.dispatch"]
+    dispatch = slices["test_export:Handler.dispatch"]
     assert dispatch["args"]["result"] == "handled"
     assert "exception" not in dispatch["args"]
     (caught,) = dispatch["args"]["caught"]

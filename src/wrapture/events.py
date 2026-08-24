@@ -62,8 +62,11 @@ class Event:
 
     # Where it happened: path is the fully qualified location of what
     # was bound, in module:path form with both halves dotted, so it
-    # stays meaningful after events leave the process. label is the
-    # friendly display name, from the binding's label.
+    # stays meaningful after events leave the process. label is an
+    # assigned display name, or None when none was given, in which
+    # case every consumer falls back to the path: a name with a colon
+    # in it is always the real module:qualname location, a name
+    # without one is a name somebody chose.
 
     path: str
     label: str | None = None

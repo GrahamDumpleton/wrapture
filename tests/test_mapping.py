@@ -41,10 +41,10 @@ def test_mode_mapping_on_a_location() -> None:
     settings = binding("wrapture_mapping_config", "SETTINGS", mode="mapping")
 
     assert settings.mode == "mapping"
-    assert settings.label == "wrapture_mapping_config.SETTINGS"
+    assert settings.label is None
     assert settings.path == "wrapture_mapping_config:SETTINGS"
     assert repr(settings) == (
-        "<Binding 'wrapture_mapping_config.SETTINGS' mapping unapplied>"
+        "<Binding 'wrapture_mapping_config:SETTINGS' mapping unapplied>"
     )
 
 
@@ -61,12 +61,13 @@ def test_every_location_form_names_the_same_mapping() -> None:
             assert SETTINGS == {"currency": "EUR"}
         assert SETTINGS == {"currency": "USD", "tax_rate": 0.2}
 
-    assert forms[3].label == "dict"
+    assert forms[3].label is None
+    assert forms[3].path == "builtins:dict"
 
 
-def test_bare_object_labels() -> None:
-    assert binding(os.environ, mode="mapping").label == "_Environ"
-    assert binding(os, "environ", mode="mapping").label == "os.environ"
+def test_bare_object_paths() -> None:
+    assert binding(os.environ, mode="mapping").path == "os:_Environ"
+    assert binding(os, "environ", mode="mapping").label is None
     assert binding(os, "environ", mode="mapping").path == "os:environ"
 
 
@@ -74,7 +75,8 @@ def test_item_slot_reaches_a_nested_mapping() -> None:
     primary = binding(config, "DATABASE", item="primary", mode="mapping")
 
     assert primary.mode == "mapping"
-    assert primary.label == "wrapture_mapping_config.DATABASE['primary']"
+    assert primary.label is None
+    assert primary.path == "wrapture_mapping_config:DATABASE['primary']"
 
     with primary.updates({"port": 5433}):
         assert config.DATABASE["primary"] == {"host": "db", "port": 5433}

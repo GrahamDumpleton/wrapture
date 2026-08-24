@@ -88,7 +88,8 @@ class _EventQueries:
 
         events = [event for event in self._snapshot() if event.binding is bnd]
 
-        return EventLog(getattr(bnd, "label", repr(bnd)), events)
+        where = getattr(bnd, "label", None) or getattr(bnd, "path", None) or repr(bnd)
+        return EventLog(where, events)
 
     def blocks(self, name: str = "*") -> EventLog:
         """A filterable view over this tape's block events, selected by
@@ -330,7 +331,11 @@ class _EventQueries:
                 named.update(id(event.binding) for event in step)
             elif hasattr(step, "apply") or hasattr(recorder, "_self_path"):
                 matchers.append(accepts_binding(recorder))
-                labels.append(getattr(step, "label", repr(step)))
+                labels.append(
+                    getattr(step, "label", None)
+                    or getattr(step, "path", None)
+                    or repr(step)
+                )
                 named.add(id(recorder))
             else:
                 raise TypeError(
@@ -670,8 +675,159 @@ def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
         _in_recorder.reset(guard)
 
 
-def current_event(kind: str | None = None, binding: Any = None) -> Event | None:
-    """The in-flight event, or None when nothing is being recorded.
+class EventHandle:
+    """A handle on an in-flight event, returned by current_event().
+
+    Reading an attribute reads the underlying Event's field, and the
+    handle adds the two mutation verbs that are valid while an event
+    is in flight: annotate() and note_exception(). An event read back
+    from a tape afterwards is a plain Event with no mutation surface;
+    the handle is how code inside an operation speaks about the
+    operation, not a way to edit history.
+
+    A handle is empty when current_event() matched nothing. An empty
+    handle is falsy, its verbs silently do nothing, and reading a
+    field from it raises AttributeError naming the filters that
+    failed to match. Truthiness is the test for inspection code:
+
+        if current_event(kind="request"):
+            ...
+
+    while the verbs need no test at all, extending the module-level
+    annotate() and note_exception() contract of being safe to call
+    unconditionally.
+    """
+
+    __slots__ = ("_event", "_kind", "_of")
+
+    def __init__(self, event: Event | None, kind: str | None, of: Any) -> None:
+        object.__setattr__(self, "_event", event)
+        object.__setattr__(self, "_kind", kind)
+        object.__setattr__(self, "_of", of)
+
+    def _describe(self) -> str:
+        # The current_event() call this handle came from, for messages.
+
+        filters = []
+        if self._kind is not None:
+            filters.append(f"kind={self._kind!r}")
+        if self._of is not None:
+            filters.append(f"binding={self._of!r}")
+
+        return f"current_event({', '.join(filters)})"
+
+    def __getattr__(self, name: str) -> Any:
+        event = self._event
+        if event is None:
+            raise AttributeError(
+                f"no in-flight event matched {self._describe()}, so the"
+                f" handle is empty and has no {name!r}; test the handle's"
+                f" truthiness before reading fields"
+            )
+
+        return getattr(event, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(
+            f"{type(self).__name__} is read-only: events change through"
+            f" the annotate() and note_exception() verbs, or through"
+            f" behaviours"
+        )
+
+    def __bool__(self) -> bool:
+        return self._event is not None
+
+    def __eq__(self, other: Any) -> bool:
+        # Events compare by identity, so a handle compares as the event
+        # it wraps: equal to another handle on the same event, and to
+        # the event itself (Event's reflected comparison defers here).
+
+        if isinstance(other, EventHandle):
+            return self._event is other._event
+        if isinstance(other, Event):
+            return self._event is other
+
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._event)
+
+    def __repr__(self) -> str:
+        if self._event is None:
+            return f"<EventHandle empty: {self._describe()} matched nothing>"
+
+        return f"<EventHandle {self._event!s}>"
+
+    def __str__(self) -> str:
+        if self._event is None:
+            return repr(self)
+
+        return str(self._event)
+
+    def annotate(self, **data: Any) -> None:
+        """Merge values into the event's data dict.
+
+        Annotation is targeted capture: the caller attaches what it
+        knows a generic policy cannot infer (a row count, a cache hit,
+        an immutable copy of a value that will be mutated). A silent
+        no-op on an empty handle, so it is safe to call
+        unconditionally; refused with a ConfigWarning on an event that
+        has already finished, since the sinks have already heard that
+        event close. The module-level annotate(**data) is the shortcut
+        for current_event().annotate(**data).
+        """
+
+        event = self._event
+        if event is None:
+            return
+
+        if event.finished:
+            warnings.warn(
+                f"annotate() ignored for {event}: the event has already"
+                f" finished, so no sink can be told of the new data;"
+                f" annotate an event still in flight",
+                ConfigWarning,
+                stacklevel=2,
+            )
+            return
+
+        event.data.update(data)
+
+    def note_exception(self, exception: BaseException) -> None:
+        """Note a caught exception against the event, without changing
+        control flow.
+
+        For the code that handles an exception rather than letting it
+        escape: a framework's error handler is passed the exception and
+        returns a normal response, so the scope that failed completes
+        with a result and wrapture would otherwise never know. The note
+        records the exception on the event's `caught` sequence with the
+        moment it was noted, marks the event as failed for every sink,
+        filter and renderer, and leaves the exception's own fate to the
+        caller.
+
+        A silent no-op on an empty handle, so aiming with filters is
+        safe to do unconditionally; the module-level note_exception(exc)
+        is the shortcut for current_event().note_exception(exc).
+
+        Noting the same exception object twice against one event records
+        it once, and an exception noted against an event that it later
+        escapes shows once, as the escape. A note against an event that
+        has already finished is refused with a ConfigWarning and leaves
+        the event unchanged: the sinks have already heard that event
+        close, so nothing could carry the note to them, and the failure
+        needs recording another way.
+        """
+
+        event = self._event
+        if event is None:
+            return
+
+        _note_exception(event, exception, stacklevel=3)
+
+
+def current_event(kind: str | None = None, binding: Any = None) -> EventHandle:
+    """A handle on the in-flight event, empty when nothing matched.
 
     The behaviour pipeline runs after its event is pushed, so this is
     reachable from inside a decorates() handler, where it names the
@@ -683,27 +839,35 @@ def current_event(kind: str | None = None, binding: Any = None) -> Event | None:
     `binding=` by which binding recorded it (the handle an
     instrumentation holds on its own binding, or a behaviour namespace
     standing in for it). Either walks the in-flight stack from the
-    innermost event outward and returns the first match, None when no
-    enclosing event matches; given both, both must match. This is how
-    a handler that was passed an exception reaches the unit of work
-    that actually failed, for note_exception().
+    innermost event outward and takes the first match; given both,
+    both must match. This is how a handler that was passed an
+    exception reaches the unit of work that actually failed:
+
+        current_event(kind="request").note_exception(exc)
+
+    The result is always an EventHandle, never None: empty and falsy
+    when no event matched, with verbs that then do nothing, so aimed
+    annotate() and note_exception() calls need no guard.
     """
 
     stack = _stack.get()
 
+    found: Event | None = None
+
     if kind is None and binding is None:
-        return stack[-1] if stack else None
+        found = stack[-1] if stack else None
+    else:
+        resolved = getattr(binding, "_binding", binding)
 
-    binding = getattr(binding, "_binding", binding)
+        for event in reversed(stack):
+            if kind is not None and event.kind != kind:
+                continue
+            if resolved is not None and event.binding is not resolved:
+                continue
+            found = event
+            break
 
-    for event in reversed(stack):
-        if kind is not None and event.kind != kind:
-            continue
-        if binding is not None and event.binding is not binding:
-            continue
-        return event
-
-    return None
+    return EventHandle(found, kind, binding)
 
 
 def current_trace() -> _trace.TraceContext | None:
@@ -716,8 +880,8 @@ def current_trace() -> _trace.TraceContext | None:
     tracing sinks, which are internals territory.
     """
 
-    event = current_event()
-    return event.trace if event is not None else None
+    stack = _stack.get()
+    return stack[-1].trace if stack else None
 
 
 def trace_headers() -> dict[str, str]:
@@ -751,50 +915,22 @@ def trace_headers() -> dict[str, str]:
 def annotate(**data: Any) -> None:
     """Merge values into the in-flight event's data dict.
 
-    Annotation is targeted capture: the caller attaches what it knows a
-    generic policy cannot infer (a row count, a cache hit, an immutable
-    copy of a value that will be mutated). A silent no-op when nothing
-    is being recorded, so observed code can call it unconditionally.
+    The shortcut for current_event().annotate(**data): annotation is
+    targeted capture, the caller attaching what it knows a generic
+    policy cannot infer (a row count, a cache hit, an immutable copy
+    of a value that will be mutated). A silent no-op when nothing is
+    being recorded, so observed code can call it unconditionally; to
+    aim at an enclosing event instead of the innermost one, go through
+    current_event() with its filters.
     """
 
-    event = current_event()
-    if event is not None:
-        event.data.update(data)
+    current_event().annotate(**data)
 
 
-def note_exception(exception: BaseException, *, event: Event | None = None) -> None:
-    """Note a caught exception against an event, without changing
-    control flow.
-
-    For the code that handles an exception rather than letting it
-    escape: a framework's error handler is passed the exception and
-    returns a normal response, so the scope that failed completes with
-    a result and wrapture would otherwise never know. The note records
-    the exception on the event's `caught` sequence with the moment it
-    was noted, marks the event as failed for every sink, filter and
-    renderer, and leaves the exception's own fate to the caller.
-
-    `event` defaults to the in-flight event from current_event(), which
-    from inside a bound handler is the handler's own call; aim at the
-    unit of work that failed with the filters, `current_event(
-    kind="request")` for a request wrapture's middleware recorded, or
-    `current_event(binding=...)` for an event of the caller's own
-    binding. A silent no-op when nothing is being recorded, so
-    instrumentation calls it unconditionally.
-
-    Noting the same exception object twice against one event records it
-    once, and an exception noted against an event that it later escapes
-    shows once, as the escape. A note against an event that has already
-    finished is refused with a ConfigWarning and leaves the event
-    unchanged: the sinks have already heard that event close, so nothing
-    could carry the note to them, and the failure needs recording
-    another way.
-    """
-
-    if event is None:
-        event = current_event()
-        if event is None:
-            return
+def _note_exception(event: Event, exception: BaseException, stacklevel: int) -> None:
+    # The shared body of the module-level and handle note_exception()
+    # verbs, both of which sit one frame above the caller the warning
+    # should point at.
 
     if event.finished:
         warnings.warn(
@@ -803,7 +939,7 @@ def note_exception(exception: BaseException, *, event: Event | None = None) -> N
             f" {type(exception).__name__}; note it against an event still in"
             " flight, or record the failure another way",
             ConfigWarning,
-            stacklevel=2,
+            stacklevel=stacklevel,
         )
         return
 
@@ -811,6 +947,34 @@ def note_exception(exception: BaseException, *, event: Event | None = None) -> N
         return
 
     event.caught = event.caught + (CaughtException(exception, time.perf_counter()),)
+
+
+def note_exception(exception: BaseException) -> None:
+    """Note a caught exception against the in-flight event, without
+    changing control flow.
+
+    The shortcut for current_event().note_exception(exception), which
+    from inside a bound handler notes against the handler's own call.
+    To aim at the unit of work that actually failed, go through
+    current_event() with its filters:
+
+        current_event(kind="request").note_exception(exc)
+
+    for a request wrapture's middleware recorded, or
+    current_event(binding=...) for an event of the caller's own
+    binding. A silent no-op when nothing is being recorded, so
+    instrumentation calls it unconditionally; the semantics of noting
+    (dedupe, escape precedence, the refusal on finished events) are
+    the handle verb's, documented there.
+    """
+
+    handle = current_event()
+
+    event = handle._event
+    if event is None:
+        return
+
+    _note_exception(event, exception, stacklevel=3)
 
 
 class _BlockRecorder:

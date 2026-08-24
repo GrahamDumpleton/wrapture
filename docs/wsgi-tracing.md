@@ -31,6 +31,20 @@ directly; it is the primitive the binding mode builds on:
 application = wrapture.WSGIMiddleware(application)
 ```
 
+The standalone constructor carries the recording options the binding
+mode would otherwise supply, under the same names, so a middleware
+built in code loses nothing to the config-declared form. `when=`
+decides per request whether to record, the application running and
+answering either way: a callable taking the environ, or a glob
+string or list of glob strings naming request paths not to record
+(`when=["/health", "/static/*"]`, matched against `SCRIPT_NAME` plus
+`PATH_INFO`), the form that keeps health checks and static assets
+out of the tape. `capture_args=` is the capture policy for the
+request's descriptive data, where `redact("voucher")` masks query
+parameters by name over and above the built-in sensitive set, and
+`capture_result=` the policy for the status-line result. An explicit
+option wins over the bound binding's value where both exist.
+
 ## What a request event contains
 
 Each request records one event of kind `"request"`. It is structurally
@@ -281,7 +295,7 @@ is the third choke point a framework hook binds:
 
 ```python
 def note_failure(wrapped, instance, args, kwargs):
-    wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+    wrapture.current_event(kind="request").note_exception(args[0])
     return wrapped(*args, **kwargs)
 
 wrapture.binding(module.Flask, "handle_exception", when=False) \
@@ -291,8 +305,8 @@ wrapture.binding(module.Flask, "handle_exception", when=False) \
 `current_event(kind="request")` aims the note past the handler's own
 call at the nearest enclosing request event, the one the middleware
 recorded, which no binding of the hook's own created; with nothing
-recording, or the handler invoked outside a request, the call is a
-no-op. The request then says both things at once, on the printed
+recording, or the handler invoked outside a request, the handle is
+empty and the note quietly does nothing. The request then says both things at once, on the printed
 line, on the tape and on an exported span: it answered 500, and the
 `KeyError` was why.
 

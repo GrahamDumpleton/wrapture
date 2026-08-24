@@ -85,7 +85,7 @@ def _replacing(fn: Any) -> Any:
 def test_note_exception_is_a_no_op_when_nothing_is_recording() -> None:
     note_exception(KeyError("nothing listening"))
 
-    assert current_event() is None
+    assert not current_event()
 
 
 def test_note_exception_attaches_to_the_in_flight_event() -> None:
@@ -131,12 +131,12 @@ def test_note_exception_records_the_moment_of_the_note() -> None:
     assert handler.caught[0].at >= handler.started
 
 
-def test_note_exception_takes_an_explicit_event() -> None:
+def test_note_exception_aims_through_a_current_event_handle() -> None:
     dispatch = binding(Shop, "dispatch")
     quote = binding(Pricing, "quote")
 
     def noting(exc: BaseException) -> str:
-        note_exception(exc, event=current_event(binding=dispatch))
+        current_event(binding=dispatch).note_exception(exc)
         return "500"
 
     handle = binding(Shop, "handle_error").on_call.decorates(
@@ -191,18 +191,18 @@ def test_current_event_by_binding_returns_the_nearest_enclosing_match() -> None:
     with timeline(dispatch, quote, handle) as tape:
         Shop().dispatch("missing")
 
-    assert seen["innermost"] is tape.for_binding(handle).first
-    assert seen["handle"] is seen["innermost"]
-    assert seen["dispatch"] is tape.for_binding(dispatch).first
+    assert seen["innermost"] == tape.for_binding(handle).first
+    assert seen["handle"] == seen["innermost"]
+    assert seen["dispatch"] == tape.for_binding(dispatch).first
 
     # A behaviour namespace stands in for its binding, as elsewhere.
 
-    assert seen["namespace"] is seen["dispatch"]
+    assert seen["namespace"] == seen["dispatch"]
 
     # The view's event had already closed by the time the handler ran,
-    # so it is not enclosing and does not match.
+    # so it is not enclosing and does not match: the handle is empty.
 
-    assert seen["quote"] is None
+    assert not seen["quote"]
 
 
 def test_current_event_by_kind_returns_the_nearest_enclosing_match() -> None:
@@ -225,10 +225,10 @@ def test_current_event_by_kind_returns_the_nearest_enclosing_match() -> None:
 
     request = tape.all[0]
     assert request.kind == "request"
-    assert seen["request"] is request
-    assert seen["block"] is seen["innermost"]
+    assert seen["request"] == request
+    assert seen["block"] == seen["innermost"]
     assert seen["block"].kind == "block"
-    assert seen["call"] is None
+    assert not seen["call"]
 
 
 def test_current_event_with_both_filters_needs_both_to_match() -> None:
@@ -247,13 +247,79 @@ def test_current_event_with_both_filters_needs_both_to_match() -> None:
     with timeline(dispatch, handle) as tape:
         Shop().dispatch("missing")
 
-    assert seen["both"] is tape.for_binding(dispatch).first
-    assert seen["wrong_kind"] is None
+    assert seen["both"] == tape.for_binding(dispatch).first
+    assert not seen["wrong_kind"]
 
 
-def test_current_event_filters_return_none_outside_recording() -> None:
-    assert current_event(kind="request") is None
-    assert current_event(binding=object()) is None
+def test_current_event_is_an_empty_handle_outside_recording() -> None:
+    # Empty handles are falsy, their verbs do nothing, and reading a
+    # field names the filters that failed to match.
+
+    assert not current_event(kind="request")
+    assert not current_event(binding=object())
+
+    current_event(kind="request").annotate(route="/ignored")
+
+    with pytest.raises(AttributeError, match="kind='request'"):
+        _ = current_event(kind="request").kind
+
+
+def test_the_handle_is_read_only_outside_its_verbs() -> None:
+    dispatch = binding(Shop, "dispatch")
+
+    def look(self: Any, sku: str) -> str:
+        handle = current_event()
+        with pytest.raises(AttributeError, match="read-only"):
+            handle.result = "tampered"
+        return "200"
+
+    dispatch.on_call.decorates(_replacing(look))
+
+    with timeline(dispatch) as tape:
+        Shop().dispatch("sku")
+
+    assert tape.for_binding(dispatch).first.result == "200"
+
+
+def test_a_handle_compares_and_hashes_as_its_event() -> None:
+    dispatch = binding(Shop, "dispatch")
+    stashed: list[Any] = []
+
+    def look(self: Any, sku: str) -> str:
+        stashed.append(current_event())
+        stashed.append(current_event(kind="call"))
+        return "200"
+
+    dispatch.on_call.decorates(_replacing(look))
+
+    with timeline(dispatch) as tape:
+        Shop().dispatch("sku")
+
+    event = tape.for_binding(dispatch).first
+    first, second = stashed
+
+    assert first == second
+    assert first == event
+    assert event == first
+    assert hash(first) == hash(event)
+
+
+def test_an_aimed_annotate_reaches_the_enclosing_event() -> None:
+    dispatch = binding(Shop, "dispatch")
+    quote = binding(Pricing, "quote")
+
+    def noting(self: Any, sku: str) -> int:
+        current_event(binding=dispatch).annotate(sku=sku, tier="gold")
+        return 100
+
+    quote.on_call.decorates(_replacing(noting))
+
+    with timeline(dispatch, quote) as tape:
+        Shop().dispatch("sku")
+
+    outer = tape.for_binding(dispatch).first
+    assert outer.data == {"sku": "sku", "tier": "gold"}
+    assert tape.for_binding(quote).first.data == {}
 
 
 # ---------------------------------------------------------------------------
@@ -337,16 +403,28 @@ def test_a_different_exception_escaping_keeps_the_note() -> None:
 
 
 def test_a_note_against_a_finished_event_is_refused_with_a_warning() -> None:
+    # A handle can only be taken while the event is in flight, so the
+    # finished case needs one stashed past its event's close.
+
     dispatch = binding(Shop, "dispatch")
+    stashed: list[Any] = []
+
+    def stash(self: Any, sku: str) -> str:
+        stashed.append(current_event(binding=dispatch))
+        return "200"
+
+    dispatch.on_call.decorates(_replacing(stash))
 
     with timeline(dispatch) as tape:
         Shop().dispatch("sku")
 
     event = tape.for_binding(dispatch).first
     assert event.finished
+    (handle,) = stashed
+    assert handle == event
 
     with pytest.warns(ConfigWarning, match="already finished") as record:
-        note_exception(KeyError("late"), event=event)
+        handle.note_exception(KeyError("late"))
 
     assert "Shop.dispatch" in str(record[0].message)
     assert "KeyError" in str(record[0].message)
@@ -354,13 +432,37 @@ def test_a_note_against_a_finished_event_is_refused_with_a_warning() -> None:
     assert not event.failed
 
 
+def test_annotate_on_a_finished_event_is_refused_with_a_warning() -> None:
+    dispatch = binding(Shop, "dispatch")
+    stashed: list[Any] = []
+
+    def stash(self: Any, sku: str) -> str:
+        stashed.append(current_event(binding=dispatch))
+        return "200"
+
+    dispatch.on_call.decorates(_replacing(stash))
+
+    with timeline(dispatch) as tape:
+        Shop().dispatch("sku")
+
+    event = tape.for_binding(dispatch).first
+    (handle,) = stashed
+
+    with pytest.warns(ConfigWarning, match="already finished"):
+        handle.annotate(late=True)
+
+    assert "late" not in event.data
+
+
 def test_a_note_against_an_open_event_on_another_thread_attaches() -> None:
     dispatch = binding(Shop, "dispatch")
     error = TimeoutError("worker")
     opened = threading.Event()
     noted = threading.Event()
+    stashed: list[Any] = []
 
     def slow(self: Any, sku: str) -> str:
+        stashed.append(current_event(binding=dispatch))
         opened.set()
         noted.wait(timeout=5)
         return "200"
@@ -372,15 +474,15 @@ def test_a_note_against_an_open_event_on_another_thread_attaches() -> None:
         worker.start()
         assert opened.wait(timeout=5)
 
-        event = tape.for_binding(dispatch).first
-        assert not event.finished
+        assert not tape.for_binding(dispatch).first.finished
 
-        # The note comes from the main thread, against an event still
-        # open on the worker; on_exit, when it comes, carries it.
+        # The note comes from the main thread, through the handle the
+        # worker took while its event was in flight; on_exit, when it
+        # comes, carries it.
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            note_exception(error, event=event)
+            stashed[0].note_exception(error)
 
         noted.set()
         worker.join(timeout=5)
@@ -417,8 +519,11 @@ def _noting_shop(*, retry_capture: str = "reference") -> tuple[Any, Any, Any]:
     retry = binding(Shop, "retry", capture=retry_capture)
 
     def noting(self: Any, exc: BaseException) -> str:
+        # Empty handles are falsy, so `or` walks the candidates, and
+        # the verbs no-op on an empty handle if neither matched.
+
         target = current_event(binding=dispatch) or current_event(binding=retry)
-        note_exception(exc, event=target)
+        target.note_exception(exc)
         return "500"
 
     handle = binding(Shop, "handle_error").on_call.decorates(_replacing(noting))
@@ -454,9 +559,10 @@ def test_tree_marks_noted_exceptions_after_the_result() -> None:
         Shop().dispatch("missing")
 
     assert tape.tree() == (
-        "Shop.dispatch(sku='missing')  -> '500'  !! KeyError\n"
-        "  Pricing.quote(sku='missing')  !! KeyError\n"
-        "  Shop.handle_error(exc=KeyError('missing'))  -> '500'"
+        "test_note_exception:Shop.dispatch(sku='missing')  -> '500'  !! KeyError\n"
+        "  test_note_exception:Pricing.quote(sku='missing')  !! KeyError\n"
+        "  test_note_exception:Shop.handle_error(exc=KeyError('missing'))"
+        "  -> '500'"
     )
 
 
@@ -467,7 +573,7 @@ def test_tree_marks_noted_exceptions_without_a_result_and_in_order() -> None:
         Shop().retry("missing")
 
     lines = tape.tree().splitlines()
-    assert lines[0] == "Shop.retry()  !! KeyError  !! KeyError"
+    assert lines[0] == "test_note_exception:Shop.retry()  !! KeyError  !! KeyError"
 
 
 def test_printer_marks_noted_exceptions_on_the_closing_line() -> None:
@@ -482,10 +588,10 @@ def test_printer_marks_noted_exceptions_on_the_closing_line() -> None:
         _scoped_sinks.reset(token)
 
     assert output.getvalue() == (
-        "Shop.dispatch(sku='missing')\n"
-        "  Shop.handle_error(exc=KeyError('missing'))\n"
-        "  Shop.handle_error -> '500'\n"
-        "Shop.dispatch -> '500' !! KeyError\n"
+        "test_note_exception:Shop.dispatch(sku='missing')\n"
+        "  test_note_exception:Shop.handle_error(exc=KeyError('missing'))\n"
+        "  test_note_exception:Shop.handle_error -> '500'\n"
+        "test_note_exception:Shop.dispatch -> '500' !! KeyError\n"
     )
 
 
@@ -501,8 +607,8 @@ def test_printer_writes_a_closing_line_for_a_note_with_no_result() -> None:
         _scoped_sinks.reset(token)
 
     lines = output.getvalue().splitlines()
-    assert lines[0] == "Shop.retry()"
-    assert lines[-1] == "Shop.retry !! KeyError !! KeyError"
+    assert lines[0] == "test_note_exception:Shop.retry()"
+    assert lines[-1] == "test_note_exception:Shop.retry !! KeyError !! KeyError"
 
 
 def test_printer_lists_notes_after_an_escape() -> None:
@@ -523,7 +629,7 @@ def test_printer_lists_notes_after_an_escape() -> None:
         _scoped_sinks.reset(token)
 
     assert output.getvalue().splitlines()[-1] == (
-        "Shop.dispatch !! RuntimeError !! KeyError"
+        "test_note_exception:Shop.dispatch !! RuntimeError !! KeyError"
     )
 
 
@@ -570,7 +676,7 @@ class App:
 
 def test_a_handler_notes_the_exception_against_the_request() -> None:
     def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
-        note_exception(args[0], event=current_event(kind="request"))
+        current_event(kind="request").note_exception(args[0])
         return wrapped(*args, **kwargs)
 
     handle = binding(App, "handle_exception").on_call.decorates(noting)
@@ -600,7 +706,7 @@ def test_a_handler_notes_the_exception_against_the_request() -> None:
     # The line says both: the request returned, and it failed.
 
     assert tape.tree().splitlines()[0] == (
-        "GET /quote/missing (test_note_exception.App)  -> '500 INTERNAL SERVER ERROR'"
+        "GET /quote/missing (test_note_exception:App)  -> '500 INTERNAL SERVER ERROR'"
         "  !! KeyError"
     )
     assert tape.roots()[0] is request

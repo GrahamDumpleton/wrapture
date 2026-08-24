@@ -46,7 +46,8 @@ def test_module_data_is_attribute_mode(config: Any) -> None:
     timeout = binding(config, "TIMEOUT")
 
     assert timeout.mode == "attribute"
-    assert timeout.label == "wrapture_modattr_config.TIMEOUT"
+    assert timeout.label is None
+    assert timeout.path == "wrapture_modattr_config:TIMEOUT"
     assert timeout.path == "wrapture_modattr_config:TIMEOUT"
 
 
@@ -173,7 +174,7 @@ def test_events_carry_module_as_instance(config: Any) -> None:
     events = tape.for_binding(timeout)
     assert [event.kind for event in events] == ["get", "set", "delete", "set"]
     assert all(event.instance is config for event in events)
-    assert events[0].label == "wrapture_modattr_config.TIMEOUT"
+    assert events[0].path == "wrapture_modattr_config:TIMEOUT"
     assert events[0].result == 30
     assert events[1].value == 31
     assert events[1].previous == 30
@@ -298,7 +299,8 @@ def test_dotted_path_to_submodule_attribute(config: Any) -> None:
     level = binding(config, "sub.LEVEL")
     level.on_get.returns("debug")
 
-    assert level.label == "wrapture_modattr_config.sub.LEVEL"
+    assert level.label is None
+    assert level.path == "wrapture_modattr_config:sub.LEVEL"
 
     with level:
         assert config.sub.LEVEL == "debug"

@@ -159,10 +159,10 @@ beneath whichever request is in flight:
 ...     _ = get(application, "/quote/widget")
 ...     print(tape.tree())
 GET /quote/widget (shop)  -> '200 OK'
-  __main__.quote_view(item='widget')  -> b'widget: 25\n'
-    QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}
-      Repository.fetch(item='widget')  -> 25
-    Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'
+  __main__:quote_view(item='widget')  -> b'widget: 25\n'
+    __main__:QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}
+      __main__:Repository.fetch(item='widget')  -> 25
+    __main__:Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'
 
 ```
 
@@ -182,14 +182,14 @@ default:
 
 >>> _ = get(application, "/quote/gadget")
 GET /quote/gadget (shop)
-  __main__.quote_view(item='gadget')
-    QuoteService.quote(item='gadget')
-      Repository.fetch(item='gadget')
-      Repository.fetch -> 120 [...]
-    QuoteService.quote -> {'item': 'gadget', 'price': 120} [...]
-    Template.render(quote={'item': 'gadget', 'price': 120})
-    Template.render -> b'gadget: 120\n' [...]
-  __main__.quote_view -> b'gadget: 120\n' [...]
+  __main__:quote_view(item='gadget')
+    __main__:QuoteService.quote(item='gadget')
+      __main__:Repository.fetch(item='gadget')
+      __main__:Repository.fetch -> 120 [...]
+    __main__:QuoteService.quote -> {'item': 'gadget', 'price': 120} [...]
+    __main__:Template.render(quote={'item': 'gadget', 'price': 120})
+    __main__:Template.render -> b'gadget: 120\n' [...]
+  __main__:quote_view -> b'gadget: 120\n' [...]
 shop -> '200 OK' [..., body ... over 1 chunk]
 
 >>> wrapture.remove_sink(printer)
@@ -245,8 +245,8 @@ and drops the rest:
 
 >>> _ = get(application, "/quote/gadget")
 GET /quote/gadget (shop)
-      Repository.fetch(item='gadget')
-      Repository.fetch -> 120
+      __main__:Repository.fetch(item='gadget')
+      __main__:Repository.fetch -> 120
 shop -> '200 OK'
 
 >>> wrapture.remove_sink(printer)
@@ -288,10 +288,10 @@ that of its observed children. `tape.tree(times=True)` shows both, and
 ...     _ = get(application, "/quote/widget")
 ...     print(tape.tree(times=True))
 GET /quote/widget (shop)  -> '200 OK'  [..., self ...]
-  __main__.quote_view(item='widget')  -> b'widget: 25\n'  [..., self ...]
-    QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}  [..., self ...]
-      Repository.fetch(item='widget')  -> 25  [...]
-    Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...]
+  __main__:quote_view(item='widget')  -> b'widget: 25\n'  [..., self ...]
+    __main__:QuoteService.quote(item='widget')  -> {'item': 'widget', 'price': 25}  [..., self ...]
+      __main__:Repository.fetch(item='widget')  -> 25  [...]
+    __main__:Template.render(quote={'item': 'widget', 'price': 25})  -> b'widget: 25\n'  [...]
 
 >>> request, view, quote, fetch, render = tape.all
 >>> tape.self_time(fetch) > 0.5 * view.duration
@@ -358,10 +358,10 @@ form:
 ...     _ = get(shop, "/quote/gadget", HTTP_X_TENANT="globex", HTTP_X_REQUEST_ID="r-2")
 ...     globex = app.events.matching(lambda e: e.data.get("tenant") == "globex")
 ...     print(globex)
-...     [child.label for child in tape.children_of(globex[0])]
+...     [child.path for child in tape.children_of(globex[0])]
 <EventLog shop[matching=<lambda>]: 1 event(s)>
     GET /quote/gadget (shop)
-['__main__.quote_view']
+['__main__:quote_view']
 
 ```
 

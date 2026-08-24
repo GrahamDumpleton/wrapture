@@ -744,7 +744,7 @@ class _Shop:
 
 def _noting_handler(dispatch: Any) -> Any:
     def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
-        wrapture.note_exception(args[0], event=wrapture.current_event(binding=dispatch))
+        wrapture.current_event(binding=dispatch).note_exception(args[0])
         return wrapped(*args, **kwargs)
 
     return wrapture.binding(_Shop, "handle_error").on_call.decorates(noting)
@@ -769,7 +769,7 @@ def test_a_noted_exception_becomes_a_span_event_and_an_error_status(
     finally:
         applied.revert()
 
-    span = _span_named(exported, "_Shop.dispatch")
+    span = _span_named(exported, "test_otel:_Shop.dispatch")
 
     # The span closed normally, with its result, and still reports
     # the failure: one exception event, timestamped inside the span,
@@ -786,7 +786,7 @@ def test_a_noted_exception_becomes_a_span_event_and_an_error_status(
 
     # The handler's own span, which the note was aimed past, is clean.
 
-    handler = _span_named(exported, "_Shop.handle_error")
+    handler = _span_named(exported, "test_otel:_Shop.handle_error")
     assert handler.status.status_code is StatusCode.UNSET
     assert handler.events == ()
 
@@ -811,7 +811,7 @@ def test_a_noted_exception_and_a_5xx_agree_on_one_error_status(
             return "500 INTERNAL SERVER ERROR"
 
     def noting(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
-        wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+        wrapture.current_event(kind="request").note_exception(args[0])
         return wrapped(*args, **kwargs)
 
     handle = wrapture.binding(App, "handle_exception").on_call.decorates(noting)
@@ -855,7 +855,7 @@ def test_a_noted_exception_that_escapes_is_one_span_event(
     finally:
         applied.revert()
 
-    span = _span_named(exported, "_Shop.dispatch")
+    span = _span_named(exported, "test_otel:_Shop.dispatch")
 
     assert span.status.status_code is StatusCode.ERROR
     assert [event.attributes["exception.type"] for event in span.events] == ["KeyError"]

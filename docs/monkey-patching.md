@@ -151,7 +151,7 @@ charge = wrapture.binding(Gateway, "charge")
 charge.on_call.returns({"id": "stub"})
 
 with charge:
-    gateway.charge(500, bogus=True)   # TypeError: Gateway.charge (stubbed): got an unexpected keyword argument 'bogus'
+    gateway.charge(500, bogus=True)   # TypeError: myapp.gateway:Gateway.charge (stubbed): got an unexpected keyword argument 'bogus'
 ```
 
 ### Transforming and validating

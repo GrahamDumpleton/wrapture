@@ -58,9 +58,13 @@ def test_the_default_label_is_stub_and_a_given_label_names_events() -> None:
     plain = stub()
     named = stub("before_start")
 
+    # A bare stub's path is the type of the callable itself, the
+    # standard instance fallback: a colon path that resolves, to the
+    # class that says "fabricated double". The label says which one.
+
     assert plain.label == "stub"
     assert named.label == "before_start"
-    assert named.path == "stub:before_start"
+    assert named.path == "wrapture.doubles:StubCallable"
 
     with timeline():
         named(1)
@@ -179,10 +183,14 @@ def test_mimics_reports_the_borrowed_signature() -> None:
     assert list(bound.parameters) == ["task_id", "args"]
 
 
-def test_mimics_takes_the_label_from_the_callable() -> None:
+def test_mimics_takes_its_identity_from_the_callable() -> None:
+    # A mimicking stub derives its path from the callable; no label is
+    # synthesized, so events fall back to that path.
+
     hook = stub(mimics=Task.before_start)
 
-    assert hook.label.endswith("Task.before_start")
+    assert hook.label is None
+    assert hook.path.endswith("Task.before_start")
     assert hook.__name__ == "before_start"
 
 

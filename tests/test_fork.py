@@ -65,7 +65,7 @@ def test_a_child_discards_the_inherited_stack_and_trace() -> None:
             if pid == 0:
                 try:
                     ok = (
-                        wrapture.current_event() is None
+                        not wrapture.current_event()
                         and wrapture.current_trace() is None
                     )
 

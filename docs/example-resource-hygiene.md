@@ -125,11 +125,11 @@ both onto one tape. Neither binding changes behaviour; they observe:
 >>> with wrapture.timeline(connect, close) as tape:
 ...     _ = report(Repository(Database()), [1, 2])
 ...     print(tape.tree())
-Database.connect()  -> <Connection 1>
-Connection.close()  -> None
-Database.connect()  -> <Connection 2>
-Database.connect()  -> <Connection 3>
-Connection.close()  -> None
+__main__:Database.connect()  -> <Connection 1>
+__main__:Connection.close()  -> None
+__main__:Database.connect()  -> <Connection 2>
+__main__:Database.connect()  -> <Connection 3>
+__main__:Connection.close()  -> None
 
 ```
 
@@ -187,18 +187,18 @@ children include a `connect` but no `close` names itself:
 ...     _ = report(Repository(Database()), [1, 2])
 ...     print(tape.tree())
 ...     for caller in tape.roots():
-...         labels = [child.label for child in tape.children_of(caller)]
-...         if "Connection.close" not in labels:
+...         paths = [child.path for child in tape.children_of(caller)]
+...         if "__main__:Connection.close" not in paths:
 ...             print("leaked by", caller)
-Repository.find(table='products', key=1)  -> (1, 'widget')
-  Database.connect()  -> <Connection 1>
-  Connection.close()  -> None
-Repository.find(table='products', key=2)  -> None
-  Database.connect()  -> <Connection 2>
-Repository.count(table='products')  -> 0
-  Database.connect()  -> <Connection 3>
-  Connection.close()  -> None
-leaked by Repository.find(table='products', key=2)
+__main__:Repository.find(table='products', key=1)  -> (1, 'widget')
+  __main__:Database.connect()  -> <Connection 1>
+  __main__:Connection.close()  -> None
+__main__:Repository.find(table='products', key=2)  -> None
+  __main__:Database.connect()  -> <Connection 2>
+__main__:Repository.count(table='products')  -> 0
+  __main__:Database.connect()  -> <Connection 3>
+  __main__:Connection.close()  -> None
+leaked by __main__:Repository.find(table='products', key=2)
 
 ```
 
@@ -225,9 +225,9 @@ in `__init__` are recorded too:
 ...     connect.events.count, closed.events.of_kind("get").count
 ...     print(closed.events.of_kind("set").with_value(True))
 (3, 3)
-<EventLog Connection.closed[set][value=True]: 2 event(s)>
-    set Connection.closed = True
-    set Connection.closed = True
+<EventLog __main__:Connection.closed[set][value=True]: 2 event(s)>
+    set __main__:Connection.closed = True
+    set __main__:Connection.closed = True
 
 ```
 
@@ -271,12 +271,12 @@ per event. It is priced per binding, so only the acquire pays for it.
 
 For a whole suite, or a long soak, keeping every event is more than
 the question needs. Two `Counter` collectors, each behind a `Filter`
-that admits one label, count acquisitions and releases as numbers and
+that admits one path, count acquisitions and releases as numbers and
 retain nothing. Inside a `window()` they report when the run closes:
 
 ```python
->>> acquisitions = wrapture.Filter(lambda event: event.label == "Database.connect", wrapture.Counter("acquired"))
->>> releases = wrapture.Filter(lambda event: event.label == "Connection.close", wrapture.Counter("released"))
+>>> acquisitions = wrapture.Filter(lambda event: event.path == "__main__:Database.connect", wrapture.Counter("acquired"))
+>>> releases = wrapture.Filter(lambda event: event.path == "__main__:Connection.close", wrapture.Counter("released"))
 
 >>> with connect, close, wrapture.window(collect=[acquisitions, releases]) as run:
 ...     _ = report(Repository(Database()), [1, 2, 3])

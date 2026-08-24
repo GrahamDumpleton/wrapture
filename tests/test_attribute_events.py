@@ -50,7 +50,7 @@ def test_a_read_records_a_get_event_with_the_value_as_result() -> None:
 
     assert event.kind == "get"
     assert event.path == f"{Model.__module__}:Model.author"
-    assert event.label == "Model.author"
+    assert event.label is None
     assert event.instance is model
     assert event.result == "unknown"
     assert event.value is MISSING
@@ -214,9 +214,9 @@ def test_calls_triggered_by_a_property_read_nest_under_the_get_event() -> None:
     outer, inner = tape.all
 
     assert outer.kind == "get"
-    assert outer.label == "Basket.total"
+    assert outer.path == "test_attribute_events:Basket.total"
     assert inner.kind == "call"
-    assert inner.label == "Basket.price"
+    assert inner.path == "test_attribute_events:Basket.price"
     assert inner.parent_id == outer.seq
     assert tape.children_of(outer) == [inner]
     assert outer.result == 10

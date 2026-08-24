@@ -25,6 +25,7 @@ and does not extend the recorded timing.
 
 from __future__ import annotations
 
+import fnmatch
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
@@ -33,7 +34,7 @@ from urllib.parse import unquote_plus
 from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
-from .capture import NONE, CapturePolicy, _capture_value, _level_of
+from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
 from .events import Event
 from .sinks import (
     Sink,
@@ -81,9 +82,11 @@ _SENSITIVE_QUERY = frozenset(
 _REDACTED = "<redacted>"
 
 
-def _describe(app: Any) -> tuple[str, str]:
+def _describe(app: Any) -> str:
     # A standalone middleware has no binding to name it, so derive the
-    # path and label from the wrapped application itself.
+    # path from the wrapped application itself. No label is derived: an
+    # unnamed middleware records label None and every consumer falls
+    # back to the path.
 
     module = getattr(app, "__module__", None) or "wsgi"
     qualname = (
@@ -92,7 +95,61 @@ def _describe(app: Any) -> tuple[str, str]:
         or "application"
     )
 
-    return f"{module}:{qualname}", f"{module}.{qualname}"
+    return f"{module}:{qualname}"
+
+
+def _request_predicate(when: Any, path_of: Callable[[Any], str]) -> Any:
+    """Normalize a middleware when= to the internal calling convention.
+
+    The standalone forms are friendlier than the binding-internal
+    (instance, args, kwargs) convention: a callable takes the carrier
+    (the WSGI environ, or the ASGI scope) directly, and a glob string
+    or an iterable of glob strings names request paths not to record,
+    the form a configuration file can express. Booleans pass as with
+    when= elsewhere: True is the always-record default, False never
+    records. `path_of` extracts the request path from the carrier for
+    the glob forms.
+    """
+
+    if when is None or when is True:
+        return None
+
+    if when is False:
+        return False
+
+    if callable(when):
+
+        def ask(instance: Any, args: tuple[Any, ...], kwargs: Any) -> Any:
+            return when(args[0])
+
+        return ask
+
+    if isinstance(when, str):
+        when = (when,)
+
+    try:
+        patterns = tuple(when)
+    except TypeError:
+        patterns = None
+
+    if patterns is None or not all(isinstance(item, str) for item in patterns):
+        raise ValueError(
+            f"when must be a boolean, a callable taking the request"
+            f" carrier, or a glob string or iterable of glob strings"
+            f" naming paths not to record, got {when!r}"
+        )
+
+    def decline(instance: Any, args: tuple[Any, ...], kwargs: Any) -> bool:
+        path = path_of(args[0])
+        return not any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+    return decline
+
+
+def _environ_path(environ: Any) -> str:
+    # The path as recorded on the event: SCRIPT_NAME plus PATH_INFO.
+
+    return str(environ.get("SCRIPT_NAME", "")) + str(environ.get("PATH_INFO", ""))
 
 
 def _captured_query(query: str, policy: CapturePolicy) -> str:
@@ -363,6 +420,23 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
     query (redacted by parameter name), scheme and peer in its data,
     chunk count and body timing as iteration fields, and every binding
     that fires while handling the request nested beneath it.
+
+    The standalone constructor carries the recording options a
+    mode="wsgi" binding would otherwise supply; an explicit option
+    wins over the bound binding's value.
+
+    - `when` decides per request whether to record, behaviour still
+      applying when it declines: a callable taking the environ and
+      returning a boolean, or a glob string or iterable of glob
+      strings naming request paths not to record ("/health",
+      "/static/*"), matched against the path as recorded (SCRIPT_NAME
+      plus PATH_INFO). Booleans pass as with when= elsewhere: False
+      never records.
+
+    - `capture_args` is the capture policy for the request's
+      descriptive data, the query string foremost, where redact()
+      masks parameters by name; `capture_result` the policy for the
+      status-line result.
     """
 
     def __init__(
@@ -371,17 +445,31 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         *,
         binding: Binding | None = None,
         label: str | None = None,
+        when: Any = None,
+        capture_args: CapturePolicy | str | None = None,
+        capture_result: CapturePolicy | str | None = None,
     ) -> None:
         super().__init__(application)
 
         if binding is not None:
-            path, derived = binding._path, binding._label
+            path = binding._path
+            label = label or binding._label
         else:
-            path, derived = _describe(application)
+            path = _describe(application)
 
         self._self_binding = binding
         self._self_path = path
-        self._self_label = label or derived
+        self._self_label = label
+
+        # The standalone options mirror what a mode="wsgi" binding
+        # carries, for the middleware an instrumentation package builds
+        # itself: an explicit option wins, else the bound binding's
+        # value, else the default. when= is normalized here to the
+        # internal convention, so __call__ treats both sources alike.
+
+        self._self_when = _request_predicate(when, _environ_path)
+        self._self_capture_args = _resolve_policy(capture_args)
+        self._self_capture_result = _resolve_policy(capture_result)
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Any:
         binding = self._self_binding
@@ -397,7 +485,9 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # when=False makes this a behaviour-only binding: it never
         # records, counts nothing, and takes no part in gap detection.
 
-        when = binding._when if binding is not None else None
+        when = self._self_when
+        if when is None and binding is not None:
+            when = binding._when
 
         active = _active_sinks()
         recording = when is not False and bool(active) and not _in_recorder.get()
@@ -421,8 +511,9 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
             finally:
                 _in_recorder.reset(guard)
 
-            if not wanted and binding is not None:
-                binding._filtered_calls += 1
+            if not wanted:
+                if binding is not None:
+                    binding._filtered_calls += 1
                 recording = False
 
         # The untouched fast path: nothing recording and no behaviour
@@ -442,7 +533,9 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         event: Event | None = None
 
         if recording:
-            args_policy = binding._capture_args if binding is not None else None
+            args_policy = self._self_capture_args
+            if args_policy is None and binding is not None:
+                args_policy = binding._capture_args
             if args_policy is None:
                 args_policy = _required_policy(active, "capture_args")
 
@@ -558,7 +651,9 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
         event.data["app_duration"] = time.perf_counter() - started
 
-        result_policy = binding._capture_result if binding is not None else None
+        result_policy = self._self_capture_result
+        if result_policy is None and binding is not None:
+            result_policy = binding._capture_result
         if result_policy is None:
             result_policy = _required_policy(active, "capture_result")
 

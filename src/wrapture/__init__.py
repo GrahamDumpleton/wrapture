@@ -139,6 +139,7 @@ from .stacks import (
 )
 from .timeline import (
     Block,
+    EventHandle,
     Subtree,
     Tape,
     Timeline,
@@ -194,6 +195,7 @@ __all__ = [
     "DeletePhase",
     "Depth",
     "Event",
+    "EventHandle",
     "EventLog",
     "ExpectationNotMetError",
     "Fanout",

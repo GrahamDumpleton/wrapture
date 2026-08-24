@@ -378,10 +378,12 @@ registry.register(wrapped)
 
 The returned proxy records a `"call"` event per invocation inside a
 recording scope, nesting in the tree exactly as a bound call does,
-and calls straight through when nothing listens. Its path and label
-derive from the callable itself (`module:qualname`), with `label=` to
-override, and the keyword options are the uniform subset `binding()`
-takes: `capture=`, `capture_args=`, `capture_result=`, `stack=` and
+and calls straight through when nothing listens. Its path derives
+from the callable itself (`module:qualname`); no label is derived,
+so events carry label None and every renderer falls back to the
+path, with `label=` to assign a name where one adds something the
+path cannot say. The keyword options are the uniform subset
+`binding()` takes: `capture=`, `capture_args=`, `capture_result=`, `stack=` and
 `when=` (which receives `(instance, args, kwargs)`; the instance is
 None for a free-standing callable). Placed on a class, the proxy binds
 as a method exactly as the wrapped function would: calls made through
@@ -429,37 +431,40 @@ one `transforms_args` stage.
 ### Applying dynamically without double-wrapping
 
 Wrapping the same thing twice is the classic monkey-patching
-accident, so `observed()` builds reliable detection in: the label
-identifies the observation. Before wrapping, the callable's full
-wrapper chain is inspected with wrapt's `wrapper_chain()`, which sees
-through proxies and `functools.wraps()` decorators alike; if an
-`ObservedCallable` layer already carries the same label, that
-observation is already applied, however deeply a later wrapper buried
-it, and the callable comes back unchanged. Distinct labels stack,
-each layer recording its own event, one nested under the other, and
-stacking by accident cannot be told apart from two agents observing
-on purpose, so it is not an error: it shows up honestly as double
-counting in the results.
+accident, so `observed()` builds reliable detection in: the
+observation's identity is its assigned label, or its derived path
+when unnamed. Before wrapping, the callable's full wrapper chain is
+inspected with wrapt's `wrapper_chain()`, which sees through proxies
+and `functools.wraps()` decorators alike; if an `ObservedCallable`
+layer already carries the same identity, that observation is already
+applied, however deeply a later wrapper buried it, and the callable
+comes back unchanged. Distinct identities stack, each layer
+recording its own event, one nested under the other, and stacking by
+accident cannot be told apart from two agents observing on purpose,
+so it is not an error: it shows up honestly as double counting in
+the results.
 
-With no label given, a name derived from the callable serves, which
+With no label given, the derived path serves as the identity, which
 is enough for the simple wrap-in-place idiom to re-run safely:
 
 ```python
 registry[key] = wrapture.observed(registry[key])
 ```
 
-But the derived name is read from the object handed in, before the
+But the derived path is read from the object handed in, before the
 chain is walked, and that is a trap when other wrappers intervene: a
 third-party wrapper that exposes `__wrapped__` without preserving
-introspection (as `functools.wraps` would) changes what the name
-derives to, so it no longer matches the buried layer's label and the
-dedupe silently misses. Wherever double wrapping is a real risk,
+introspection (as `functools.wraps` would) changes what the path
+derives to, so it no longer matches the buried layer's identity and
+the dedupe silently misses. Wherever double wrapping is a real risk,
 always use a pre-determined label you specify, a distinctive prefix
-works well; it is a constant compared against stored labels, so it
-survives introspection loss as long as the chain is walkable at all:
+works well; it is a constant compared against stored identities, so
+it survives introspection loss as long as the chain is walkable at
+all (avoid a colon in a label: in every output a colon marks a real
+`module:qualname` path, and a label is precisely not that):
 
 ```python
-registry[key] = wrapture.observed(registry[key], label=f"myagent:{key}")
+registry[key] = wrapture.observed(registry[key], label=f"myagent.{key}")
 ```
 
 A wrapper that hides `__wrapped__` entirely blinds the walk, and no
@@ -663,8 +668,8 @@ def test_order_writes_the_ledger():
         place_order("widget")
 
     outer, inner = tape.all
-    assert outer.label == "Gateway.charge"
-    assert inner.label == "Ledger.record"
+    assert outer.path == "myapp.gateway:Gateway.charge"
+    assert inner.path == "myapp.ledger:Ledger.record"
     assert inner.parent_id == outer.seq
 ```
 
@@ -739,9 +744,11 @@ fields a test typically reads:
   `module:path` form with both halves dotted (the convention setuptools
   entry points use), so two same-named classes in different modules stay
   distinguishable and the event remains self-describing if it ever
-  leaves the process. `label` is the friendly name: the `label=` given
-  to the binding, or an `owner.name` default like `Gateway.charge`.
-  Assert against `label` for readability, `path` when location matters.
+  leaves the process. `label` is the `label=` given to the binding, or
+  None when none was: no name is ever derived, so wherever a combined
+  name appears in output, a colon means the real `module:qualname`
+  location and its absence means a name somebody assigned. Assert
+  against `path` routinely, `label` when one was assigned.
 - `instance` is the object the method was called on.
 - `args` and `kwargs` are the call as the caller wrote it, and
   `arguments` is the signature-normalized form with defaults applied, so
@@ -1076,7 +1083,7 @@ without changing control flow.
 
 ```python
 def handling(wrapped, instance, args, kwargs):
-    wrapture.note_exception(args[0], event=wrapture.current_event(kind="request"))
+    wrapture.current_event(kind="request").note_exception(args[0])
     return wrapped(*args, **kwargs)
 
 handle = wrapture.binding(App, "handle_exception").on_call.decorates(handling)
@@ -1096,21 +1103,27 @@ result, so one line says both:
 GET /quote/missing (app)  -> '500 INTERNAL SERVER ERROR'  !! KeyError
 ```
 
-With no `event=`, the note goes to the in-flight event, which from
-inside a bound handler is the handler's own call; the unit of work
-that failed is usually further out, which is what the two filters on
-`current_event()` are for. `current_event(kind="request")` returns
-the nearest enclosing event of that kind, the request wrapture's own
-middleware recorded; `current_event(binding=dispatch)` returns the
-nearest enclosing event that the given binding recorded, for a unit
-of work your own binding created. Either walks outward from the
-innermost in-flight event, returns `None` when nothing matches, and
-given both requires both. Noting the same exception object twice
-against one event records it once, and an exception noted against
-an event that it then escapes shows once, as the escape. Outside
-recording the call is a silent no-op; a note aimed at an event that
-has already finished is refused with a `ConfigWarning`, since the
-sinks have already heard that event close.
+The bare `wrapture.note_exception(exc)` notes against the in-flight
+event, which from inside a bound handler is the handler's own call;
+the unit of work that failed is usually further out, which is what
+the two filters on `current_event()` are for.
+`current_event(kind="request")` selects the nearest enclosing event
+of that kind, the request wrapture's own middleware recorded;
+`current_event(binding=dispatch)` the nearest enclosing event that
+the given binding recorded, for a unit of work your own binding
+created. Either walks outward from the innermost in-flight event,
+and given both requires both. The result is always a handle: reads
+pass through to the event, `annotate()` and `note_exception()` are
+its verbs, and when nothing matched it is empty, falsy, and its
+verbs quietly do nothing, so aimed calls need no guard (the bare
+`annotate(**data)` and `note_exception(exc)` are shortcuts for the
+same verbs on `current_event()` with no filters). Noting the same
+exception object twice against one event records it once, and an
+exception noted against an event that it then escapes shows once,
+as the escape. Outside recording the call is a silent no-op; a note
+aimed at an event that has already finished is refused with a
+`ConfigWarning`, since the sinks have already heard that event
+close.
 
 ### Capturing the call stack
 

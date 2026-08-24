@@ -83,9 +83,13 @@ def test_each_completed_event_becomes_one_json_line(tmp_path: Path) -> None:
     # that called it; sorting by seq recovers recording order, and
     # parent_id rebuilds the nesting.
 
-    assert [line["label"] for line in lines] == [
-        "Gateway.charge",
-        "Processor.process",
+    # An unnamed binding records label None, and the record omits the
+    # key entirely; the path is the identity.
+
+    assert all("label" not in line for line in lines)
+    assert [line["path"] for line in lines] == [
+        "test_jsonlines:Gateway.charge",
+        "test_jsonlines:Processor.process",
     ]
 
     by_seq = sorted(lines, key=lambda line: line["seq"])

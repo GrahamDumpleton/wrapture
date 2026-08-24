@@ -399,5 +399,6 @@ def test_the_base_namespace_repr_shows_the_binding() -> None:
     charge = binding(Gateway, "charge")
 
     assert repr(charge.on_call) == (
-        "<CallBehaviour of <Binding 'Gateway.charge' callable unapplied>>"
+        "<CallBehaviour of <Binding 'test_behaviours:Gateway.charge'"
+        " callable unapplied>>"
     )
