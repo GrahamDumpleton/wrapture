@@ -136,10 +136,7 @@ exception that escaped the scope, set by the recording path itself.
 Its `caught` sequence holds the exceptions the observed code handled
 inside the scope and reported with `wrapture.note_exception()`, the
 way a framework's error handler can, the scope itself completing with
-a result; `event.failed` is either, and `raising()` matches either. A
-noted exception shows in every view as the same `!!` marker an escape
-does, after the result, so one line can say both that the scope
-returned and that it failed.
+a result; `event.failed` is either, and `raising()` matches either.
 
 Timelines scope as well as record. A tape is never cleared; a test
 that wants fresh counts for each phase opens one timeline per phase,
@@ -280,7 +277,7 @@ the one wire format, the one the ecosystem converged on), minted at
 the root or joined from an arriving request's `traceparent` header,
 shared by every event in the tree and stamped on every serialised
 line, so two services both observed by wrapture join their trace
-files on one id with no tracing backend involved. Instrumentation
+files on one id with no tracing backend required. Instrumentation
 injects the identity into outbound requests through a two-function
 public surface, `current_trace()` and `trace_headers()`, and an
 identity wrapture parses but nothing claims passes through
@@ -288,6 +285,21 @@ verbatim: it never breaks a trace it does not understand. The
 `[trace]` config table
 switches identities off process-wide, with `trace = true` on an
 observe entry as the case-by-case re-enable.
+
+## OpenTelemetry export: the same events, sent to a backend
+
+The last step from a printed call tree to observability is not a
+different mechanism but another sink. With the `wrapture[otel]`
+extra installed, one `[otel]` table in the config sends the same
+recorded events to any OTLP backend: request, call and block events
+become spans, nested as the tape nests them; the durations of those
+events aggregate into metrics; captured log messages become
+correlated logs, each carrying the trace and span it happened
+inside. The trace identity is what ties it together: an identity
+minted at the root or joined from a `traceparent` header is the
+span's trace id, so two observed services appear as one distributed
+trace in the backend without either calling an OTel API. The
+[OpenTelemetry export](otel-export.md) guide is the reference.
 
 ## The map
 
@@ -312,6 +324,7 @@ observe entry as the case-by-case re-enable.
 | Instrumentation | A class declaring one target and patching it on import, named from the config | [Ad-hoc tracing](ad-hoc-tracing.md), [Instrumentation packages](instrumentation-packages.md) |
 | Request tracing | Events grouped per WSGI/ASGI request | [WSGI](wsgi-tracing.md), [ASGI](asgi-tracing.md) |
 | Trace identity | Every operation-rooted tree carries a distributed trace id, propagated over HTTP | [Ad-hoc tracing](ad-hoc-tracing.md) |
+| OpenTelemetry export | The same events as spans, metrics and logs to an OTLP backend, via `[otel]` | [OpenTelemetry export](otel-export.md) |
 | Windows and collectors | Scheduled slices of observation turned into reports | [Scheduled tracing](scheduled-tracing.md) |
 
 If you are new, read [getting started](getting-started.md) next; it
