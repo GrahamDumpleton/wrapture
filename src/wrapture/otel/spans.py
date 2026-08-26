@@ -170,6 +170,18 @@ class OpenTelemetrySink(wrapture.Sink):
         elif event.result is not wrapture.MISSING:
             span.set_attribute(f"{self._prefix}.result", self._coerce(event.result))
 
+        # Routing matches after the span opened, so a route annotation
+        # (the matched pattern, "/quote/<item>") is only known now:
+        # export it under its semconv name and rename the span to the
+        # low-cardinality "METHOD route" form backends group by. A
+        # request that matched no route keeps its path-based name.
+
+        if event.kind == "request":
+            route = event.data.get("route")
+            if route:
+                span.set_attribute("http.route", str(route))
+                span.update_name(f"{self._method(event)} {route}")
+
         # A streamed body carries two extra numbers worth keeping: how
         # many items it produced and the time spent producing them.
 
@@ -369,10 +381,12 @@ class OpenTelemetrySink(wrapture.Sink):
         # do; everything else uses the binding's friendly name.
 
         if event.kind == "request":
-            method = event.data.get("method", "?")
-            return f"{method} {event.data.get('path', '')}"
+            return f"{self._method(event)} {event.data.get('path', '')}"
 
         return event.label or event.path
+
+    def _method(self, event: Event) -> str:
+        return str(event.data.get("method") or "?")
 
     def _enter_attributes(self, event: Event) -> dict[str, AttributeValue]:
         attributes: dict[str, AttributeValue] = {

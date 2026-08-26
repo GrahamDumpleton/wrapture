@@ -25,7 +25,7 @@ import threading
 import time
 import warnings
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol, Self, runtime_checkable
 
 from wrapt import MISSING
@@ -1107,14 +1107,58 @@ class Block:
                 _pop(token)
 
 
-def block(name: str, **data: Any) -> Block:
+_SCALARS = (str, int, float, bool)
+
+
+def seed_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Validate and copy declaration-point seed data.
+
+    Accepts None (nothing) or a mapping of non-empty string keys to
+    scalars (str, int, float, bool) or flat lists of scalars: the shape
+    a TOML table and an OTel attribute both handle without coercion.
+    Anything else raises TypeError naming the offending key. Used by
+    binding(), block() and the config loader's observe entries, so the
+    three declaration points accept exactly one shape.
+    """
+
+    if data is None:
+        return {}
+
+    if not isinstance(data, Mapping):
+        raise TypeError(f"data must be a mapping of string keys, got {data!r}")
+
+    seeded: dict[str, Any] = {}
+
+    for key, value in data.items():
+        if not isinstance(key, str) or not key:
+            raise TypeError(f"data keys must be non-empty strings, got {key!r}")
+
+        if isinstance(value, _SCALARS):
+            seeded[key] = value
+        elif isinstance(value, (list, tuple)) and all(
+            isinstance(item, _SCALARS) for item in value
+        ):
+            seeded[key] = list(value)
+        else:
+            raise TypeError(
+                f"data[{key!r}] must be a str, int, float or bool, or a flat"
+                f" list of those, got {value!r}"
+            )
+
+    return seeded
+
+
+def block(name: str, *, data: Mapping[str, Any] | None = None) -> Block:
     """Declare the enclosed stretch of code as one recorded event.
 
     A named unit smaller than a function: the with body's wall time
     becomes the event's duration, an exception escaping the body is
-    recorded and still propagates, keyword arguments seed the event's
-    data, and everything recorded inside the body (bound calls, log
-    events, nested blocks) nests under it. The event's kind is
+    recorded and still propagates, `data=` seeds the event's data (a
+    mapping of string keys to scalars or flat lists of scalars, the
+    same shape `binding()` and an observe entry take; anything known
+    only inside the body is `annotate()`'s job), and everything
+    recorded inside the body (bound calls, log events, nested blocks)
+    nests under it. The event's kind is
     "block", its label is the given name, and its path locates the
     call site as module:qualname of the function the with statement
     sits in. A block entered with nothing in flight above it roots
@@ -1127,7 +1171,7 @@ def block(name: str, **data: Any) -> Block:
     current_event().
     """
 
-    return Block(name, data)
+    return Block(name, seed_data(data))
 
 
 class Timeline:

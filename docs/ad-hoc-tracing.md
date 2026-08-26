@@ -668,6 +668,16 @@ accepts a single string or a list:
   names query string parameters. The
   [WSGI](wsgi-tracing.md) and [ASGI](asgi-tracing.md) request
   tracing pages cover them.
+- `data` is a table of static tags every event from the entry's
+  bindings starts with: string keys to scalars or flat lists of
+  scalars, the shape `binding(data=)` takes in code. It is the only
+  way to annotate events from code the config observes but does not
+  own, and the tags show wherever the event does, as `wrapture.data.*`
+  attributes on an exported span for instance. An `annotate()` inside
+  the observed code overrides a seeded key; on a wsgi or asgi entry
+  the request's own fields (method, path and the rest of the
+  [request data-key contract](otel-export.md#the-request-data-key-contract))
+  are written after the seed and cannot be overridden by it.
 
 The blast radius of a pattern is thereby one level of one named
 container, stated on the line above it.

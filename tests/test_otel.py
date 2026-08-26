@@ -912,3 +912,111 @@ def test_metrics_attribute_a_noted_exception_as_the_error_type(
         for attributes, _ in points
         if attributes["wrapture.path"] == f"{__name__}:_Shop.handle_error"
     )
+
+
+# ---------------------------------------------------------------------------
+# the request data-key contract: route
+# ---------------------------------------------------------------------------
+
+
+class _Router:
+    """The framework shape: routing matches inside the request, after
+    the request event has opened, and the app annotates the match."""
+
+    def __init__(self, route: str | None) -> None:
+        self.route = route
+
+    def __call__(self, environ: dict[str, Any], start_response: Any) -> list[bytes]:
+        self.dispatch()
+        start_response("200 OK", [])
+        return [b""]
+
+    def dispatch(self) -> None:
+        if self.route is not None:
+            wrapture.annotate(route=self.route, endpoint="quote")
+
+
+def _request_span(exported: Any) -> Any:
+    return next(
+        span for span in exported.get_finished_spans() if span.kind.name == "SERVER"
+    )
+
+
+def test_a_route_annotation_renames_the_span_and_sets_http_route(
+    tmp_path: Path, exported: Any
+) -> None:
+    app = wrapture.WSGIMiddleware(_Router("/quote/<item>"))
+
+    applied = _apply_traces(tmp_path)
+    try:
+        _serve(app, {"REQUEST_METHOD": "GET", "PATH_INFO": "/quote/widget"})
+    finally:
+        applied.revert()
+
+    span = _request_span(exported)
+
+    # The span is named by the low-cardinality pattern, the raw path
+    # stays under url.path, and the route rides under its semconv name
+    # rather than being repeated as wrapture.data.route. The endpoint
+    # has no semconv name and stays ordinary data.
+
+    assert span.name == "GET /quote/<item>"
+    assert span.attributes["http.route"] == "/quote/<item>"
+    assert span.attributes["url.path"] == "/quote/widget"
+    assert "wrapture.data.route" not in span.attributes
+    assert span.attributes["wrapture.data.endpoint"] == "quote"
+
+
+def test_a_request_matching_no_route_keeps_its_path_name(
+    tmp_path: Path, exported: Any
+) -> None:
+    app = wrapture.WSGIMiddleware(_Router(None))
+
+    applied = _apply_traces(tmp_path)
+    try:
+        _serve(app, {"REQUEST_METHOD": "GET", "PATH_INFO": "/nowhere"})
+    finally:
+        applied.revert()
+
+    span = _request_span(exported)
+
+    assert span.name == "GET /nowhere"
+    assert "http.route" not in span.attributes
+
+
+def test_metrics_attribute_requests_by_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from wrapture.otel import metrics as metrics_module
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    monkeypatch.setattr(metrics_module, "get_meter", provider.get_meter)
+
+    sink = metrics_module.OpenTelemetryMetricsSink()
+    routed = wrapture.WSGIMiddleware(_Router("/quote/<item>"))
+    unrouted = wrapture.WSGIMiddleware(_Router(None))
+
+    wrapture.add_sink(sink)
+    try:
+        _serve(routed, {"REQUEST_METHOD": "GET", "PATH_INFO": "/quote/widget"})
+        _serve(routed, {"REQUEST_METHOD": "GET", "PATH_INFO": "/quote/gadget"})
+        _serve(unrouted, {"REQUEST_METHOD": "GET", "PATH_INFO": "/nowhere"})
+    finally:
+        wrapture.remove_sink(sink)
+
+    data: Any = reader.get_metrics_data()
+    by_route = {
+        point.attributes.get("http.route"): point.count
+        for resource in data.resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == "http.server.request.duration"
+        for point in metric.data.data_points
+    }
+
+    # Two URLs under one pattern aggregate into one series; the
+    # unrouted request has no route attribute at all, never a blank.
+
+    assert by_route == {"/quote/<item>": 2, None: 1}

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import wrapt
 
+import wrapture
 from wrapture import (
     AlreadyAppliedError,
     Binding,
@@ -656,3 +657,57 @@ def test_discover_options_reach_every_binding() -> None:
 
     group = discover(Billing, "charge", capture="snapshot")
     assert group.charge._capture_args is not None
+
+
+# ---------------------------------------------------------------------------
+# seed data
+# ---------------------------------------------------------------------------
+
+
+def _tagged(value: int) -> int:
+    return value * 2
+
+
+def test_seed_data_starts_every_event_from_the_binding() -> None:
+    tagged = binding(__name__, "_tagged", data={"team": "billing", "tier": 1})
+
+    with tagged, wrapture.timeline() as tape:
+        _tagged(1)
+        _tagged(2)
+
+    assert [event.data for event in tape.all] == [
+        {"team": "billing", "tier": 1},
+        {"team": "billing", "tier": 1},
+    ]
+
+
+def test_annotate_inside_the_call_overrides_the_seed() -> None:
+    def annotating(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        wrapture.annotate(tier=2, rows=10)
+        return wrapped(*args, **kwargs)
+
+    tagged = binding(__name__, "_tagged", data={"tier": 1}).on_call.decorates(
+        annotating
+    )
+
+    with tagged, wrapture.timeline() as tape:
+        _tagged(1)
+
+    assert tape.all[0].data == {"tier": 2, "rows": 10}
+
+
+def test_seed_data_is_copied_and_validated_at_declaration() -> None:
+    seed: dict[str, Any] = {"tags": ("a", "b")}
+    tagged = binding(__name__, "_tagged", data=seed)
+    seed["tags"] = ("changed",)
+
+    with tagged, wrapture.timeline() as tape:
+        _tagged(1)
+
+    # A tuple normalises to a list, and a later change to the caller's
+    # mapping does not reach the binding.
+
+    assert tape.all[0].data == {"tags": ["a", "b"]}
+
+    with pytest.raises(TypeError, match="data\\['owner'\\]"):
+        binding(__name__, "_tagged", data={"owner": object()})

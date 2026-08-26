@@ -13,10 +13,13 @@ _PRIMITIVES = (bool, int, float, str)
 
 _PREFIX = "wrapture"
 
-# Request data fields already exported under their semantic-convention
-# names, so the close-time sweep does not repeat them as wrapture.data.*.
+# Request data fields exported under their semantic-convention names,
+# so the close-time sweep does not repeat them as wrapture.data.*. This
+# is the reserved set the OTel docs page documents as the request
+# data-key contract: annotating one of these on a request event opts
+# into the same treatment.
 
-_SEMCONV_DATA = frozenset({"method", "path", "query"})
+_SEMCONV_DATA = frozenset({"method", "path", "query", "route"})
 
 
 def _status_code(result: Any) -> int | None:

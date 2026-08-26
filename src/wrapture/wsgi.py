@@ -45,7 +45,7 @@ from .sinks import (
     _required_policy,
 )
 from .stacks import _capture as _capture_stack
-from .timeline import _pop, _push, _stack, _timelines_active
+from .timeline import _pop, _push, _stack, _timelines_active, seed_data
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -448,6 +448,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         when: Any = None,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(application)
 
@@ -470,6 +471,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         self._self_when = _request_predicate(when, _environ_path)
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
+        self._self_data = seed_data(data) or (binding._data if binding else {})
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Any:
         binding = self._self_binding
@@ -556,6 +558,13 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
                 if binding is not None and binding._stack_depth is not None:
                     event.stack = _capture_stack(binding._stack_depth)
+
+                # The declared seed goes in first, so the request's own
+                # fields, written next, win over any reserved key a
+                # declaration named.
+
+                if self._self_data:
+                    event.data.update(self._self_data)
 
                 if _level_of(args_policy) > NONE:
                     event.data.update(_request_data(environ, args_policy))

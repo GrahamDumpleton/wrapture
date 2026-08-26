@@ -55,7 +55,7 @@ from .sinks import (
     _required_policy,
 )
 from .stacks import _capture as _capture_stack
-from .timeline import _pop, _push, _timelines_active
+from .timeline import _pop, _push, _timelines_active, seed_data
 from .wsgi import _REDACTED, _captured_query, _describe, _Hooks, _request_predicate
 
 if TYPE_CHECKING:
@@ -257,6 +257,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         when: Any = None,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
+        data: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(application)
 
@@ -279,6 +280,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         self._self_when = _request_predicate(when, _scope_path)
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
+        self._self_data = seed_data(data) or (binding._data if binding else {})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> Any:
         binding = self._self_binding
@@ -371,6 +373,13 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
                 if binding is not None and binding._stack_depth is not None:
                     event.stack = _capture_stack(binding._stack_depth)
+
+                # The declared seed goes in first, so the request's own
+                # fields, written next, win over any reserved key a
+                # declaration named.
+
+                if self._self_data:
+                    event.data.update(self._self_data)
 
                 if _level_of(args_policy) > NONE:
                     event.data.update(_scope_data(scope, args_policy))

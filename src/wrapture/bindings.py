@@ -82,6 +82,7 @@ from .timeline import (
     _push,
     _stack,
     _timelines_active,
+    seed_data,
 )
 from .values import (
     check_mapping,
@@ -597,6 +598,7 @@ class Binding:
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
         | bool
         | None = None,
+        data: Mapping[str, Any] | None = None,
         strict: bool = True,
         attr: str | None = None,
         item: Any = MISSING,
@@ -697,6 +699,12 @@ class Binding:
 
         self._label = label
         self._display = label or self._path
+
+        # Static data every event from this binding starts with, merged
+        # in at enter ahead of anything annotate() adds inside the
+        # scope, so dynamic annotation wins over a declared tag.
+
+        self._data = seed_data(data)
 
         # The mapping whose content a mapping binding substitutes: the
         # object at the location, or the entry an item= slot names.
@@ -1759,6 +1767,9 @@ class Binding:
             phase=self._phase_of(phase),
         )
 
+        if self._data:
+            event.data.update(self._data)
+
         if self._stack_depth is not None:
             event.stack = _capture_stack(self._stack_depth)
 
@@ -2274,6 +2285,7 @@ def binding(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    data: Mapping[str, Any] | None = None,
     strict: bool = True,
     attr: str | None = None,
     item: Any = MISSING,
@@ -2363,6 +2375,18 @@ def binding(
     records and counts nothing, for plumbing that must not put itself
     in the trace, and `when=True` is the always-record default.
 
+    `data=` seeds every event the binding records with static data, a
+    mapping of string keys to scalars (str, int, float, bool) or flat
+    lists of scalars, merged into the event's data at enter before
+    anything `annotate()` adds inside the scope, so a dynamic
+    annotation overrides a declared tag. It is the declaration-point
+    counterpart of `annotate()`, for tags known when the binding is
+    made rather than during the call, and it is what an observe
+    entry's `data` table maps onto. On a wsgi or asgi binding the
+    middleware's own request fields are written after the seed, so
+    the request data-key contract's reserved keys cannot be
+    overridden from a declaration.
+
     `strict=` (default True) checks each call that behaviour answers
     without reaching the real callable (a phase with a terminal:
     returns, raises, returns_from or decorates) against the callable's
@@ -2388,6 +2412,7 @@ def binding(
         capture_result=capture_result,
         stack=stack,
         when=when,
+        data=data,
         strict=strict,
         attr=attr,
         item=item,

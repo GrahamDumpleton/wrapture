@@ -1492,12 +1492,14 @@ a message costs nothing but a filter.
 
 The third event producer, alongside bindings (calls observed from
 outside) and log capture (messages the code emitted), is a
-declaration the code makes itself: `wrapture.block(name, **data)` is
-a context manager that records the enclosed stretch of code as one
-event of kind `"block"`. The with body's wall time becomes the
+declaration the code makes itself: `wrapture.block(name, data=...)`
+is a context manager that records the enclosed stretch of code as
+one event of kind `"block"`. The with body's wall time becomes the
 event's duration, an exception escaping the body is recorded and
-still propagates, keyword arguments seed the event's `data`, and
-everything recorded inside (bound calls, log events, nested blocks)
+still propagates, `data=` seeds the event's `data` with tags known
+at the declaration (the same mapping `binding(data=)` and an observe
+entry's `data` table take; anything known only inside the body is
+`annotate()`'s job), and everything recorded inside (bound calls, log events, nested blocks)
 nests under it. Like a log statement, the marker is embedded by the
 author and inert when nothing listens: with no sinks active, nothing
 is built at all, so it can stay in production code permanently.
@@ -1511,7 +1513,7 @@ with the whole filter and assertion surface:
 
 ```python
 def process(invoice):
-    with wrapture.block("render-invoice", customer=invoice.customer_id):
+    with wrapture.block("render-invoice", data={"customer": invoice.customer_id}):
         pages = render(invoice)
         wrapture.annotate(pages=pages)
 

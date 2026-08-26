@@ -33,7 +33,7 @@ import threading
 import tomllib
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import wrapt
@@ -67,7 +67,7 @@ from .sinks import (
     add_sink,
     remove_sink,
 )
-from .timeline import Tape
+from .timeline import Tape, seed_data
 from .windows import Window
 
 
@@ -162,6 +162,11 @@ class ObserveEntry:
     process-wide: the case-by-case re-enable. Only operations mint,
     so the mark lands on the entry's call and request bindings, and
     an entry that binds nothing but attributes is rejected.
+
+    `data` is a table of static tags every event from this entry's
+    bindings starts with, string keys to scalars or flat lists of
+    scalars, the shape `binding(data=)` takes; it is the only way to
+    annotate events from code the config observes but does not own.
     """
 
     target: str
@@ -171,6 +176,7 @@ class ObserveEntry:
     redact: str | Sequence[str] = ()
     mode: str = ""
     trace: bool = False
+    data: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -227,6 +233,15 @@ class ObserveEntry:
             raise ConfigError(
                 f"{where}: trace must be true or false, got {self.trace!r}"
             )
+
+        # Seed data takes the one shape every declaration point takes;
+        # the shared check speaks TypeError, the config speaks
+        # ConfigError.
+
+        try:
+            object.__setattr__(self, "data", seed_data(self.data))
+        except TypeError as exc:
+            raise ConfigError(f"{where}: {exc}") from None
 
 
 class AppliedConfig:
@@ -788,6 +803,7 @@ def _bindings_for(
             prefix + member,
             capture=effective,
             mode=entry.mode or None,
+            data=entry.data or None,
         )
         for member in members
     ]
@@ -1426,7 +1442,7 @@ def _config_from(document: Any, location: str) -> Config:
             raw,
             section="[[observe]]",
             required=("target",),
-            optional=("name", "match", "exclude", "redact", "mode", "trace"),
+            optional=("name", "match", "exclude", "redact", "mode", "trace", "data"),
         )
         observe.append(ObserveEntry(**table))
 
