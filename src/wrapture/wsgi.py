@@ -462,7 +462,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         else:
             path = _describe(application)
 
-        self._self_binding = binding
+        self._self_wrapture_binding = binding
         self._self_path = path
         self._self_label = label
 
@@ -478,7 +478,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         self._self_data = seed_data(data) or (binding._data if binding else {})
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Any:
-        binding = self._self_binding
+        binding = self._self_wrapture_binding
         application = self.__wrapped__
 
         # A suspended binding is inert: straight through, counted.

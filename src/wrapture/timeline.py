@@ -91,6 +91,31 @@ class _EventQueries:
         where = getattr(bnd, "label", None) or getattr(bnd, "path", None) or repr(bnd)
         return EventLog(where, events)
 
+    def where(self, *, path: str | None = None, label: str | None = None) -> EventLog:
+        """A filterable view over this tape's events selected by the
+        strings they carry, for when no binding is in hand.
+
+        `path` matches an event's path exactly, the module:qualname of
+        the target as `Binding.path` spells it. `label` matches the
+        name an event is shown under: its assigned label, or its path
+        when it has none. Given together both have to match; one of
+        them is required. find_binding() is the usual route, since it
+        hands back the binding itself; this is the fallback for events
+        whose binding is not obtainable.
+        """
+
+        if path is None and label is None:
+            raise ValueError("where() needs a path, a label, or both")
+
+        events = [
+            event
+            for event in self._snapshot()
+            if (path is None or event.path == path)
+            and (label is None or (event.label or event.path) == label)
+        ]
+
+        return EventLog(label if label is not None else str(path), events)
+
     def blocks(self, name: str = "*") -> EventLog:
         """A filterable view over this tape's block events, selected by
         name.

@@ -76,11 +76,13 @@ from .events import (
 )
 from .exceptions import (
     AlreadyAppliedError,
+    AmbiguousBindingError,
     ConfigError,
     ConfigWarning,
     DeferredTargetError,
     ExpectationNotMetError,
     NeverAppliedError,
+    NoBindingError,
     NotImplementedYetError,
     RecordingGapWarning,
     SequenceExhaustedError,
@@ -115,6 +117,13 @@ from .lifecycle import (
 from .logs import (
     LogCapture,
     capture_logs,
+)
+from .lookup import (
+    Observer,
+    binding_of,
+    bindings_of,
+    find_binding,
+    find_bindings,
 )
 from .observed import (
     ObservedCallable,
@@ -174,6 +183,7 @@ __all__ = [
     "ASGIMiddleware",
     "Aggregate",
     "AlreadyAppliedError",
+    "AmbiguousBindingError",
     "AppliedConfig",
     "Binding",
     "BoundSpec",
@@ -213,9 +223,11 @@ __all__ = [
     "JSONLines",
     "LogCapture",
     "NeverAppliedError",
+    "NoBindingError",
     "NotImplementedYetError",
     "ObserveEntry",
     "ObservedCallable",
+    "Observer",
     "PathStats",
     "Printer",
     "RecordingGapWarning",
@@ -239,6 +251,8 @@ __all__ = [
     "annotate",
     "binding",
     "bindings",
+    "binding_of",
+    "bindings_of",
     "block",
     "bound",
     "canonical",
@@ -248,6 +262,8 @@ __all__ = [
     "current_event",
     "current_trace",
     "discover",
+    "find_binding",
+    "find_bindings",
     "find_config",
     "flush_sinks",
     "instrumentation",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import itertools
 import threading
 import time
 import types
@@ -146,6 +147,12 @@ _BehaviourT = TypeVar("_BehaviourT", bound=_Behaviour[Any])
 # never keeps a binding alive.
 
 _applied_bindings: weakref.WeakSet[Binding] = weakref.WeakSet()
+
+# One counter shared by every binding application and every observed()
+# proxy, so a lookup over both can order its results by when each came
+# into effect.
+
+_sequence: itertools.count[int] = itertools.count(1)
 
 
 def _reject_deferred(target: Any) -> None:
@@ -333,6 +340,29 @@ def _derive_path(target: Any, name: str) -> str:
 
     owner = target if isinstance(target, type) else type(target)
     return f"{owner.__module__}:{owner.__qualname__}.{name}"
+
+
+def _bare_path(target: Any, name: str) -> str:
+    """The path of a location that may be the target itself: a mapping
+    binding on the mapping, where `name` is empty."""
+
+    if name:
+        return _derive_path(target, name)
+
+    return _derive_path(target, name).rstrip(".").rstrip(":")
+
+
+def _slot_path(target: Any, name: str, kind: str, slot: Any) -> str:
+    """The path of a slot in an owner: `owner.attr` for an attribute
+    slot, `owner[key]` for a mapping entry."""
+
+    owner = _derive_path(target, name).rstrip(".")
+
+    if kind == "attr":
+        separator = "" if owner.endswith(":") else "."
+        return f"{owner}{separator}{slot}"
+
+    return f"{owner}[{slot!r}]"
 
 
 def _async_kind(wrapped: Any) -> str | None:
@@ -684,6 +714,11 @@ class Binding:
         self._prior: Any = MISSING
         self._value_applied = False
 
+        # When this binding was last applied, on the counter shared with
+        # observed() proxies; zero until the first apply().
+
+        self._sequence = 0
+
         if slot:
             self._path = self._slot_path(target, name)
         elif mode == "mapping":
@@ -844,19 +879,10 @@ class Binding:
             )
 
     def _bare_path(self, target: Any, name: str) -> str:
-        if name:
-            return _derive_path(target, name)
-
-        return _derive_path(target, name).rstrip(".").rstrip(":")
+        return _bare_path(target, name)
 
     def _slot_path(self, target: Any, name: str) -> str:
-        owner = _derive_path(target, name).rstrip(".")
-
-        if self._slot_kind == "attr":
-            separator = "" if owner.endswith(":") else "."
-            return f"{owner}{separator}{self._slot}"
-
-        return f"{owner}[{self._slot!r}]"
+        return _slot_path(target, name, self._slot_kind, self._slot)
 
     # -- identity ----------------------------------------------------------
 
@@ -1147,7 +1173,7 @@ class Binding:
             self._value_applied = True
             self._suspended = suspended
             self._apply_count += 1
-            _applied_bindings.add(self)
+            self._mark_applied()
             return self
 
         # Behaviour restarts from phase 0 on every apply.
@@ -1162,7 +1188,7 @@ class Binding:
             self._wrapper = install_attribute(self, self._target, self._name)
             self._suspended = suspended
             self._apply_count += 1
-            _applied_bindings.add(self)
+            self._mark_applied()
             return self
 
         # The request modes install their middleware through the same
@@ -1179,7 +1205,7 @@ class Binding:
             self._wrapper = self._install(middleware)
             self._suspended = suspended
             self._apply_count += 1
-            _applied_bindings.add(self)
+            self._mark_applied()
             return self
 
         if self._mode == "asgi":
@@ -1193,7 +1219,7 @@ class Binding:
             self._wrapper = self._install(asgi_middleware)
             self._suspended = suspended
             self._apply_count += 1
-            _applied_bindings.add(self)
+            self._mark_applied()
             return self
 
         # `enabled` must be supplied at construction: wrapt's _self_enabled
@@ -1201,13 +1227,29 @@ class Binding:
         # the wrapper entirely.
 
         def factory(wrapped: WrappedFunction, *args: Any, **kwargs: Any) -> Any:
-            return wrapt.FunctionWrapper(wrapped, self._make_wrapper(), self._enabled)
+            wrapper: Any = wrapt.FunctionWrapper(
+                wrapped, self._make_wrapper(), self._enabled
+            )
+
+            # The wrapper knows its binding, so binding_of() can find
+            # the binding from an object in hand.
+
+            wrapper._self_wrapture_binding = self
+            return wrapper
 
         self._wrapper = self._install(factory)
         self._suspended = suspended
         self._apply_count += 1
-        _applied_bindings.add(self)
+        self._mark_applied()
         return self
+
+    def _mark_applied(self) -> None:
+        # Enter the process-wide set of applied bindings that lookups
+        # and the pytest leak sweep read, stamped with the application
+        # order.
+
+        self._sequence = next(_sequence)
+        _applied_bindings.add(self)
 
     def _install(self, factory: Callable[..., Any]) -> Any:
         """Wrap what the location holds and store the wrapper back there.

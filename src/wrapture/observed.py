@@ -37,6 +37,7 @@ from __future__ import annotations
 import inspect
 import time
 import warnings
+import weakref
 from collections.abc import Callable
 from typing import Any, cast, overload
 
@@ -53,6 +54,7 @@ from .bindings import (
     _record_async_generator,
     _record_awaited,
     _record_generator,
+    _sequence,
 )
 from .capture import (
     NONE,
@@ -99,6 +101,12 @@ def _describe(fn: Any) -> str:
     )
 
     return f"{module}:{qualname}"
+
+
+# Every observed() proxy still alive, for find_bindings(). Weak, since a
+# proxy the caller has dropped observes nothing.
+
+_observed_callables: weakref.WeakSet[ObservedCallable] = weakref.WeakSet()
 
 
 class BoundObservedCallable(
@@ -171,6 +179,13 @@ class ObservedCallable(
         self._self_filtered_calls = 0
         self._self_missed_calls = 0
         self._self_gap_warned = False
+
+        # Register for find_bindings(): a proxy has no apply(), so its
+        # creation is when it comes into effect, and the registry is
+        # weak so it holds nothing the caller has let go of.
+
+        self._self_sequence = next(_sequence)
+        _observed_callables.add(self)
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self._self_display!r}>"
