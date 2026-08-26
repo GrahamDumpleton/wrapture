@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wrapture: PyCon AU 2026 lightning talk</title>
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/black.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/monokai.css">
+
+  <style>
+    .reveal h1 { font-size: 2.6em; text-transform: none; }
+    .reveal h2 { font-size: 1.6em; text-transform: none; }
+    .reveal h3 { font-size: 1.1em; text-transform: none; font-weight: normal; opacity: 0.8; }
+    .reveal pre { width: 100%; font-size: 0.55em; box-shadow: none; }
+    .reveal pre code { padding: 0.8em 1em; max-height: 520px; }
+    .reveal pre.output { font-size: 0.42em; }
+    .reveal .tagline { font-style: italic; opacity: 0.85; }
+    .reveal .small { font-size: 0.6em; opacity: 0.75; }
+    .reveal ul { display: block; }
+    .reveal li { margin-bottom: 0.35em; }
+    .reveal .cols { display: flex; gap: 0.8em; text-align: left; width: 110%; margin-left: -5%; }
+    .reveal .cols > * { min-width: 0; width: auto; margin: 0; }
+    .reveal .cols > :first-child { flex: 0 0 52%; }
+    .reveal .cols > :last-child { flex: 1 1 0; }
+    .reveal .cols pre { font-size: 0.48em; margin-bottom: 0.6em; }
+    .reveal .cols pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .reveal a { color: #8be9fd; }
+    .reveal .bouncer {
+      position: absolute; top: 0; left: 0; z-index: 0; opacity: 0.7;
+      line-height: 0; color: #ff79c6;
+      will-change: transform; pointer-events: none;
+    }
+    .reveal .bouncer svg { display: block; }
+
+    /* Evil laugh: a burst of quick chomps, then a pause, on a loop. The
+       mouth scales open from its top edge (y=60 in the SVG's viewBox). */
+    .reveal .bouncer .mouth {
+      transform-box: view-box; transform-origin: 60px 60px;
+      animation: laugh 6s ease-in-out infinite;
+    }
+    @keyframes laugh {
+      0%, 4%   { transform: scaleY(1); }
+      6%       { transform: scaleY(2.2); }
+      8%       { transform: scaleY(1.2); }
+      10%      { transform: scaleY(2.4); }
+      12%      { transform: scaleY(1.2); }
+      14%      { transform: scaleY(2.6); }
+      16%      { transform: scaleY(1.2); }
+      18%      { transform: scaleY(2.8); }
+      21%      { transform: scaleY(1); }
+      21.1%, 100% { transform: scaleY(1); }
+    }
+    .reveal #last > :not(.bouncer) { position: relative; z-index: 1; }
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+
+      <!-- 1. Title -->
+      <section>
+        <h1>wrapture</h1>
+        <p class="tagline">Wrap anything, capture everything, change nothing.</p>
+        <p><code>pip install wrapture</code></p>
+        <p class="small">Graham Dumpleton<br>
+          author of <code>wrapt</code><br>
+          <a href="https://wrapture.readthedocs.io">wrapture.readthedocs.io</a></p>
+        <aside class="notes">
+          wrapture is wrapt plus capture. A sibling project to wrapt, built on
+          its monkey patching machinery.
+        </aside>
+      </section>
+
+      <!-- 2. The problem -->
+      <section>
+        <h2>Three jobs, done the hard way</h2>
+        <ul>
+          <li><strong>Monkey patching</strong>: <code>setattr</code> and hope nobody else patched it too</li>
+          <li><strong>Testing</strong>: <code>Mock</code> invents return values, and a patched method no longer runs the real code</li>
+          <li><strong>Tracing</strong>: SDK calls in the code, or auto-instrumentation only for frameworks it knows</li>
+        </ul>
+        <p>All three are the same move:<br><strong>wrap a call site, by name.</strong></p>
+      </section>
+
+      <!-- 3. At a glance -->
+      <section>
+        <h2>At a glance</h2>
+        <pre><code class="language-python" data-trim>
+place  = wrapture.binding(OrderService, "place")
+charge = wrapture.binding(Gateway, "charge")
+record = wrapture.binding(Ledger, "record")
+
+with wrapture.timeline(place, charge, record) as tape:
+    OrderService().place(500)
+
+print(tape.tree())
+        </code></pre>
+        <pre class="output"><code class="language-text" data-trim>
+OrderService.place(amount=500)  -> {'id': 'ch_500', 'amount': 500}
+  Gateway.charge(amount=500, currency='USD')  -> {'id': 'ch_500', 'amount': 500}
+  Ledger.record(entry={'id': 'ch_500', 'amount': 500})  -> 'led_ch_500'
+        </code></pre>
+        <p class="small">None of these classes import wrapture.</p>
+      </section>
+
+      <!-- 4. Monkey patching -->
+      <section>
+        <h2>1. Monkey patching</h2>
+        <pre><code class="language-python" data-trim>
+charge = wrapture.binding("myapp.gateway", "Gateway.charge")
+
+# or raises(), transforms_args(), transforms_result(), decorates()
+charge.on_call.returns({"id": "ch_TEST"})
+
+charge.apply()
+...
+charge.remove()   # original restored
+
+# or scope it
+with charge:
+    ...
+        </code></pre>
+        <ul class="small">
+          <li>Declare, then apply: a typo fails on the line that made it</li>
+          <li>Wrappers compose with other decorators and patches</li>
+          <li>Useful on its own, with nothing else switched on</li>
+        </ul>
+      </section>
+
+      <!-- 5. Testing -->
+      <section>
+        <h2>2. Testing</h2>
+        <pre><code class="language-python" data-trim>
+charge.on_call.raises(TimeoutError("gateway timed out"))
+
+with wrapture.timeline(charge, refund, ledger):
+    service.place("o-7", 400)
+    service.cancel("o-7")
+
+    charge.events.raising(TimeoutError).assert_once()
+    ledger.events.assert_never()
+    refund.events.assert_never()
+        </code></pre>
+        <ul class="small">
+          <li>The real code runs; you watch how calls actually flowed</li>
+          <li>Assert on what <em>didn't</em> happen on the error path</li>
+          <li>Test code with no injectable seams at all</li>
+        </ul>
+      </section>
+
+      <!-- 6. Tracing -->
+      <section>
+        <h2>3. Ad-hoc tracing</h2>
+        <div class="cols">
+          <pre><code class="language-toml" data-trim>
+# wrapture.toml
+[[observe]]
+target = "myapp.orders:OrderService"
+match = "*"
+exclude = "_*"
+
+[[observe]]
+target = "myapp.payments:Gateway"
+name = ["charge", "refund"]
+
+[[sink]]
+type = "jsonlines"
+path = "trace.jsonl"
+          </code></pre>
+          <pre><code class="language-console" data-trim>
+$ python -m wrapture manage.py runserver
+
+# or, with autowrapt installed,
+# no launcher at all:
+$ AUTOWRAPT_BOOTSTRAP=wrapture \
+    python manage.py runserver
+          </code></pre>
+        </div>
+        <p class="small">A nested call tree from an application you cannot modify or redeploy.<br>
+          Process the JSON Lines yourself, or convert it for Perfetto and other tools:<br>
+          <code>python -m wrapture.tools convert --format chrome -o trace.json trace.jsonl</code></p>
+      </section>
+
+      <!-- 7. One mechanism -->
+      <section>
+        <h2>One mechanism, one config</h2>
+        <ul>
+          <li>The binding that stubs a method in a test is the one that traces it in production</li>
+          <li>The config that prints a call tree is the config that ships a trace to observability tools</li>
+          <li>Point at <em>your own</em> methods by name: no SDK calls, no waiting for a framework integration</li>
+          <li>What starts as a monkey patch or a test assertion grows into observability, with no rewrite</li>
+        </ul>
+      </section>
+
+      <!-- 8. OpenTelemetry -->
+      <section>
+        <h2>OpenTelemetry, no code changes</h2>
+        <pre><code class="language-toml" data-trim>
+# add to the same wrapture.toml
+[otel]
+service_name = "flask-shop"
+signals = ["traces", "metrics", "logs"]
+
+[otel.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+        </code></pre>
+        <ul class="small">
+          <li>The same recorded events, exported <em>live</em> to any OTLP backend as traces, metrics and correlated logs</li>
+          <li>Trace identity arrives and leaves in W3C <code>traceparent</code> headers, so two observed services join one distributed trace</li>
+          <li><code>pip install wrapture[otel]</code>, then add <code>[otel]</code> to the same <code>wrapture.toml</code></li>
+        </ul>
+      </section>
+
+      <!-- 9. Close -->
+      <section id="last" data-state="bounce">
+        <div class="bouncer">
+          <svg viewBox="0 0 120 130" width="150" height="163" aria-label="AI gremlin">
+            <!-- horns -->
+            <path d="M22 38 L6 4 L36 26 Z" fill="currentColor"/>
+            <path d="M98 38 L114 4 L84 26 Z" fill="currentColor"/>
+            <!-- head and body: lumpy ogre silhouette -->
+            <path d="M28 30 Q60 6 92 30 Q108 46 100 66 Q118 78 110 100 Q104 120 82 122 Q60 130 38 122 Q16 120 10 100 Q2 78 20 66 Q12 46 28 30 Z" fill="currentColor"/>
+            <!-- claws -->
+            <path d="M12 96 L0 112 L14 106 L4 124 L20 112 Z" fill="currentColor"/>
+            <path d="M108 96 L120 112 L106 106 L116 124 L100 112 Z" fill="currentColor"/>
+            <!-- eyes -->
+            <ellipse cx="42" cy="42" rx="9" ry="7" fill="#111"/>
+            <ellipse cx="78" cy="42" rx="9" ry="7" fill="#111"/>
+            <circle cx="44" cy="43" r="3" fill="#fff"/>
+            <circle cx="80" cy="43" r="3" fill="#fff"/>
+            <!-- angry brows -->
+            <path d="M30 32 L52 38" stroke="#111" stroke-width="4" stroke-linecap="round"/>
+            <path d="M90 32 L68 38" stroke="#111" stroke-width="4" stroke-linecap="round"/>
+            <!-- grin with jagged teeth; the group is animated to laugh -->
+            <g class="mouth">
+              <path d="M32 60 Q60 78 88 60 L88 66 Q60 86 32 66 Z" fill="#111"/>
+              <path d="M36 62 L40 70 L44 63 L48 72 L52 65 L56 74 L60 66 L64 74 L68 65 L72 72 L76 63 L80 70 L84 62" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+            </g>
+            <!-- label -->
+            <text x="60" y="112" text-anchor="middle" font-family="sans-serif" font-weight="bold" font-size="30" fill="#111">AI</text>
+          </svg>
+        </div>
+        <h2>Try it</h2>
+        <p><code>pip install wrapture</code></p>
+        <p class="small">Alpha, ahead of 1.0.0. Pre-releases on PyPI.</p>
+        <p>
+          <a href="https://github.com/GrahamDumpleton/wrapture">github.com/GrahamDumpleton/wrapture</a><br>
+          <a href="https://wrapture.readthedocs.io">wrapture.readthedocs.io</a>
+        </p>
+        <p class="small">Start with <em>getting started</em>, or <em>coming from mock</em>.<br>
+          And read <em>how wrapture was built</em>.<br>
+          Feedback and use cases very welcome.</p>
+      </section>
+
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5/plugin/notes/notes.js"></script>
+  <script>
+    Reveal.initialize({
+      hash: true,
+      slideNumber: "c/t",
+      transition: "fade",
+      plugins: [RevealHighlight, RevealNotes],
+    });
+
+    // DVD-logo style "AI" badge that bounces around the last slide, with
+    // a colour change on every wall hit. Runs only while that slide is up.
+    (function () {
+      const section = document.getElementById("last");
+      const badge = section.querySelector(".bouncer");
+      const colours = ["#ff79c6", "#8be9fd", "#50fa7b", "#f1fa8c", "#ffb86c", "#bd93f9"];
+      let x = 40, y = 40, dx = 2.2, dy = 1.7, frame = null;
+
+      function step() {
+        const maxX = section.offsetWidth - badge.offsetWidth;
+        const maxY = section.offsetHeight - badge.offsetHeight;
+        x += dx; y += dy;
+        let hit = false;
+        if (x <= 0 || x >= maxX) { dx = -dx; x = Math.max(0, Math.min(x, maxX)); hit = true; }
+        if (y <= 0 || y >= maxY) { dy = -dy; y = Math.max(0, Math.min(y, maxY)); hit = true; }
+        if (hit) badge.style.color = colours[Math.floor(Math.random() * colours.length)];
+        badge.style.transform = `translate(${x}px, ${y}px)`;
+        frame = requestAnimationFrame(step);
+      }
+
+      Reveal.on("bounce", () => { if (frame === null) frame = requestAnimationFrame(step); });
+      Reveal.on("slidechanged", (event) => {
+        if (event.currentSlide !== section && frame !== null) { cancelAnimationFrame(frame); frame = null; }
+      });
+    })();
+  </script>
+</body>
+</html>
