@@ -767,6 +767,7 @@ class Binding:
         self._suspended_calls = 0
         self._removed = False
         self._removed_calls = 0
+        self._retired: Any = None
         self._apply_count = 0
         self._missed_calls = 0
         self._filtered_calls = 0
@@ -1040,6 +1041,34 @@ class Binding:
         """
 
         return self._removed_calls
+
+    def is_wrapping(self, obj: Any) -> bool:
+        """Whether `obj` is this binding's wrapper, or wraps around it.
+
+        `obj` is an object in hand, read from the binding's location
+        or held from a from-import or a registry, rather than the
+        location itself (`active` answers for the location). The
+        wrapper chain is walked, seeing through proxies and later
+        decorators, for the layer this binding installed: the plain
+        original, or another binding's wrapper, answers False. After
+        remove() the retired wrapper is still recognised, so a stale
+        copy that went quiet can be told from the original; `removed`
+        says which state it is in. A value or mapping binding installs
+        no wrapper and always answers False.
+        """
+
+        wrapper = self._wrapper if self._wrapper is not None else self._retired
+        if wrapper is None or self._mode in _HOLDING_MODES:
+            return False
+
+        # A method read through an instance or class is a bound wrapper
+        # whose parent is the installed layer; the chain walk starts
+        # from the parent.
+
+        if isinstance(obj, wrapt.BoundFunctionWrapper):
+            obj = obj._self_parent
+
+        return bool(is_wrapped_by(obj, wrapper))
 
     @property
     def active(self) -> bool:
@@ -1378,6 +1407,10 @@ class Binding:
 
         self._uninstall(missing_ok=missing_ok)
 
+        # The wrapper is kept as retired, so a stale copy can still be
+        # recognised by is_wrapping() after it has gone quiet.
+
+        self._retired = self._wrapper
         self._wrapper = None
         self._suspended = False
         self._removed = True

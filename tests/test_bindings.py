@@ -771,3 +771,58 @@ def test_reapply_clears_the_removed_state() -> None:
         assert len(tape.all) == 1
     finally:
         bnd.remove()
+
+
+# ---------------------------------------------------------------------------
+# is_wrapping
+# ---------------------------------------------------------------------------
+
+
+def test_is_wrapping_recognises_the_bindings_own_layer() -> None:
+    import functools
+
+    original = vars(Gateway)["charge"]
+    bnd = binding(Gateway, "charge")
+    other = binding(Gateway, "refund")
+
+    assert not bnd.is_wrapping(Gateway.charge)
+
+    with bnd, other:
+        # The wrapper at the location, a bound method read through an
+        # instance, and a decorator stacked on top later all contain
+        # the layer; the original and another binding's wrapper do not.
+
+        assert bnd.is_wrapping(vars(Gateway)["charge"])
+        assert bnd.is_wrapping(Gateway().charge)
+
+        def decorator(fn: Any) -> Any:
+            @functools.wraps(fn)
+            def inner(*args: Any, **kwargs: Any) -> Any:
+                return fn(*args, **kwargs)
+
+            return inner
+
+        assert bnd.is_wrapping(decorator(vars(Gateway)["charge"]))
+        assert not bnd.is_wrapping(original)
+        assert not bnd.is_wrapping(vars(Gateway)["refund"])
+        assert not other.is_wrapping(vars(Gateway)["charge"])
+
+
+def test_is_wrapping_still_recognises_a_retired_wrapper() -> None:
+    bnd = binding(Gateway, "charge").apply()
+    copy = vars(Gateway)["charge"]
+    bnd.remove()
+
+    # The copy is the dead wrapper, not the original: recognisable, and
+    # removed says it is inert.
+
+    assert bnd.is_wrapping(copy)
+    assert bnd.removed
+    assert not bnd.is_wrapping(vars(Gateway)["charge"])
+
+
+def test_a_value_binding_is_never_wrapping() -> None:
+    holder = binding(Ledger, attr="rate").overrides(2)
+
+    with holder:
+        assert not holder.is_wrapping(Ledger.rate)

@@ -107,6 +107,14 @@ access, so if a third party replaces the attribute wholesale, or removes
 the patch behind your back, the binding reports it. `repr(charge)` shows one
 of three states: `unapplied`, `active` or `displaced`.
 
+The same chain inspection is available for an object in hand rather
+than the location: `charge.is_wrapping(obj)` says whether `obj` is
+this binding's wrapper or wraps around it, seeing through later
+decorators, so code that holds a callable from a registry or a
+from-import can tell whether this binding is in it without knowing
+what kind of wrapper was installed. The plain original, or another
+binding's wrapper, answers False.
+
 ## Call behaviour: changing what a call does
 
 Behaviour for calls is configured through the `on_call` namespace. Every
