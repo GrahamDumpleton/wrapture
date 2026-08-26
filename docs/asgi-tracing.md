@@ -41,8 +41,10 @@ of glob strings naming request paths not to record
 `capture_args=` is the capture policy for the request's descriptive
 data, where `redact()` masks query parameters by name over and above
 the built-in sensitive set; `capture_result=` the policy for the
-status-line result. An explicit option wins over the bound binding's
-value where both exist. The [WSGI page](wsgi-tracing.md) discusses
+status-line result; `data=` a mapping of static tags every request
+event starts with (the request's own fields are written over it). An
+explicit option wins over the bound binding's value where both
+exist. The [WSGI page](wsgi-tracing.md) discusses
 the same options in more detail.
 
 Only HTTP is observed. Websocket and lifespan scopes pass through
@@ -225,7 +227,9 @@ def test_export_streams_and_succeeds():
 
 An observe entry takes `mode = "asgi"`, valid only with `name`,
 never `match`: a pattern must never bulk-install middleware. For an
-asgi entry, `redact` names query string parameters:
+asgi entry, `redact` names query string parameters, and a `data`
+table seeds every request event with static tags (the request's own
+fields are written over it, so it cannot respell them):
 
 ```toml
 [[observe]]

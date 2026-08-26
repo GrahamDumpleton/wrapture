@@ -49,7 +49,7 @@ class Collector(Sink):
 
 def test_a_block_becomes_one_event_with_its_details() -> None:
     with timeline() as tape:
-        with wrapture.block("render-invoice", customer=42):
+        with wrapture.block("render-invoice", data={"customer": 42}):
             pass
 
     event = tape.all[0]
@@ -79,7 +79,7 @@ def test_the_path_locates_the_enclosing_function() -> None:
 
 def test_annotate_merges_into_the_block() -> None:
     with timeline() as tape:
-        with wrapture.block("render", customer=1):
+        with wrapture.block("render", data={"customer": 1}):
             wrapture.annotate(pages=4)
 
     assert tape.all[0].data == {"customer": 1, "pages": 4}
@@ -167,7 +167,7 @@ def test_an_escaping_exception_is_recorded_and_propagates() -> None:
 
 
 def test_inert_when_nothing_listens() -> None:
-    with wrapture.block("nobody-listening", cost=1):
+    with wrapture.block("nobody-listening", data={"cost": 1}):
         assert not wrapture.current_event()
 
 
@@ -349,11 +349,11 @@ def test_strictness_counts_same_named_blocks_between_steps() -> None:
     # consecutive run.
 
     with timeline() as tape:
-        with wrapture.block("phase", n=1):
+        with wrapture.block("phase", data={"n": 1}):
             pass
-        with wrapture.block("phase", n=2):
+        with wrapture.block("phase", data={"n": 2}):
             pass
-        with wrapture.block("phase", n=3):
+        with wrapture.block("phase", data={"n": 3}):
             pass
 
     first, second, third = tape.blocks("phase")
@@ -552,7 +552,7 @@ def test_the_printer_prints_the_block_lines() -> None:
 
 def test_the_serialised_record_carries_the_block_fields() -> None:
     with timeline() as tape:
-        with wrapture.block("flush", rows=10):
+        with wrapture.block("flush", data={"rows": 10}):
             pass
 
     record = _event_record(tape.all[0])
@@ -563,3 +563,39 @@ def test_the_serialised_record_carries_the_block_fields() -> None:
     assert record["data"] == {"rows": 10}
     assert record["duration"] == tape.all[0].duration
     assert "trace" in record
+
+
+# ---------------------------------------------------------------------------
+# seed data
+# ---------------------------------------------------------------------------
+
+
+def test_seed_data_is_merged_before_annotate_inside_the_body() -> None:
+    with timeline() as tape:
+        with wrapture.block("render", data={"customer": 1, "tier": "gold"}):
+            wrapture.annotate(customer=2)
+
+    event = tape.all[0]
+
+    # A dynamic annotation overrides the declared seed, key by key.
+
+    assert event.data["customer"] == 2
+    assert event.data["tier"] == "gold"
+
+
+def test_seed_data_takes_scalars_and_flat_lists_only() -> None:
+    assert wrapture.block("ok", data={"tags": ["a", "b"], "n": 1.5}) is not None
+
+    with pytest.raises(TypeError, match="data\\['nested'\\]"):
+        wrapture.block("bad", data={"nested": {"a": 1}})
+
+    with pytest.raises(TypeError, match="mapping"):
+        wrapture.block("bad", data=["a"])  # type: ignore[arg-type]
+
+
+def test_block_takes_no_keyword_arguments_but_data() -> None:
+    # The keyword namespace is reserved for options; tags go under
+    # data=, the same spelling binding() and observe entries use.
+
+    with pytest.raises(TypeError):
+        wrapture.block("render", customer=42)  # type: ignore[call-arg]

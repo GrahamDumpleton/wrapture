@@ -770,3 +770,41 @@ def test_standalone_capture_result_none_omits_the_status_result() -> None:
     event = tape.all[0]
     assert event.result is MISSING
     assert event.finished
+
+
+# ---------------------------------------------------------------------------
+# seed data
+# ---------------------------------------------------------------------------
+
+
+def test_seed_data_starts_the_request_event() -> None:
+    app = binding(__name__, "application", mode="wsgi", data={"team": "shop"})
+
+    with app, timeline() as tape:
+        _serve(_environ())
+
+    assert tape.all[0].data["team"] == "shop"
+
+
+def test_the_requests_own_fields_win_over_a_seeded_reserved_key() -> None:
+    # A declaration cannot override what the middleware knows about
+    # the request: the seed goes in first and the request's fields
+    # are written over it.
+
+    app = binding(__name__, "application", mode="wsgi", data={"method": "FAKE"})
+
+    with app, timeline() as tape:
+        _serve(_environ())
+
+    assert tape.all[0].data["method"] == "GET"
+
+
+def test_the_standalone_middleware_takes_seed_data() -> None:
+    wrapped = wrapture.WSGIMiddleware(application, data={"team": "shop"})
+
+    with timeline() as tape:
+        body = wrapped(_environ(), lambda status, headers: None)
+        list(body)
+        body.close()
+
+    assert tape.all[0].data["team"] == "shop"

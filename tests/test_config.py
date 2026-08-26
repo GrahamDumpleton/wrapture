@@ -1101,3 +1101,62 @@ def test_find_config_precedence(
 
     monkeypatch.setenv("WRAPTURE_CONFIG", "/nowhere/trace.toml")
     assert find_config() == "/nowhere/trace.toml"
+
+
+# ---------------------------------------------------------------------------
+# observe entry data
+# ---------------------------------------------------------------------------
+
+
+def test_data_seeds_every_event_from_the_entrys_bindings() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(target=__name__, name="parse_widget", data={"team": "billing"})
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("text")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.data["team"] == "billing"
+
+
+def test_the_loader_accepts_a_data_table(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[observe]]
+            target = "{__name__}"
+            name = "parse_widget"
+            data = {{ team = "billing", tier = 1, tags = ["a", "b"] }}
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    assert config.observe[0].data == {"team": "billing", "tier": 1, "tags": ["a", "b"]}
+
+
+def test_a_nested_data_table_is_a_config_error(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[observe]]
+            target = "{__name__}"
+            name = "parse_widget"
+            data = {{ owner = {{ team = "billing" }} }}
+            """
+        )
+    )
+
+    with pytest.raises(ConfigError, match="data\\['owner'\\]"):
+        load_config(source)

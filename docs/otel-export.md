@@ -157,7 +157,11 @@ name, the same as the SDK's own HTTP instrumentations. A request that
 matches no route keeps its path-based name and has no `http.route`.
 Every other key on a request event, `endpoint` or anything else an
 instrumentation annotates, is exported as ordinary
-`wrapture.data.<key>`. The mapping is scoped to `"request"` events;
+`wrapture.data.<key>`. Static tags declared up front, `data=` on a
+binding or the middleware, or an observe entry's `data` table, are
+merged in before the middleware writes the request's own fields, so
+a declaration can add ordinary keys but never override a reserved
+one. The mapping is scoped to `"request"` events;
 data on `"call"` and `"block"` events is never interpreted.
 
 ### One trace id everywhere

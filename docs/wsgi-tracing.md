@@ -41,9 +41,11 @@ string or list of glob strings naming request paths not to record
 `PATH_INFO`), the form that keeps health checks and static assets
 out of the tape. `capture_args=` is the capture policy for the
 request's descriptive data, where `redact("voucher")` masks query
-parameters by name over and above the built-in sensitive set, and
-`capture_result=` the policy for the status-line result. An explicit
-option wins over the bound binding's value where both exist.
+parameters by name over and above the built-in sensitive set,
+`capture_result=` the policy for the status-line result, and `data=`
+a mapping of static tags every request event starts with (the
+request's own fields are written over it). An explicit option wins
+over the bound binding's value where both exist.
 
 ## What a request event contains
 
@@ -214,7 +216,9 @@ def test_export_streams_and_succeeds():
 
 An observe entry takes `mode = "wsgi"`, valid only with `name`, never
 `match`: a pattern must never bulk-install middleware. For a wsgi
-entry, `redact` names query string parameters:
+entry, `redact` names query string parameters, and a `data` table
+seeds every request event with static tags (the request's own fields
+are written over it, so it cannot respell them):
 
 ```toml
 [[observe]]

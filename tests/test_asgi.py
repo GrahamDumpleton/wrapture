@@ -795,3 +795,20 @@ def test_standalone_capture_result_none_omits_the_status_result() -> None:
     event = tape.all[0]
     assert event.result is MISSING
     assert event.finished
+
+
+# ---------------------------------------------------------------------------
+# seed data
+# ---------------------------------------------------------------------------
+
+
+def test_seed_data_starts_the_request_event_and_never_its_own_fields() -> None:
+    wrapped = ASGIMiddleware(application, data={"team": "shop", "method": "FAKE"})
+    server = _Server()
+
+    with timeline() as tape:
+        asyncio.run(wrapped(_scope(), server.receive, server.send))
+
+    request = tape.all[0]
+    assert request.data["team"] == "shop"
+    assert request.data["method"] == "GET"

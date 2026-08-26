@@ -214,7 +214,7 @@ outside) and log capture (messages the code emitted), is a
 declaration the code makes itself: `wrapture.block(name)` is a
 context manager recording the enclosed stretch of code as one event
 of kind `"block"`, with the body's duration, an escaping exception,
-and keyword arguments plus `annotate()` filling its data. Everything
+and `data=` plus `annotate()` filling its data. Everything
 recorded inside nests under it, so blocks name the phases of an
 operation that no callable boundary covers, assertable in tests with
 `tape.blocks(name)` and scoped views from `tape.within(event)`, and
