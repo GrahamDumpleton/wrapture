@@ -765,6 +765,8 @@ class Binding:
         self._wrapper: Any = None
         self._suspended = False
         self._suspended_calls = 0
+        self._removed = False
+        self._removed_calls = 0
         self._apply_count = 0
         self._missed_calls = 0
         self._filtered_calls = 0
@@ -1019,6 +1021,27 @@ class Binding:
         return self._suspended
 
     @property
+    def removed(self) -> bool:
+        """Whether the last lifecycle step was a remove().
+
+        While set, any stale copy of the wrapper that remove() could
+        not reach passes straight through without recording; apply()
+        clears it. False for a binding never applied.
+        """
+
+        return self._removed
+
+    @property
+    def removed_calls(self) -> int:
+        """Calls that reached a stale copy of the wrapper after remove().
+
+        Non-zero means code took a reference to the wrapped callable
+        while the binding was applied and kept calling it afterwards.
+        """
+
+        return self._removed_calls
+
+    @property
     def active(self) -> bool:
         """Whether the wrapper is still installed on the target.
 
@@ -1065,6 +1088,12 @@ class Binding:
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
+
+        # A fresh application owns a fresh wrapper; a stale copy from
+        # an earlier one is reached through this binding again, which
+        # is accepted (it records against the binding now applied).
+
+        self._removed = False
 
         # A value or mapping binding has no wrapper: it notes what the
         # slot or the mapping holds and writes what it is configured to
@@ -1201,6 +1230,15 @@ class Binding:
     def _enabled(self) -> bool:
         """Read by wrapt on every call; False bypasses the wrapper."""
 
+        # A wrapper outlives remove() wherever a reference to it was
+        # taken while the binding was applied (a from-import inside
+        # the window); such a copy calls through here and must stay
+        # silent, counted separately from suspension.
+
+        if self._removed:
+            self._removed_calls += 1
+            return False
+
         if self._suspended:
             self._suspended_calls += 1
             return False
@@ -1317,7 +1355,13 @@ class Binding:
 
     def remove(self, *, missing_ok: bool = True) -> Self:
         """Remove the wrapper. Idempotent. The binding can be applied
-        again afterwards, starting unsuspended."""
+        again afterwards, starting unsuspended.
+
+        The location gets its original back, and the wrapper itself is
+        deactivated, so a reference to it taken while the binding was
+        applied keeps working but records nothing; `removed_calls`
+        counts such calls.
+        """
 
         if self._mode in _HOLDING_MODES:
             if self._value_applied:
@@ -1336,6 +1380,7 @@ class Binding:
 
         self._wrapper = None
         self._suspended = False
+        self._removed = True
         _applied_bindings.discard(self)
         return self
 

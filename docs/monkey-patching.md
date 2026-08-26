@@ -72,7 +72,11 @@ charge.remove()
 `apply()` also returns the binding, so it can be chained onto creation
 where the compactness is wanted.
 
-`remove()` is idempotent, and a removed binding can be applied again. For a
+`remove()` is idempotent, and a removed binding can be applied again.
+Removal also deactivates the wrapper itself, so a reference to the
+patched callable taken while the binding was applied (a `from module
+import f` inside the window) keeps working but records nothing
+afterwards; the binding's `removed_calls` counts such calls. For a
 scoped patch, use the binding as a context manager instead:
 
 ```python

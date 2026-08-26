@@ -367,6 +367,7 @@ def test_sensitive_query_parameters_are_redacted_by_default() -> None:
                     QUERY_STRING=(
                         "limit=5&access_token=sekrit&ApiKey=k1"
                         "&PHPSESSID=abc&session_id=xyz"
+                        "&X-Amz-Signature=s1&sig=s2"
                     )
                 ),
                 server.start_response,
@@ -376,6 +377,7 @@ def test_sensitive_query_parameters_are_redacted_by_default() -> None:
     assert tape.all[0].data["query"] == (
         "limit=5&access_token=<redacted>&ApiKey=<redacted>"
         "&PHPSESSID=<redacted>&session_id=<redacted>"
+        "&X-Amz-Signature=<redacted>&sig=<redacted>"
     )
 
 

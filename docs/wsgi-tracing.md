@@ -100,9 +100,10 @@ Query strings carry secrets, so redaction is on by default and cannot
 be switched off: the values of `password`, `passwd`, `secret`,
 `token`, `access_token`, `refresh_token`, `id_token`, `api_key`,
 `apikey`, `client_secret`, `session`, `session_id`, `sessionid`,
-`sessid`, `jsessionid` and `phpsessid`, matched case-insensitively,
-are replaced with `<redacted>` before the query is recorded
-anywhere.
+`sessid`, `jsessionid`, `phpsessid`, `sig`, `signature`,
+`X-Amz-Signature` and `X-Goog-Signature`, matched
+case-insensitively, are replaced with `<redacted>` before the query
+is recorded anywhere.
 
 Beyond the built-in set, the query passes through the binding's
 capture policy parameter by parameter, so `redact()` names query

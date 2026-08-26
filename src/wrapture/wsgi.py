@@ -76,6 +76,10 @@ _SENSITIVE_QUERY = frozenset(
         "sessid",
         "jsessionid",
         "phpsessid",
+        "sig",
+        "signature",
+        "x-amz-signature",
+        "x-goog-signature",
     }
 )
 

@@ -1720,4 +1720,7 @@ def no_leaked_patch():
 
 The check reads the raw class attribute with `vars()` and compares types
 with `type()` rather than `isinstance()`, because a wrapt wrapper
-masquerades as the object it wraps.
+masquerades as the object it wraps. A different kind of leftover, code
+that took a reference to the wrapped callable during a test and calls
+it afterwards, records nothing (removal deactivates the wrapper) and
+shows as a non-zero `removed_calls` on the binding.

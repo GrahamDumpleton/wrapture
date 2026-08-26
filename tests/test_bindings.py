@@ -711,3 +711,63 @@ def test_seed_data_is_copied_and_validated_at_declaration() -> None:
 
     with pytest.raises(TypeError, match="data\\['owner'\\]"):
         binding(__name__, "_tagged", data={"owner": object()})
+
+
+# ---------------------------------------------------------------------------
+# removal deactivates the wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_a_stale_copy_of_the_wrapper_is_silent_after_remove() -> None:
+    # A reference taken while the binding is applied (a from-import
+    # inside the window) is the wrapper itself; remove() restores the
+    # location but cannot reach the copy, so the copy must go quiet.
+
+    original = _tagged
+    bnd = binding(__name__, "_tagged").apply()
+    try:
+        copy = _tagged
+        assert copy is not original
+    finally:
+        bnd.remove()
+
+    with wrapture.timeline() as tape:
+        assert copy(2) == 4
+        assert copy(3) == 6
+
+    assert tape.all == []
+    assert bnd.removed
+    assert bnd.removed_calls == 2
+    assert bnd.suspended_calls == 0
+
+
+def test_resume_cannot_revive_a_removed_wrapper() -> None:
+    bnd = binding(__name__, "_tagged").apply()
+    copy = _tagged
+    bnd.remove()
+    bnd.resume()
+
+    with wrapture.timeline() as tape:
+        copy(1)
+
+    assert tape.all == []
+    assert bnd.removed_calls == 1
+
+
+def test_reapply_clears_the_removed_state() -> None:
+    bnd = binding(__name__, "_tagged")
+
+    assert not bnd.removed
+
+    bnd.apply()
+    bnd.remove()
+    assert bnd.removed
+
+    bnd.apply()
+    try:
+        assert not bnd.removed
+        with wrapture.timeline() as tape:
+            _tagged(1)
+        assert len(tape.all) == 1
+    finally:
+        bnd.remove()

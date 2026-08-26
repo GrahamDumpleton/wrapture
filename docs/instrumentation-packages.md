@@ -221,6 +221,17 @@ order on `revert()`. A hook that raises has the callbacks it
 registered before raising run at once, so its partial work does not
 linger.
 
+Removing a binding restores the patched location and deactivates the
+wrapper, so a copy of it that the library or an application took by
+from-import while the instrumentation was applied goes quiet rather
+than recording on; the binding's `removed_calls` says whether that
+happened. A library's own from-imports create such copies too, when
+a parent or sibling module pulls a function out of the module that
+defines it, so an instrumentation should be mindful of where a
+target is re-exported and choose the trigger accordingly: patching
+once the copying is complete, which may mean triggering on the
+package root rather than the defining module.
+
 ## Shaped settings
 
 The outer-type check on settings is deliberately shallow: it catches
