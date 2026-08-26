@@ -113,7 +113,11 @@ this binding's wrapper or wraps around it, seeing through later
 decorators, so code that holds a callable from a registry or a
 from-import can tell whether this binding is in it without knowing
 what kind of wrapper was installed. The plain original, or another
-binding's wrapper, answers False.
+binding's wrapper, answers False. The inverse, for code that holds
+the object but not the binding, is `wrapture.binding_of(obj)`, and
+`wrapture.find_binding(Gateway, "charge")` recovers an applied
+binding from its location alone; both are described under
+[finding a binding applied elsewhere](unit-testing.md#finding-a-binding-applied-elsewhere).
 
 ## Call behaviour: changing what a call does
 

@@ -1656,6 +1656,96 @@ def test_the_instrumentation_applies_and_removes():
 covers the rest of the author's side: the entry point, the hook
 decorator, the import posture, and the bindings recipe for removal.
 
+## Finding a binding applied elsewhere
+
+Everything above asserts through a binding the test itself created:
+`charge.events`, `tape.assert_order(charge, record)`. An
+instrumentation creates its bindings inside its hook methods, a
+config file applies them at startup, application code may patch
+itself, and a function decorated with `@wrapture.observed` carries
+its recorder inside the wrapper. None of them hands the test a
+binding, yet the events they record land on any `timeline()` that is
+open. `find_binding()` recovers the handle from the location the
+test knows:
+
+```python
+def test_failed_charge_is_not_recorded_in_the_ledger():
+    charge = wrapture.find_binding(Gateway, "charge")
+    record = wrapture.find_binding(label="ledger.record")
+
+    with wrapture.timeline():
+        with pytest.raises(TimeoutError):
+            place_order("widget")
+
+        charge.events.raising(TimeoutError).assert_once()
+        record.events.assert_never()
+```
+
+The location is spelled exactly as `binding()` takes it: a module,
+class or instance plus attribute steps, or a `"module:path"` string,
+with `attr=` or `item=` for a value binding on a slot. It is matched
+against each binding's `path`, which is derived from the target and
+never affected by a label, so `find_binding(Gateway, "charge")` finds
+the binding however its creator spelled the location and whatever
+they named it. Nothing is imported or resolved to answer, so a lookup
+by string is safe before the module in question has loaded (it just
+finds nothing). `label=` instead matches the name a binding shows in
+output: its assigned label, or its path when it has none, the same
+string a failing assertion's message reports, so
+`find_binding(label="shop.gateway:Gateway.charge")` finds an
+unlabelled binding. Given together, both have to match. Labels are
+matched exactly, not as patterns: a label is an identity.
+
+Only bindings currently applied are found. A binding whose scope has
+ended is gone from the results rather than returned stale, so a
+lookup after the instrumentation was removed is `NoBindingError`,
+not a binding whose `events` then complains for a less obvious
+reason. Suspended bindings are included. `observed()` proxies take
+part too, for as long as something holds them: an `@observed`
+function is found by its label or by its `module:qualname` path.
+
+Two bindings on one target are a supported arrangement (a test's own
+`raises` layered over an instrumentation's recorder, say), and then
+`find_binding()` refuses to guess: it raises `AmbiguousBindingError`
+naming the candidates, and either a label singles one out or
+`find_bindings()` returns all of them, in order of application with
+the outermost layer last. `find_bindings()` is the plural form
+throughout: the same query, a list that may be empty, never an error
+for no match.
+
+What comes back is the real binding, not a read-only view, so the
+whole surface applies: `events`, `assert_order()` steps,
+`is_wrapping()`, `suspend()` and `resume()`, and the behaviour
+namespaces. That last point cuts both ways. Configuring
+`find_binding(...).on_call.raises(...)` changes what the
+instrumentation's own binding does for as long as it stays applied,
+which is the power holding the reference always conferred; a test
+that wants behaviour of its own should stack a binding through
+`timeline(...)` instead, which is removed at exit and leaves the
+found binding as it was.
+
+The inverse question, "whose wrapper is this object", is
+`binding_of(obj)`: the binding whose wrapper `obj` is, or the
+outermost when several are stacked, seeing through later decorators
+and bound-method views the way `is_wrapping()` does, or `None` when
+nothing in the chain is wrapture's. It answers for a from-import
+copy, a callable pulled from a registry, a WSGI or ASGI application
+and an `@observed` function (whose recorder is the proxy itself), and
+it still recognises the retired wrapper of a binding since removed,
+with `removed` saying so. An attribute binding's descriptor is
+recognised when read off the class dict, `vars(Owner)["name"]`, not
+through the value it returns. `bindings_of(obj)` lists every layer,
+outermost first.
+
+When no binding is obtainable at all, or the strings are what the
+test has, the tape answers by them directly: `tape.where(path=...)`
+and `tape.where(label=...)` return an `EventLog` selected by the
+event's path or its display label under the same rules, so the
+filter and assertion surface applies, and the result is a step for
+`assert_order()` like any other log. `find_binding()` is the usual
+route, since the binding is worth more than its events; `where()` is
+the fallback.
+
 ## The pytest plugin
 
 wrapture ships an opt-in pytest plugin. It is deliberately not

@@ -232,6 +232,15 @@ target is re-exported and choose the trigger accordingly: patching
 once the copying is complete, which may mean triggering on the
 package root rather than the defining module.
 
+The bindings a hook applies are reachable by a test of the
+application running under the instrumentation, through
+`wrapture.find_binding()` by location or label (see
+[finding a binding applied elsewhere](unit-testing.md#finding-a-binding-applied-elsewhere)).
+A label worth assigning is one a test would want to name, since the
+alternative is the derived `module:qualname` path; and a test that
+finds the binding gets the real one, so anything it reconfigures on
+it stays reconfigured until the instrumentation removes it.
+
 ## Shaped settings
 
 The outer-type check on settings is deliberately shallow: it catches

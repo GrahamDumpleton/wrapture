@@ -42,6 +42,16 @@ class NeverAppliedError(RuntimeError):
     could possibly have been recorded for it."""
 
 
+class NoBindingError(LookupError):
+    """find_binding() matched nothing: no applied binding, and no
+    observed() proxy, has the location or label asked for."""
+
+
+class AmbiguousBindingError(LookupError):
+    """find_binding() matched more than one binding. Add a label to
+    the query, or use find_bindings() for all of them."""
+
+
 class NotImplementedYetError(NotImplementedError):
     """A feature whose API shape is settled is not implemented yet."""
 

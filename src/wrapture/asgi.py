@@ -267,7 +267,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         else:
             path = _describe(application)
 
-        self._self_binding = binding
+        self._self_wrapture_binding = binding
         self._self_path = path
         self._self_label = label
 
@@ -283,7 +283,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         self._self_data = seed_data(data) or (binding._data if binding else {})
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> Any:
-        binding = self._self_binding
+        binding = self._self_wrapture_binding
         application = self.__wrapped__
 
         # Only HTTP requests are observed. Everything else, websocket
