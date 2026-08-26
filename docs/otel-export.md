@@ -91,7 +91,12 @@ registration stays at `"none"` capture while traces raise it to
 One event becomes one span. `"request"` events become SERVER spans
 named access-log style (`GET /quote/widget`), carrying the method,
 path and status code under their semantic-convention attribute
-names; `"call"` events become INTERNAL spans named by the binding's
+names; a request annotated with its matched `route` (the pattern,
+`/quote/<item>`, which framework instrumentation adds once routing
+has run) is instead named by that pattern, `GET /quote/<item>`, and
+carries it as `http.route`, so a backend groups by endpoint rather
+than seeing every URL as a distinct operation (the request data-key
+contract below says which keys get this treatment); `"call"` events become INTERNAL spans named by the binding's
 assigned label, or by its `module:qualname` path when unnamed, so a
 span name with a colon in it always pins the exact function; `"block"`
 events become INTERNAL spans named by the block, which
@@ -120,6 +125,40 @@ deliberately: a gate on everything would starve the metrics
 histograms, while sampling inside drops only the span export,
 keeping the always-on cheap signal complete beside the sampled
 drill-down.
+
+### The request data-key contract
+
+A `"request"` event's descriptive fields live in `event.data`, and
+the sinks read a fixed set of keys there specially, mapping each
+onto its semantic-convention attribute instead of flattening it
+onto a `wrapture.data.*` name. Those keys are reserved on request
+events: annotating one for an unrelated purpose produces misleading
+telemetry, and annotating one deliberately is the supported way for
+request-recording instrumentation of your own (a framework the
+pre-built packages do not cover, an in-house one) to opt into the
+same treatment without touching any OTel API. The middleware
+supplies the first three; the rest are added by instrumentation
+inside the request with `annotate()`.
+
+| key | set by | exported as |
+|-----|--------|-------------|
+| `method` | middleware | `http.request.method`; leads the span name; a metrics dimension |
+| `path` | middleware | `url.path`; names the span unless a route is annotated |
+| `query` | middleware | `url.query`, after the capture policy's redaction |
+| `route` | instrumentation, once routing matches | `http.route`; renames the span to `METHOD route` at close; a metrics dimension |
+| `bytes`, `app_duration` | middleware, as the body streams | `wrapture.data.bytes`, `wrapture.data.app_duration`, swept at close |
+
+The result of a request event is its status line, exported as
+`http.response.status_code`, with a 5xx setting the span's error
+status. Because routing happens after the request event opens, the
+route-based name is applied when the span closes; a span processor
+or head sampler that reads the name at start sees the path-based
+name, the same as the SDK's own HTTP instrumentations. A request that
+matches no route keeps its path-based name and has no `http.route`.
+Every other key on a request event, `endpoint` or anything else an
+instrumentation annotates, is exported as ordinary
+`wrapture.data.<key>`. The mapping is scoped to `"request"` events;
+data on `"call"` and `"block"` events is never interpreted.
 
 ### One trace id everywhere
 
@@ -154,8 +193,10 @@ sampled" means.
 
 The metrics signal aggregates the same events instead of exporting
 them individually: request durations into the semantic-convention
-`http.server.request.duration` histogram attributed by method and
-status code, call durations into a per-path `wrapture.call.duration`
+`http.server.request.duration` histogram attributed by method,
+status code and, for a request annotated with its matched `route`,
+`http.route`, so per-endpoint latency reads straight off the
+histogram; call durations into a per-path `wrapture.call.duration`
 histogram whose error series split out by exception type (an
 escaped exception's, or the first noted with `note_exception()`, so
 the error rate counts failures the code handled itself), and a
@@ -163,7 +204,8 @@ the error rate counts failures the code handled itself), and a
 bound path is safe as a metric attribute precisely because the
 config chose the bindings: the set of values is closed, where the
 raw request URL is not, so requests are attributed by method and
-status only. The design is the `Aggregate` collector's (bounded
+status, and by the route pattern, closed the same way, never the
+URL. The design is the `Aggregate` collector's (bounded
 memory, `"none"` capture on both axes, so nothing is ever retained
 or even captured) with the aggregation handed to the OTel SDK.
 `[otel.metrics]` takes `export_interval`, seconds between metric

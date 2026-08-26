@@ -20,8 +20,9 @@ class OpenTelemetryMetricsSink(wrapture.Sink):
     into a per-path histogram, and a counter of operations observed
     beginning. The set of bound paths is closed, chosen by the config,
     which is what makes the path a safe metric attribute; the raw
-    request URL is unbounded, so requests are attributed by method and
-    status only.
+    request URL is unbounded, so requests are attributed by method,
+    status and, when the request was annotated with one, the matched
+    route pattern, which is closed the same way.
 
     Declaring "none" capture on both axes keeps the sink near-free: a
     metrics-only deployment records timings and outcomes without ever
@@ -135,6 +136,9 @@ class OpenTelemetryMetricsSink(wrapture.Sink):
             method = event.data.get("method")
             if method:
                 attributes["http.request.method"] = str(method)
+            route = event.data.get("route")
+            if route:
+                attributes["http.route"] = str(route)
             status = _status_code(event.result)
             if status is not None:
                 attributes["http.response.status_code"] = status
