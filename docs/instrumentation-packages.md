@@ -28,7 +28,6 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 
     target = "flask"
     supports = ">=2.0,<4"
-    requires = "werkzeug"
     removable = True
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
@@ -61,7 +60,19 @@ Reading down:
 - `requires` names other targets that must have an enabled
   instrumentation in the same config: a single name, or a sequence
   of them. Requirements are not pulled in automatically; a missing
-  one is a loud `ConfigError` naming the target.
+  one is a loud `ConfigError` naming the target. It expresses a
+  functional dependency between instrumentations, a class that is
+  broken or incoherent unless another is also active, not the target
+  package's own dependency graph: Flask depends on Werkzeug and
+  Jinja2, but a Flask instrumentation is complete without either of
+  theirs being enabled, so it must not require them. The example
+  above sets nothing, and a well-shaped public class never needs to.
+  The conventions make each one complete alone: every framework
+  carries its own middleware, an event is fine as a root, and an
+  annotation is a no-op when nothing is recording. The field exists
+  for private instrumentation that trades those conventions away on
+  purpose, one in-house target leaning on another's events or
+  plumbing.
 - `removable` is the claim that the class can undo itself. It defaults
   to false, so say it; it governs `report()` and the warning
   `revert()` gives, and cleanup callbacks run either way. A hook that
@@ -362,7 +373,6 @@ flask  (wrapture-instrumentation-flask 1.2.0)
   Request, view and blueprint tracing for Flask applications
   target: flask 3.1.0, supported (>=2.0,<4)
   modules: flask.app, flask.blueprints
-  requires: werkzeug
   removable: yes
   settings:
     capture_headers = false   record request headers
