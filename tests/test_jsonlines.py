@@ -490,3 +490,21 @@ def test_rotate_reopens_on_its_interval(
     second = read_lines(tmp_path / "trace-1700000001.jsonl")
     assert [line["arguments"]["amount"] for line in first] == [1]
     assert [line["arguments"]["amount"] for line in second] == [2]
+
+
+def test_type_level_drops_exception_messages(tmp_path: Path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    sink = JSONLines(trace, exceptions="type")
+    refund = binding(Gateway, "refund")
+
+    with refund, listening(sink):
+        with pytest.raises(TimeoutError):
+            Gateway().refund(100)
+
+    sink.close()
+    (line,) = read_lines(trace)
+
+    assert line["exception"] == {"type": "TimeoutError"}
+
+    with pytest.raises(ValueError, match="exceptions must be one of"):
+        JSONLines(trace, exceptions="short")

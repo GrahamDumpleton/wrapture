@@ -22,6 +22,19 @@ _PREFIX = "wrapture"
 _SEMCONV_DATA = frozenset({"method", "path", "query", "route"})
 
 
+def _exception_attributes(exception: BaseException, level: str) -> dict[str, Any]:
+    # The semconv exception attributes for a reduced `exceptions=`
+    # level: the SDK's own record_exception() always formats the
+    # stacktrace, so a sink at "message" or "type" builds the event
+    # itself from this.
+
+    attributes: dict[str, Any] = {"exception.type": type(exception).__name__}
+    if level == "message":
+        attributes["exception.message"] = str(exception)
+
+    return attributes
+
+
 def _status_code(result: Any) -> int | None:
     # A WSGI status line is "200 OK"; keep just the number.
 

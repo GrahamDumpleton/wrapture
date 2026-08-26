@@ -18,7 +18,8 @@ from opentelemetry.trace import (
 import wrapture
 from wrapture import Event
 
-from .common import _PREFIX
+from ..sinks import _exception_level
+from .common import _PREFIX, _exception_attributes
 from .spans import OpenTelemetrySink
 
 
@@ -64,9 +65,11 @@ class OpenTelemetryLogsSink(wrapture.Sink):
         *,
         logger_name: str = "wrapture",
         spans: OpenTelemetrySink | None = None,
+        exceptions: str = "full",
     ) -> None:
         self._logger = get_logger(logger_name)
         self._spans = spans
+        self._exceptions = _exception_level(exceptions)
 
         # The same clock pinning the span sink does: events are
         # stamped on perf_counter, OTel wants epoch nanoseconds.
@@ -99,6 +102,14 @@ class OpenTelemetryLogsSink(wrapture.Sink):
         if event.started is not None:
             timestamp = self._epoch_offset_ns + int(event.started * 1e9)
 
+        # At "full" the SDK derives the exception attributes, stacktrace
+        # included; a reduced level supplies only what it allows.
+
+        exception = event.exception
+        if exception is not None and self._exceptions != "full":
+            attributes.update(_exception_attributes(exception, self._exceptions))
+            exception = None
+
         self._logger.emit(
             LogRecord(
                 timestamp=timestamp,
@@ -107,7 +118,7 @@ class OpenTelemetryLogsSink(wrapture.Sink):
                 severity_number=_severity_number(int(event.data.get("levelno", 0))),
                 body=event.data.get("message"),
                 attributes=attributes,
-                exception=event.exception,
+                exception=exception,
             )
         )
 

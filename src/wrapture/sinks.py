@@ -851,7 +851,27 @@ def _jsonable(value: Any, depth: int = 8) -> Any:
     return str(summarized)
 
 
-def _event_record(event: Event) -> dict[str, Any]:
+# How much of an exception an exporting sink lets out of the process:
+# "full" is everything the sink can carry, "message" drops the
+# stacktrace, "type" keeps only the exception's type name. Messages
+# routinely embed sensitive values, so the reducing levels exist for
+# deployments that decide the type is all a backend should see.
+
+_EXCEPTION_LEVELS = ("full", "message", "type")
+
+
+def _exception_level(value: str) -> str:
+    """Validate an `exceptions=` option, returning it."""
+
+    if value not in _EXCEPTION_LEVELS:
+        raise ValueError(
+            f"exceptions must be one of {list(_EXCEPTION_LEVELS)}, got {value!r}"
+        )
+
+    return value
+
+
+def _event_record(event: Event, *, exceptions: str = "full") -> dict[str, Any]:
     # The stable serialised form of one event, shared by JSONLines and
     # the exporters. Identity, position and thread are always present;
     # parent_id is null for a root. Everything else appears only when
@@ -897,11 +917,17 @@ def _event_record(event: Event) -> dict[str, Any]:
 
     if event.result is not MISSING:
         record["result"] = _jsonable(event.result)
+    # The file never carries a stacktrace, so "full" and "message" are
+    # the same here; "type" drops the message.
+
+    def describe(exception: BaseException) -> dict[str, Any]:
+        described: dict[str, Any] = {"type": type(exception).__name__}
+        if exceptions != "type":
+            described["message"] = str(exception)
+        return described
+
     if event.exception is not None:
-        record["exception"] = {
-            "type": type(event.exception).__name__,
-            "message": str(event.exception),
-        }
+        record["exception"] = describe(event.exception)
 
     # Noted exceptions carry their moment as an offset from the event's
     # start: the line already has `started`, and a raw perf_counter
@@ -911,8 +937,7 @@ def _event_record(event: Event) -> dict[str, Any]:
         started = event.started
         record["caught"] = [
             {
-                "type": type(caught.exception).__name__,
-                "message": str(caught.exception),
+                **describe(caught.exception),
                 "offset": (caught.at - started) if started is not None else None,
             }
             for caught in event.caught
@@ -1003,9 +1028,11 @@ class JSONLines(Sink):
         limit: int = 1000,
         rotate: str | int | float | None = None,
         align: bool = False,
+        exceptions: str = "full",
     ) -> None:
         self._path = OutputPath(path, name=name)
         self._interval, self._align = _rotation(self, self._path, rotate, align)
+        self._exceptions = _exception_level(exceptions)
         self._schedule: Schedule | None = None
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=limit)
@@ -1076,7 +1103,9 @@ class JSONLines(Sink):
                     )
 
         line = json.dumps(
-            _event_record(event), ensure_ascii=False, separators=(",", ":")
+            _event_record(event, exceptions=self._exceptions),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
 
         try:

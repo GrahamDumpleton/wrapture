@@ -35,6 +35,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import wrapture
+from wrapture.sinks import _exception_level
 
 from .environment import _apply_environment
 from .logs import OpenTelemetryLogsSink
@@ -57,6 +58,7 @@ def sink(
     metrics: dict[str, Any] | None = None,
     logs: dict[str, Any] | None = None,
     environment: dict[str, Any] | None = None,
+    exceptions: str = "full",
 ) -> wrapture.Sink:
     """Build the OTel export sink: one registration for every signal.
 
@@ -74,7 +76,16 @@ def sink(
     real environment always wins. Named options like
     `export_interval` are passed to constructors explicitly and beat
     both. `service_name` names the service for every enabled signal.
+
+    `exceptions` says how much of an exception the traces and logs
+    signals export: "full" (type, message and stacktrace, the
+    default), "message" (no stacktrace) or "type" (the type name
+    alone), for deployments where exception messages may carry
+    values a backend should not see. One setting for both signals,
+    so it cannot be set on one and forgotten on the other.
     """
+
+    exceptions = _exception_level(exceptions)
 
     if isinstance(signals, str):
         signals = [signals]
@@ -100,7 +111,7 @@ def sink(
 
         _configure_provider(service_name)
 
-        spans = OpenTelemetrySink(**options)
+        spans = OpenTelemetrySink(exceptions=exceptions, **options)
         span_sink: wrapture.Sink = spans
         if sample is not None:
             span_sink = wrapture.Sample(sample, span_sink)
@@ -127,7 +138,9 @@ def sink(
         options = dict(logs or {})
 
         _configure_logger_provider(service_name)
-        sinks.append(OpenTelemetryLogsSink(spans=spans, **options))
+        sinks.append(
+            OpenTelemetryLogsSink(spans=spans, exceptions=exceptions, **options)
+        )
 
     # A lone signal is returned bare; several fan out. Either way the
     # capture declarations negotiate through: metrics and logs alone

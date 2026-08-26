@@ -1020,3 +1020,103 @@ def test_metrics_attribute_requests_by_route(monkeypatch: pytest.MonkeyPatch) ->
     # unrouted request has no route attribute at all, never a blank.
 
     assert by_route == {"/quote/<item>": 2, None: 1}
+
+
+# ---------------------------------------------------------------------------
+# the exceptions= level
+# ---------------------------------------------------------------------------
+
+
+def _apply_otel(tmp_path: Path, body: str) -> Any:
+    source = tmp_path / "wrapture.toml"
+    source.write_text(body)
+    return load_config(source).apply()
+
+
+def _exception_event(span: Any) -> Any:
+    return next(event for event in span.events if event.name == "exception")
+
+
+def test_a_full_exception_carries_message_and_stacktrace(
+    tmp_path: Path, exported: Any
+) -> None:
+    dispatch = wrapture.binding(_Shop, "dispatch")
+
+    applied = _apply_otel(tmp_path, '[otel]\nsignals = ["traces"]\n')
+    try:
+        with dispatch, _noting_handler(dispatch):
+            _Shop().dispatch("missing")
+    finally:
+        applied.revert()
+
+    event = _exception_event(_span_named(exported, "test_otel:_Shop.dispatch"))
+
+    assert event.attributes["exception.type"] == "KeyError"
+    assert "missing" in event.attributes["exception.message"]
+    assert "Traceback" in event.attributes["exception.stacktrace"]
+
+
+def test_message_level_drops_the_stacktrace(tmp_path: Path, exported: Any) -> None:
+    dispatch = wrapture.binding(_Shop, "dispatch")
+
+    applied = _apply_otel(
+        tmp_path, '[otel]\nsignals = ["traces"]\nexceptions = "message"\n'
+    )
+    try:
+        with dispatch, _noting_handler(dispatch):
+            _Shop().dispatch("missing")
+    finally:
+        applied.revert()
+
+    event = _exception_event(_span_named(exported, "test_otel:_Shop.dispatch"))
+
+    assert event.attributes["exception.type"] == "KeyError"
+    assert "missing" in event.attributes["exception.message"]
+    assert "exception.stacktrace" not in event.attributes
+
+
+def test_type_level_keeps_only_the_type_on_spans_and_logs(
+    tmp_path: Path, exported: Any, exported_logs: Any
+) -> None:
+    import logging
+
+    from opentelemetry.trace import StatusCode
+
+    applied = _apply_otel(
+        tmp_path,
+        '[otel]\nsignals = ["traces", "logs"]\nexceptions = "type"\n\n'
+        '[[log]]\nname = "otel_level"\n',
+    )
+    try:
+        with wrapture.binding(_Pricing, "quote"), pytest.raises(KeyError):
+            _Pricing().quote("missing")
+        try:
+            raise KeyError("secret")
+        except KeyError:
+            logging.getLogger("otel_level").exception("lookup failed")
+    finally:
+        applied.revert()
+
+    span = _span_named(exported, "test_otel:_Pricing.quote")
+    event = _exception_event(span)
+
+    # The escaped exception is still an error with its type, but the
+    # secret in the message goes nowhere: not the span event, not the
+    # status description, not the log record.
+
+    assert span.status.status_code is StatusCode.ERROR
+    assert dict(event.attributes) == {"exception.type": "KeyError"}
+
+    (data,) = exported_logs.get_finished_logs()
+    attributes = data.log_record.attributes
+    assert attributes["exception.type"] == "KeyError"
+    assert "exception.message" not in attributes
+    assert "exception.stacktrace" not in attributes
+
+
+def test_an_unknown_exceptions_level_fails_the_load(tmp_path: Path) -> None:
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nexceptions = "short"\n')
+
+    with pytest.raises(wrapture.ConfigError, match="exceptions must be one of"):
+        load_config(source)

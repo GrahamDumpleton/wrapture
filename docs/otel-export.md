@@ -118,6 +118,17 @@ the flush wrapture gives process sinks at interpreter exit drains
 the OTel batch processor too, so the tail of a trace is not lost in
 its buffer.
 
+An exception reaches the backend as the semantic-convention
+exception event: type, message and stacktrace. Messages routinely
+embed values (the key a `KeyError` names, the statement a database
+driver echoes), so `exceptions` at the top of the `[otel]` table says
+how much leaves the process: `"full"` (the default), `"message"`
+(type and message, no stacktrace) or `"type"` (the type name alone,
+which still sets the error status and the `error.type` metric
+dimension). One key governs the traces and logs signals together, so
+it cannot be set on one and forgotten on the other; in code it is
+`wrapture.otel.sink(exceptions="type")`.
+
 `[otel.traces]` takes the span sink's options plus `sample`, a keep
 rate applied to the trace export alone, decided once per tree at its
 root. Sampling lives here rather than gating the whole registration

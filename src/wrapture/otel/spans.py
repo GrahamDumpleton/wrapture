@@ -22,8 +22,9 @@ from opentelemetry.util.types import AttributeValue
 import wrapture
 from wrapture import Event
 
+from ..sinks import _exception_level
 from ..trace import TraceSlot
-from .common import _PRIMITIVES, _SEMCONV_DATA, _status_code
+from .common import _PRIMITIVES, _SEMCONV_DATA, _exception_attributes, _status_code
 
 
 class OpenTelemetrySink(wrapture.Sink):
@@ -66,11 +67,13 @@ class OpenTelemetrySink(wrapture.Sink):
         kinds: Sequence[str] = ("call", "request", "block"),
         max_value_length: int = 512,
         attribute_prefix: str = "wrapture",
+        exceptions: str = "full",
     ) -> None:
         self._tracer = trace.get_tracer(tracer_name)
         self._kinds = frozenset(kinds)
         self._max_value_length = max_value_length
         self._prefix = attribute_prefix
+        self._exceptions = _exception_level(exceptions)
 
         # Open spans by event.seq, so a close pairs with its start and
         # a child finds its parent. The wall-clock entry lets reap()
@@ -210,7 +213,7 @@ class OpenTelemetrySink(wrapture.Sink):
             return
 
         if event.exception is not None:
-            span.record_exception(event.exception)
+            self._record_exception(span, event.exception)
             span.set_status(Status(StatusCode.ERROR, type(event.exception).__name__))
         else:
             span.set_status(Status(StatusCode.ERROR))
@@ -229,8 +232,8 @@ class OpenTelemetrySink(wrapture.Sink):
         # and left alone when the span is already in error.
 
         for caught in event.caught:
-            span.record_exception(
-                caught.exception, timestamp=self._to_epoch_ns(caught.at)
+            self._record_exception(
+                span, caught.exception, timestamp=self._to_epoch_ns(caught.at)
             )
 
             if not errored:
@@ -238,6 +241,26 @@ class OpenTelemetrySink(wrapture.Sink):
                     Status(StatusCode.ERROR, type(caught.exception).__name__)
                 )
                 errored = True
+
+    def _record_exception(
+        self,
+        span: trace.Span,
+        exception: BaseException,
+        *,
+        timestamp: int | None = None,
+    ) -> None:
+        # At "full" the SDK records type, message and stacktrace; the
+        # reduced levels add the exception event by hand with only the
+        # attributes the level allows.
+
+        if self._exceptions == "full":
+            span.record_exception(exception, timestamp=timestamp)
+        else:
+            span.add_event(
+                "exception",
+                attributes=_exception_attributes(exception, self._exceptions),
+                timestamp=timestamp,
+            )
 
     def flush(self) -> None:
         """Push batched spans to the exporter; called by wrapture at

@@ -457,7 +457,15 @@ hour and daily at midnight, computed afresh each time so daylight
 saving is followed rather than drifted through. A path with no time
 variable and a `rotate=` reopens the same file each time, which is
 pointless, and is warned about when the sink is built. For rotation
-on demand, call `reopen()` from a signal handler.
+on demand, call `reopen()` from a signal handler. `exceptions=` says
+how much of an exception the file carries, for a file that will
+leave the machine: exception messages routinely embed values (the
+key a `KeyError` names, the statement a database driver echoes). The
+levels are `"full"` (the default), `"message"` and `"type"`, each
+sink that exports exceptions interpreting them against what it
+would otherwise write; JSONLines never writes a stacktrace, so
+`"full"` and `"message"` both give the type and message, and
+`"type"` keeps the type name alone.
 
 ```python
 wrapture.add_sink(

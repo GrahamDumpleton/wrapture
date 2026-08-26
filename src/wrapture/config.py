@@ -1296,6 +1296,7 @@ def _build_otel(table: Any) -> Sink | None:
         "metrics",
         "logs",
         "environment",
+        "exceptions",
     }
     unknown = sorted(set(table) - known)
     if unknown:
