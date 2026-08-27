@@ -148,6 +148,15 @@ can be shared by several threads, and on Python 3.14+ passing
 `context=` to `Thread` directly achieves the same thing. The tape is
 safe to record onto from several threads at once.
 
+`propagate()` nests the thread's work under the caller's in-flight
+event, which is right when the caller waits for the thread. For work
+the caller does not wait for (a fire-and-forget thread, a pool job
+that outlives the request) wrap the target with `detach()` instead:
+the thread's work records as a root of its own, linked back to the
+operation that started it rather than nested under it, so the
+caller's duration stays honest. See
+[work the caller does not wait for](ad-hoc-tracing.md#work-the-caller-does-not-wait-for).
+
 A propagated thread that outlives the timeline is safe by
 construction: the tape closes when the scope exits, and events
 arriving after that are discarded and counted on `Tape.discarded`

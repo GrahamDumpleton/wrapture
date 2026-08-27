@@ -1120,3 +1120,90 @@ def test_an_unknown_exceptions_level_fails_the_load(tmp_path: Path) -> None:
 
     with pytest.raises(wrapture.ConfigError, match="exceptions must be one of"):
         load_config(source)
+
+
+# ---------------------------------------------------------------------------
+# event links become span links
+# ---------------------------------------------------------------------------
+
+
+def test_a_detached_root_links_to_the_origins_exported_span(
+    tmp_path: Path, exported: Any
+) -> None:
+    # The link captured at the hand-off carries the register's ids,
+    # which the sink keeps at the innermost exported span, so the
+    # detached root's span links to the origin's real span and
+    # neither span parents the other.
+
+    import threading
+
+    def work() -> None:
+        with wrapture.block("work"):
+            pass
+
+    # The detached work runs after the origin has closed, the
+    # fire-and-forget shape, so ambient parenting could never have
+    # related the two.
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.block("request"):
+            thread = threading.Thread(target=wrapture.detach(work))
+        thread.start()
+        thread.join()
+    finally:
+        applied.revert()
+
+    spans = {span.name: span for span in exported.get_finished_spans()}
+    request, work_span = spans["request"], spans["work"]
+
+    assert work_span.parent is None
+    assert work_span.context.trace_id != request.context.trace_id
+
+    (link,) = work_span.links
+    assert link.context.trace_id == request.context.trace_id
+    assert link.context.span_id == request.context.span_id
+    assert not link.context.is_remote
+    assert not link.attributes
+
+
+def test_a_consumer_blocks_header_link_is_remote(tmp_path: Path, exported: Any) -> None:
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.block("consume", links=[{"traceparent": TRACEPARENT}]):
+            pass
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+    (link,) = span.links
+
+    assert span.parent is None
+    assert link.context.is_remote
+    assert format(link.context.trace_id, "032x") == "0af7651916cd43dd8448eb211c80319c"
+    assert format(link.context.span_id, "016x") == "b7ad6b7169203331"
+
+
+def test_link_attributes_ride_along_and_idless_links_are_left_out(
+    tmp_path: Path, exported: Any
+) -> None:
+    from wrapture import EventLink
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.block(
+            "consume",
+            links=[
+                EventLink(trace_id="a" * 32, span_id="b" * 16, attributes={"n": 7}),
+                EventLink(seq=12),
+            ],
+        ):
+            pass
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+    (link,) = span.links
+
+    assert format(link.context.span_id, "016x") == "b" * 16
+    assert dict(link.attributes) == {"n": 7}

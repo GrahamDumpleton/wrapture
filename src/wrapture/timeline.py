@@ -33,7 +33,15 @@ from wrapt import MISSING
 from . import trace as _trace
 from .capture import NONE, REFERENCE, CapturePolicy, _capture_value, _level_of
 from .eventlogs import EventLog
-from .events import CaughtException, Event, _caught_types, _format_time, _own_time
+from .events import (
+    CaughtException,
+    Event,
+    EventLink,
+    _caught_types,
+    _format_links,
+    _format_time,
+    _own_time,
+)
 from .exceptions import ConfigWarning
 from .sinks import (
     Sink,
@@ -195,6 +203,32 @@ class _EventQueries:
 
         return [entry for entry in self._snapshot() if entry.parent_id == event.seq]
 
+    def origins_of(self, event: Event) -> list[Event]:
+        """The events this root was handed off from: its links,
+        resolved by sequence number to the events on this tape.
+
+        Empty for a child (links live on roots only), for a root that
+        was not handed off, and for a root whose origins ran in
+        another process, which the tape never heard of; the links
+        themselves are readable on `event.links` in every case.
+        """
+
+        wanted = {link.seq for link in event.links if link.seq is not None}
+        if not wanted:
+            return []
+
+        return [entry for entry in self._snapshot() if entry.seq in wanted]
+
+    def detached_from(self, event: Event) -> list[Event]:
+        """The roots on this tape that link back to the given event:
+        the work it handed off to other threads, in recording order."""
+
+        return [
+            entry
+            for entry in self._snapshot()
+            if any(link.seq == event.seq for link in entry.links)
+        ]
+
     def self_time(self, event: Event) -> float | None:
         """The time spent in the operation itself: its execution time
         minus its observed children's, the figure profilers rank by.
@@ -242,6 +276,7 @@ class _EventQueries:
         # parent was never heard of lines up as the root it stands as.
 
         members = {event.seq for event in entries}
+        by_seq = {event.seq: event for event in entries}
 
         roots: list[Event] = []
         children: dict[int, list[Event]] = {}
@@ -289,6 +324,11 @@ class _EventQueries:
             # follow the outcome, one marker each, in the order noted.
 
             marker += "".join(f"  !! {name}" for name in _caught_types(event))
+
+            # A root handed off from elsewhere names its origin, so the
+            # two trees read as related even though neither nests.
+
+            marker += _format_links(event, by_seq.get)
 
             line = "  " * level + str(event) + marker
             if times:
@@ -605,6 +645,17 @@ _stack: contextvars.ContextVar[tuple[Event, ...]] = contextvars.ContextVar(
     "wrapture_stack", default=()
 )
 
+# The origin a detached context carries: the links every root recorded
+# in this context takes, set by detach() in the copy of the context it
+# hands a thread and empty everywhere else. It persists for the life
+# of the context rather than being consumed by the first root, so a
+# detached thread that runs several observed operations in sequence
+# links each of them back rather than only the first.
+
+_origin: contextvars.ContextVar[tuple[EventLink, ...]] = contextvars.ContextVar(
+    "wrapture_origin", default=()
+)
+
 
 def _current_tape() -> Tape | None:
     # The innermost scoped Tape, for the views that speak about "the
@@ -661,6 +712,14 @@ def _push(event: Event) -> contextvars.Token[tuple[Event, ...]]:
 
     event.parent_id = parent.seq if parent is not None else None
     event.depth = len(stack)
+
+    # A root recorded in a detached context links back to the origin
+    # the context carries, unless the producer already set links of
+    # its own (a consumer block naming the message it drained). A
+    # child never links: its parent holds the relationship.
+
+    if parent is None and not event.links:
+        event.links = _origin.get()
 
     # Trace identity. An event arriving with a context already set (a
     # request boundary that parsed incoming headers) keeps it, shading
@@ -1048,12 +1107,15 @@ class Block:
     only what exit needs to close the event entry opened.
     """
 
-    def __init__(self, name: str, data: dict[str, Any]) -> None:
+    def __init__(
+        self, name: str, data: dict[str, Any], links: tuple[EventLink, ...] = ()
+    ) -> None:
         if not isinstance(name, str) or not name:
             raise TypeError(f"block() needs a non-empty name string, got {name!r}")
 
         self._name = name
         self._data = data
+        self._links = links
 
         self._event: Event | None = None
         self._token: contextvars.Token[tuple[Event, ...]] | None = None
@@ -1087,6 +1149,24 @@ class Block:
         )
         if self._data:
             event.data.update(self._data)
+
+        # Links belong to a root: a block nested inside an in-flight
+        # operation is that operation's child, and the same-thread
+        # rule (contained means child, never linked) is not overridden
+        # by naming an origin. Warn and drop rather than mis-shape.
+
+        if self._links:
+            if _stack.get():
+                warnings.warn(
+                    f"block({self._name!r}): links= ignored, the block is"
+                    f" nested inside an in-flight operation and records as"
+                    f" its child; links apply only to a block that roots a"
+                    f" tree",
+                    ConfigWarning,
+                    stacklevel=2,
+                )
+            else:
+                event.links = self._links
 
         # Push before delivery, as every producer does: the event is
         # the innermost in-flight event from the moment sinks hear of
@@ -1173,7 +1253,12 @@ def seed_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
     return seeded
 
 
-def block(name: str, *, data: Mapping[str, Any] | None = None) -> Block:
+def block(
+    name: str,
+    *,
+    data: Mapping[str, Any] | None = None,
+    links: Iterable[EventLink | Mapping[str, str]] | None = None,
+) -> Block:
     """Declare the enclosed stretch of code as one recorded event.
 
     A named unit smaller than a function: the with body's wall time
@@ -1189,6 +1274,18 @@ def block(name: str, *, data: Mapping[str, Any] | None = None) -> Block:
     sits in. A block entered with nothing in flight above it roots
     its own tree and mints a trace identity like any operation root.
 
+    `links=` names the operations this block was handed off from,
+    for a root block on the consuming side of a queue: each entry is
+    an EventLink, or a mapping of message headers carrying the
+    `traceparent` a producer put there with `handoff().headers()`, and
+    the block then carries a link to that operation rather than
+    nesting under it (see detach() for the thread case, and
+    EventLink for what a link is). A mapping with no valid
+    `traceparent` contributes nothing, so the headers of an untraced
+    message are safe to pass. Links belong to roots: on a block that
+    is nested inside an in-flight operation they are dropped with a
+    ConfigWarning, since a nested block is that operation's child.
+
     Like a log statement, a marker left permanently in code is inert
     when nothing is listening: with no sinks active, nothing is built
     at all. The context manager yields None; code inside the block
@@ -1196,7 +1293,37 @@ def block(name: str, *, data: Mapping[str, Any] | None = None) -> Block:
     current_event().
     """
 
-    return Block(name, seed_data(data))
+    return Block(name, seed_data(data), _link_entries(links))
+
+
+def _link_entries(
+    links: Iterable[EventLink | Mapping[str, str]] | None,
+) -> tuple[EventLink, ...]:
+    # Normalise block()'s links= argument: EventLinks pass through,
+    # header mappings are parsed as W3C trace context into remote
+    # links (no seq: the origin ran elsewhere), and a mapping with no
+    # valid traceparent is skipped.
+
+    if links is None:
+        return ()
+
+    entries: list[EventLink] = []
+
+    for entry in links:
+        if isinstance(entry, EventLink):
+            entries.append(entry)
+        elif isinstance(entry, Mapping):
+            slot = _trace._parse_w3c(
+                {str(key).casefold(): value for key, value in entry.items()}
+            )
+            if slot is not None:
+                entries.append(EventLink(trace_id=slot.trace_id, span_id=slot.span_id))
+        else:
+            raise TypeError(
+                f"block() links are EventLinks or header mappings, got {entry!r}"
+            )
+
+    return tuple(entries)
 
 
 class Timeline:
@@ -1314,6 +1441,128 @@ def propagate(fn: Callable[..., Any]) -> Callable[..., Any]:
         # own copy of the captured context, minted under a lock since
         # copying requires briefly entering the original.
 
+        with lock:
+            current = context.run(contextvars.copy_context)
+
+        return current.run(fn, *args, **kwargs)
+
+    return call
+
+
+class Handoff:
+    """The origin of work about to be handed elsewhere, captured by
+    handoff(): the in-flight event's identity as an EventLink, and
+    the headers a message should carry so its consumer can link back.
+    """
+
+    __slots__ = ("_headers", "link")
+
+    def __init__(self, link: EventLink, headers: dict[str, str]) -> None:
+        self.link = link
+        self._headers = headers
+
+    def headers(self) -> dict[str, str]:
+        """The name-value pairs a message handed off now should
+        carry, the `traceparent` naming the origin, so a consumer's
+        `block(..., links=[headers])` links back to it. The same pairs
+        `trace_headers()` gave at the moment of capture; empty when
+        the origin's tree carried no trace identity."""
+
+        return dict(self._headers)
+
+    def __repr__(self) -> str:
+        link = self.link
+        return f"<Handoff from #{link.seq}: {link.trace_id}/{link.span_id}>"
+
+
+def handoff() -> Handoff | None:
+    """Capture the in-flight event as the origin of work about to be
+    handed to another thread or, through a message, another process.
+
+    The snapshot is the event's sequence number and its trace
+    identity as it stands right now: with a tracing sink active that
+    is the exported span the event maps to, so a link made from it
+    lands on a span that really exists; without one it is the tree's
+    identity, and the sequence number still pins the exact event in
+    process. Returns None when nothing is being recorded. detach()
+    calls this itself for the thread case; call it directly to put
+    the origin on a queued message with `headers()`, or to capture an
+    origin ahead of building the callable detach() will wrap.
+    """
+
+    stack = _stack.get()
+    if not stack:
+        return None
+
+    event = stack[-1]
+    slot = event.trace.slots.get("w3c") if event.trace is not None else None
+
+    if slot is None:
+        link = EventLink(seq=event.seq)
+        headers: dict[str, str] = {}
+    else:
+        link = EventLink(trace_id=slot.trace_id, span_id=slot.span_id, seq=event.seq)
+        headers = _trace.headers_for(event.trace) if event.trace is not None else {}
+
+    return Handoff(link, headers)
+
+
+def detach(
+    fn: Callable[..., Any], *, origin: Handoff | None = None
+) -> Callable[..., Any]:
+    """Make fn record to this context's timeline from another thread
+    as its own tree, linked back to the operation that handed it off.
+
+    propagate() nests the thread's events under the caller's in-flight
+    event, which is right when the caller waits for the thread.
+    detach() is for work the caller does not wait for: a fire-and-
+    forget thread, a pool worker, a job that outlives the request.
+    Every event fn's work records with nothing in flight above it
+    becomes a root of its own, minting its own trace identity, and
+    carries a link (`event.links`) to the event that was in flight
+    when detach() was called, or to `origin` when one captured
+    earlier with handoff() is given; everything inside such a root
+    nests as normal. On the tape the two trees stay separate, so the
+    caller's duration is its own, and `Tape.detached_from()` and
+    `origins_of()` walk the relationship:
+
+        pool.submit(wrapture.detach(generate_thumbnails), file)
+
+    detach() records nothing itself and takes no name or data: which
+    events the thread records, and what they are called, is decided
+    as always by the bindings on what fn calls, by `@observed` on fn,
+    or by a block() in its body. A thread whose fn touches nothing
+    observed records nothing. To see the thread's work as one named
+    tree, observe fn: `detach(wrapture.observed(fn))`.
+
+    Like propagate(), each invocation runs in its own copy of the
+    captured context, and a detached thread that outlives the
+    timeline is safe: the tape closes when the scope exits and later
+    events are discarded and counted, never appended.
+    """
+
+    if origin is None:
+        origin = handoff()
+
+    links = (origin.link,) if origin is not None else ()
+
+    # The copy is the caller's context with the in-flight stack
+    # cleared, so fn's first event is a root, and the origin set, so
+    # that root links back. Setting them inside the copy leaves the
+    # caller's own context untouched.
+
+    context = contextvars.copy_context()
+
+    def prepare() -> None:
+        _stack.set(())
+        _origin.set(links)
+
+    context.run(prepare)
+
+    lock = threading.Lock()
+
+    @functools.wraps(fn)
+    def call(*args: Any, **kwargs: Any) -> Any:
         with lock:
             current = context.run(contextvars.copy_context)
 

@@ -1334,6 +1334,110 @@ lands on the entry's call and request bindings; an entry that binds
 nothing but attributes is rejected, since the flag could never act
 there. With no `[trace]` table at all, the default stands: enabled.
 
+## Work the caller does not wait for
+
+Nesting says one operation ran inside another, and on a single
+thread that is always the truth: a call made while another is in
+flight is its child, whatever it goes on to do. A hand-off breaks
+that rule. A request that starts a thread and returns, a pool
+worker that runs a job long after its submitter has finished, a
+consumer that processes a message some other process put on a
+queue: the work was caused by an operation but is not contained by
+it, and drawing it as a child would make the parent's duration a
+lie and, once the parent has closed, leave the child with nothing
+to attach to. wrapture spells the relationship with a **link**: a
+root event carrying, on `event.links`, the identity of the
+operation that handed it off, without being nested under it.
+
+For a thread, `detach()` is the hand-off, the sibling of
+`propagate()`. Where `propagate()` copies the recording context so
+the thread's events nest under the caller's in-flight event (right
+when the caller waits for the thread), `detach()` clears the
+in-flight stack in the copy and remembers the origin, so every
+event the thread records with nothing in flight above it becomes a
+root of its own, minting its own trace identity, with a link back:
+
+```python
+@wrapture.observed
+def handle_upload(request):
+    store(request.file)
+    threading.Thread(
+        target=wrapture.detach(generate_thumbnails), args=(request.file,)
+    ).start()
+    return "accepted"
+
+@wrapture.observed
+def generate_thumbnails(file):
+    for size in SIZES:
+        resize(file, size)
+```
+
+On the tape that is two trees, and `tree()` names the origin on the
+detached root:
+
+```text
+handle_upload(request=<Request>)  -> 'accepted'  [12.3ms]
+generate_thumbnails(file=<File>)  -> None  <- handle_upload  [840ms]
+  resize(file=<File>, size=32)  -> ...
+  resize(file=<File>, size=64)  -> ...
+```
+
+`handle_upload`'s duration is its own 12.3ms, not the 850ms it
+would show as a parent, and `tape.detached_from(upload)` and
+`tape.origins_of(thumbs)` walk the relationship in either direction
+for a test to assert on. `detach()` records nothing itself and takes
+no name or data: which events the thread records, and what they are
+called, is decided as always by the bindings on what the target
+calls, by `@observed` on the target, or by a `block()` in its body.
+The example observes `generate_thumbnails` so the thread's work is
+one tree; had it not been, each `resize` would be a root of its own,
+every one of them linked back to the upload, since the origin holds
+for the life of the detached context rather than for its first
+event only. `pool.submit(wrapture.detach(job), ...)` is the same
+call for an executor, and a detached thread outliving the timeline
+is discarded and counted exactly as a propagated one is.
+
+For a queue, the hand-off crosses a process boundary and the link
+travels in the message. `handoff()` captures the in-flight event as
+the origin, and its `headers()` are the `traceparent` pairs to put
+on the message, the same pairs `trace_headers()` gives; on the
+consuming side, `block(links=...)` names the message's headers and
+the root block links to the producer's operation rather than
+nesting under it, an `EventLink` with no sequence number since the
+origin ran elsewhere:
+
+```python
+# producer
+@wrapture.observed
+def enqueue_report(job):
+    origin = wrapture.handoff()
+    queue.put({"job": job, "headers": origin.headers() if origin else {}})
+
+# consumer
+def worker():
+    while True:
+        message = queue.get()
+        with wrapture.block("report", links=[message["headers"]]):
+            build_report(message["job"])
+```
+
+A mapping with no valid `traceparent` contributes nothing, so the
+headers of an untraced message are safe to pass. Links belong to
+roots: `links=` on a block nested inside an in-flight operation is
+dropped with a `ConfigWarning`, because a nested block is that
+operation's child and the same-thread rule is not for overriding.
+
+Every renderer carries the relationship. JSONLines lines have a
+`links` list with the origin's ids, its `seq` when it ran in this
+process, and any `attributes` noted on the link; `chrome_trace()`
+joins a detached root to an origin in the same file with a flow
+arrow between the lanes; `canonical()` appends `<- path` for an
+origin in the same trace; the Printer marks the root with its
+origin's trace id. With a tracing sink active the ids captured at
+the hand-off are those of the span the origin was exported as,
+which is what makes the [OpenTelemetry sink](otel-export.md)'s
+translation to span links land on a span that exists.
+
 ## Exporting traces to other tools
 
 Three exporters render a trace for existing tools rather than a
@@ -1365,13 +1469,16 @@ detail pane. The gaps between slices are unobserved time, which for
 a deliberately sparse trace is itself information. An event that
 never closed appears as a begin with no end, and a generator's slice
 spans creation to close with its accumulated body time alongside.
+Work handed to another thread with `detach()` sits on that thread's
+lane with a flow arrow from the operation that started it.
 
 ### Architectural snapshots: canonical
 
 `canonical()` renders the call tree as a deterministic text
 fingerprint: kind and path per line, indented by nesting, `!!` with
 the exception type for failures, `(injected)` for outcomes supplied
-by behaviour. Everything unstable between runs (sequence numbers,
+by behaviour, `<- path` on a root handed off from an operation in
+the same trace. Everything unstable between runs (sequence numbers,
 timings, captured values, thread identity) is left out:
 
 ```python
@@ -1427,7 +1534,10 @@ Most of the mapping writes itself, because the two models are close:
 
 - One event becomes one span, opened at `on_enter` and closed at
   exactly one of `on_exit` or `on_error`, the error close recording
-  the event's exception on the span and marking its status.
+  the event's exception on the span and marking its status. The
+  event's links, the origins of work handed off with `detach()` or
+  named by a consumer block, become the span's links, set at
+  creation because that is the only moment OTel accepts them.
 - `"request"` events become SERVER spans named access-log style
   (`GET /quote/widget`), carrying the method, path and status code
   under their semantic-convention attribute names; `"call"` events

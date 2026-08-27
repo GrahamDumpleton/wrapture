@@ -957,8 +957,10 @@ Four situations produce no event, each deliberate:
 - **Calls on a thread without the caller's context**, on builds where
   threads do not inherit it. These raise `RecordingGapWarning` and are
   counted in `missed_calls`, so the gap is loud rather than silent. To
-  opt a thread in, wrap its target with `wrapture.propagate()`; the
-  known limitations page covers the details.
+  opt a thread in, wrap its target with `wrapture.propagate()`, or
+  with `wrapture.detach()` for work the caller does not wait for,
+  which records as its own linked tree; the known limitations page
+  covers the details.
 - **Operations a `when=` predicate declined.** A binding created with
   `when=fn` consults `fn(instance, args, kwargs)` per operation while
   recording is active, before any event is constructed; a falsey

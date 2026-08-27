@@ -118,6 +118,24 @@ the flush wrapture gives process sinks at interpreter exit drains
 the OTel batch processor too, so the tail of a trace is not lost in
 its buffer.
 
+Work handed off rather than nested, a thread started with
+`wrapture.detach()` or a consumer block naming a message's headers
+with `block(links=...)`, exports as a root span of its own carrying
+an OTel span link to the origin: the causal-but-not-parent
+relationship OTel draws the same way, so a backend shows the
+background job as its own trace with a pointer back to the request
+that started it, and the request span's duration is the request's
+own. The ids on the link are the ones the register held at the
+hand-off, the origin's exported span, so the link lands on a span
+that exists; a link whose origin ran in another process is marked
+remote. Because a detached root starts a fresh trace, the SDK's
+parent-based sampler sees no parent and falls back to its root
+sampler; a deployment sampling by ratio sets that through the
+standard `OTEL_TRACES_SAMPLER` variables, and links themselves
+never influence the decision. See
+[work the caller does not wait for](ad-hoc-tracing.md#work-the-caller-does-not-wait-for)
+for the wrapture side.
+
 An exception reaches the backend as the semantic-convention
 exception event: type, message and stacktrace. Messages routinely
 embed values (the key a `KeyError` names, the statement a database

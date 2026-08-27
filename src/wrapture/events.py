@@ -18,6 +18,7 @@ from __future__ import annotations
 import inspect
 import threading
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -27,6 +28,28 @@ from .capture import REFERENCE
 from .trace import TraceContext
 
 EventKind = Literal["call", "get", "set", "delete", "request", "log", "block"]
+
+
+@dataclass(frozen=True)
+class EventLink:
+    """A causal reference from a root event to one that caused it but
+    does not contain it: the origin of work handed to another thread
+    or, through a message, to another process.
+
+    `trace_id` and `span_id` are the origin's W3C identity as it stood
+    at the hand-off, lowercase hex, or None when the origin's tree
+    carried no trace identity; `seq` is the origin's sequence number
+    when it was recorded in this process, None for an origin in
+    another process. `attributes` are facts about the hand-off known
+    where the link was made (a message id, a queue name), scalars or
+    flat lists of scalars. Containment stays on `parent_id`; a link
+    says only "that operation started this one".
+    """
+
+    trace_id: str | None = None
+    span_id: str | None = None
+    seq: int | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -88,6 +111,13 @@ class Event:
     seq: int = 0
     depth: int = 0
     parent_id: int | None = None
+
+    # Causal origins that are not the parent: the operations this
+    # event's tree was handed off from, on another thread or from
+    # another process. Only ever set on a root; a child carries
+    # nothing, since its parent already holds the link.
+
+    links: tuple[EventLink, ...] = ()
 
     started: float | None = None
     duration: float | None = None
@@ -245,6 +275,31 @@ class Event:
         positional = [repr(a) for a in (self.args or ())]
         keyword = [f"{k}={v!r}" for k, v in (self.kwargs or {}).items()]
         return ", ".join(positional + keyword)
+
+
+def _format_links(event: Event, resolve: Callable[[int], Event | None]) -> str:
+    # The `<- origin` marker a root with links carries in tree() and
+    # the Printer sink: the origin's own display name when `resolve`
+    # finds it on the same tape, else its trace id, else its sequence
+    # number, so the marker always says something. Empty for an event
+    # with no links.
+
+    if not event.links:
+        return ""
+
+    parts: list[str] = []
+
+    for link in event.links:
+        origin = resolve(link.seq) if link.seq is not None else None
+
+        if origin is not None:
+            parts.append(origin.label or origin.path)
+        elif link.trace_id is not None:
+            parts.append(f"trace {link.trace_id}")
+        else:
+            parts.append(f"#{link.seq}")
+
+    return "  <- " + ", ".join(parts)
 
 
 def _caught_types(event: Event) -> list[str]:

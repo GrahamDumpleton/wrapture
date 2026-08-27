@@ -1382,8 +1382,9 @@ class Binding:
                 f" elsewhere, so it was not recorded (behaviour still"
                 f" applied). To record work on this thread, wrap its"
                 f" target with wrapture.propagate(...), which hands it a"
-                f" copy of the recording context. Misses are counted on"
-                f" Binding.missed_calls.",
+                f" copy of the recording context, or wrapture.detach(...)"
+                f" for work the caller does not wait for. Misses are"
+                f" counted on Binding.missed_calls.",
                 RecordingGapWarning,
                 stacklevel=2,
             )
