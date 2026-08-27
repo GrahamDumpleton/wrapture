@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import inspect
 import threading
-import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from wrapt import MISSING
 
@@ -343,47 +342,59 @@ def _own_time(event: Event) -> float | None:
     return event.duration
 
 
-# Signature lookup is cached because inspect.signature costs microseconds
-# per call and would dominate the recording path. The cache is keyed on
-# the function itself via weak references, never on id(): ids are reused
-# after garbage collection, and a collision would silently bind one
-# function's arguments against another's signature.
+# Signature lookup is cached by the owner of a call site (a Binding or
+# an ObservedCallable) rather than by callable, because inspect.signature
+# costs microseconds and would dominate the recording path. The cache is
+# keyed by the type wrapt presented the target as: a bound method, the
+# partial proxy wrapt builds for a method called through its class, or a
+# plain function. The signature differs between those forms (a bound
+# method's drops self) but is fixed for each, so one entry per form seen
+# is exact, and the owner's lifetime is the cache's lifetime.
 
-_signature_cache: weakref.WeakKeyDictionary[Any, inspect.Signature | None] = (
-    weakref.WeakKeyDictionary()
-)
+
+class SignatureInfo(NamedTuple):
+    """A callable's signature as inspect reports it, None when it has no
+    readable one, with the name of its var-keyword parameter (**kwargs)
+    resolved once alongside."""
+
+    signature: inspect.Signature | None
+    var_keyword: str | None
 
 
-def _signature(func: Any) -> inspect.Signature | None:
-    try:
-        return _signature_cache[func]
-    except KeyError:
-        pass
-    except TypeError:
-        # Unhashable or not weak-referenceable: compute every time.
-
-        try:
-            return inspect.signature(func)
-        except (TypeError, ValueError):
-            return None
+def signature_info(func: Any) -> SignatureInfo:
+    """Resolve the SignatureInfo for func."""
 
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
-        signature = None
+        return SignatureInfo(None, None)
+
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return SignatureInfo(signature, parameter.name)
+
+    return SignatureInfo(signature, None)
+
+
+def cached_signature_info(
+    cache: dict[type, SignatureInfo], wrapped: Any
+) -> SignatureInfo:
+    """The SignatureInfo for wrapped from cache, keyed by the type wrapt
+    presented it as, resolved and stored on first sight."""
+
+    key = type(wrapped)
 
     try:
-        _signature_cache[func] = signature
-    except TypeError:
-        pass
-
-    return signature
+        return cache[key]
+    except KeyError:
+        info = cache[key] = signature_info(wrapped)
+        return info
 
 
 def normalized_arguments(
-    func: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    signature: inspect.Signature | None, args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Bind args and kwargs against func's signature, defaults applied.
+    """Bind args and kwargs against a signature, defaults applied.
 
     Returns a dict mapping parameter names to values, so that f(1, 2)
     and f(1, b=2) produce the same recorded arguments. Returns None when
@@ -391,7 +402,6 @@ def normalized_arguments(
     case the caller falls back to the raw call shape.
     """
 
-    signature = _signature(func)
     if signature is None:
         return None
 
@@ -402,18 +412,3 @@ def normalized_arguments(
 
     bound.apply_defaults()
     return dict(bound.arguments)
-
-
-def var_keyword_name(func: Any) -> str | None:
-    """The name of func's var-keyword parameter (**kwargs), or None
-    when func has no such parameter or no readable signature."""
-
-    signature = _signature(func)
-    if signature is None:
-        return None
-
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return parameter.name
-
-    return None

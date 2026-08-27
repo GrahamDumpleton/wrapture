@@ -5,19 +5,20 @@ which is the contract for this layer. Wiring events into the wrappers is
 tested where that wiring lives.
 """
 
-import gc
-import weakref
+import inspect
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from wrapt import MISSING
 
 from wrapture import Event
 from wrapture.events import (
+    SignatureInfo,
     _own_time,
-    _signature,
-    _signature_cache,
+    cached_signature_info,
     normalized_arguments,
+    signature_info,
 )
 
 
@@ -141,60 +142,86 @@ def test_delete_str() -> None:
 
 def test_call_forms_normalize_identically() -> None:
     expected = {"amount": 500, "currency": "USD", "retries": 3}
+    signature = inspect.signature(charge)
 
-    assert normalized_arguments(charge, (500,), {}) == expected
-    assert normalized_arguments(charge, (500, "USD"), {}) == expected
-    assert normalized_arguments(charge, (500,), {"currency": "USD"}) == expected
-    assert normalized_arguments(charge, (), {"amount": 500}) == expected
+    assert normalized_arguments(signature, (500,), {}) == expected
+    assert normalized_arguments(signature, (500, "USD"), {}) == expected
+    assert normalized_arguments(signature, (500,), {"currency": "USD"}) == expected
+    assert normalized_arguments(signature, (), {"amount": 500}) == expected
 
 
 def test_normalization_returns_none_without_a_signature() -> None:
-    # inspect.signature raises ValueError for type(), so this exercises
-    # the no-signature fallback.
-
-    assert normalized_arguments(type, (42,), {}) is None
+    assert normalized_arguments(None, (42,), {}) is None
 
 
 def test_normalization_returns_none_when_arguments_do_not_fit() -> None:
-    assert normalized_arguments(charge, (1, 2, 3, 4), {}) is None
-    assert normalized_arguments(charge, (), {"unknown": 1}) is None
+    signature = inspect.signature(charge)
 
-
-def test_unhashable_callable_falls_back_to_uncached_lookup() -> None:
-    class Unhashable:
-        __hash__ = None  # type: ignore[assignment]
-
-        def __call__(self, amount: int) -> None:
-            pass
-
-    assert normalized_arguments(Unhashable(), (500,), {}) == {"amount": 500}
+    assert normalized_arguments(signature, (1, 2, 3, 4), {}) is None
+    assert normalized_arguments(signature, (), {"unknown": 1}) is None
 
 
 # ---------------------------------------------------------------------------
-# the signature cache
+# signature resolution and the per-owner cache
 # ---------------------------------------------------------------------------
 
 
-def test_signature_lookup_is_cached() -> None:
-    assert _signature(charge) is _signature(charge)
-
-
-def test_failed_lookup_is_cached_as_none() -> None:
-    _signature(type)
-
-    assert _signature_cache[type] is None
-
-
-def test_cache_does_not_keep_the_function_alive() -> None:
-    def local(a: int) -> None:
+def test_signature_info_resolves_var_keyword_name() -> None:
+    def f(a: int, **options: Any) -> None:
         pass
 
-    _signature(local)
-    alive: weakref.ref[Any] = weakref.ref(local)
-    del local
+    info = signature_info(f)
 
-    gc.collect()
-    assert alive() is None
+    assert info.signature == inspect.signature(f)
+    assert info.var_keyword == "options"
+    assert signature_info(charge).var_keyword is None
+
+
+def test_signature_info_without_a_signature_is_empty() -> None:
+    # inspect.signature raises ValueError for type(), so this exercises
+    # the no-signature fallback.
+
+    assert signature_info(type) == SignatureInfo(None, None)
+
+
+def test_cached_signature_info_resolves_once_per_presented_form() -> None:
+    # A method reaches the wrapper as a fresh bound method object on
+    # every access, so the cache keys on the type wrapt presented rather
+    # than the object, and inspect.signature runs once per form.
+
+    class Thing:
+        def method(self, a: int) -> None:
+            pass
+
+    cache: dict[type, SignatureInfo] = {}
+    thing = Thing()
+
+    first = cached_signature_info(cache, thing.method)
+    with patch("wrapture.events.inspect.signature") as resolve:
+        second = cached_signature_info(cache, Thing().method)
+
+    assert resolve.call_count == 0
+    assert second is first
+    assert first.signature == inspect.signature(thing.method)
+    assert list(cache) == [type(thing.method)]
+
+
+def test_cached_signature_info_keeps_forms_apart() -> None:
+    # The same underlying function presented bound and unbound has two
+    # different signatures, one with self and one without.
+
+    class Thing:
+        def method(self, a: int) -> None:
+            pass
+
+    cache: dict[type, SignatureInfo] = {}
+
+    bound = cached_signature_info(cache, Thing().method).signature
+    plain = cached_signature_info(cache, Thing.method).signature
+
+    assert bound is not None and list(bound.parameters) == ["a"]
+    assert plain is not None and list(plain.parameters) == ["self", "a"]
+    assert len(cache) == 2
 
 
 def test_own_time_of_a_request_sums_both_application_phases() -> None:
