@@ -271,8 +271,9 @@ class ObservedCallable(
                 f"{self._self_display}: an observed call ran on a thread with"
                 f" no recording context while a timeline was active"
                 f" elsewhere, so it was not recorded. To record work on"
-                f" this thread, wrap its target with wrapture.propagate(...)."
-                f" Misses are counted on missed_calls.",
+                f" this thread, wrap its target with wrapture.propagate(...),"
+                f" or wrapture.detach(...) for work the caller does not wait"
+                f" for. Misses are counted on missed_calls.",
                 RecordingGapWarning,
                 stacklevel=3,
             )

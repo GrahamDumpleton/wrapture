@@ -47,7 +47,7 @@ from .capture import (
     summarize,
     type_name,
 )
-from .events import Event, _caught_types, _format_time
+from .events import Event, _caught_types, _format_links, _format_time
 from .exceptions import ConfigWarning, SinkErrorWarning
 from .lifecycle import SINKS, _on_shutdown, _register_at_fork
 from .outputs import OutputPath, open_output
@@ -479,6 +479,12 @@ class Printer(Sink):
         """Print the operation as it begins."""
 
         line = self._prefix(event) + str(event)
+
+        # A root handed off from elsewhere names its origin. The
+        # printer holds no events to resolve a sequence number
+        # against, so the marker reads the trace id off the link.
+
+        line += _format_links(event, lambda seq: None)
 
         # A log event's one line carries its exception marker itself,
         # since no closing line follows to report it.
@@ -963,6 +969,13 @@ def _event_record(event: Event, *, exceptions: str = "full") -> dict[str, Any]:
             for name, slot in event.trace.slots.items()
         }
 
+    # Links, the origins a detached root was handed off from, carry
+    # everything on the link: ids, the origin's seq when it ran in this
+    # process, and any facts noted about the hand-off.
+
+    if event.links:
+        record["links"] = [_link_record(link) for link in event.links]
+
     if event.injected:
         record["injected"] = True
     if event.phase is not None:
@@ -973,6 +986,21 @@ def _event_record(event: Event, *, exceptions: str = "full") -> dict[str, Any]:
         record["data"] = _jsonable(event.data)
 
     return record
+
+
+def _link_record(link: Any) -> dict[str, Any]:
+    described: dict[str, Any] = {}
+
+    if link.trace_id is not None:
+        described["trace_id"] = link.trace_id
+    if link.span_id is not None:
+        described["span_id"] = link.span_id
+    if link.seq is not None:
+        described["seq"] = link.seq
+    if link.attributes:
+        described["attributes"] = _jsonable(dict(link.attributes))
+
+    return described
 
 
 _STOP = object()

@@ -435,3 +435,35 @@ The configs also stream `client-otel.jsonl` and `server-otel.jsonl`,
 and the join query above works on them unchanged; the ids it prints
 are now the claimed ones, the same ids the viewer shows, files,
 headers and spans agreeing throughout.
+
+## detached-work
+
+Work handed off rather than waited for, and what its trace looks
+like. An upload handler stores the file, fans thumbnail generation
+out to a thread pool with `wrapture.detach()` and returns, and
+enqueues a notification for a consumer thread, putting the origin
+captured with `wrapture.handoff()` on the message as headers; the
+consumer's `block(links=[headers])` names them. Each upload
+therefore produces three separate traces, the request, the
+thumbnail work and the notification, with the two hand-offs
+carrying a **link** back to the request instead of nesting under it,
+so the request's duration is its own dozen milliseconds rather than
+the pool's seventy.
+
+With a viewer or collector listening on `localhost:4318`
+(otel-desktop-viewer, for instance):
+
+```console
+$ cd examples/detached-work
+$ uv run --extra otel python -m wrapture --config wrapture.toml main.py
+```
+
+The printer marks each detached root with the trace id of the
+request it links back to, and in the viewer the thumbnail and
+notification spans are roots of their own traces, each carrying a
+span link to the request span. With nothing listening,
+`OTEL_TRACES_EXPORTER=console` prints the spans to standard output
+instead, `links` included. The `[[observe]]` entry lists the members
+rather than matching `"*"` deliberately: the consumer loop must not
+be observed, since as a root on its own thread it would contain the
+consumer blocks, and links belong to roots.

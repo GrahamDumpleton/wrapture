@@ -1,0 +1,26 @@
+# Observe the upload service and export every tree to OpenTelemetry,
+# printing the events as they happen too. The printer marks each
+# detached root with the trace id of the request it links back to.
+#
+#   uv run --extra otel python -m wrapture --config wrapture.toml main.py
+
+pythonpath = "."
+
+# The members are listed rather than matched with "*" because the
+# notifier loop must not be observed: as a root event on its thread it
+# would contain every consumer block, and links belong to roots.
+
+[[observe]]
+target = "uploads"
+match = ["handle_upload", "store", "generate_thumbnails", "resize", "notify"]
+
+[[sink]]
+type = "printer"
+
+[otel]
+service_name = "uploads"
+signals = ["traces"]
+
+[otel.environment]
+exporter_otlp_endpoint = "http://localhost:4318"
+exporter_otlp_protocol = "http/protobuf"

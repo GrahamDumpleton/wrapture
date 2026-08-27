@@ -10,6 +10,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.trace import (
+    Link,
     NonRecordingSpan,
     SpanContext,
     SpanKind,
@@ -37,7 +38,10 @@ class OpenTelemetrySink(wrapture.Sink):
     close on another, so the ambient context at close time is not
     reliably the one that was current at the start. wrapture's parent
     link is a process-wide sequence number that is correct in all of
-    those cases.
+    those cases. An event's links (`event.links`, the origins of work
+    handed off with detach() or named by a consumer block) become the
+    span's links, the causal-but-not-nested relationship OTel draws
+    the same way.
 
     The sink also claims the tree's trace identity, writing into the
     w3c slot per the TraceSlot contract so that files, outbound
@@ -141,6 +145,7 @@ class OpenTelemetrySink(wrapture.Sink):
             kind=SpanKind.SERVER if event.kind == "request" else SpanKind.INTERNAL,
             start_time=start_time,
             attributes=self._enter_attributes(event),
+            links=self._links(event),
             record_exception=False,
             set_status_on_exception=False,
         )
@@ -338,6 +343,36 @@ class OpenTelemetrySink(wrapture.Sink):
         )
 
         return trace.set_span_in_context(NonRecordingSpan(parent))
+
+    def _links(self, event: Event) -> list[Link] | None:
+        # wrapture's event links map one to one onto span links: a
+        # detached root (work handed to a thread, or a consumer block
+        # naming the message it drained) carries the origin's ids,
+        # captured from the register at the hand-off, so the link
+        # lands on the span that was actually exported for the origin.
+        # A link whose origin carried no trace identity has nothing a
+        # span could point at and is left out. Links can only be set
+        # at span creation, which is why the recording path stamps
+        # them before on_enter is delivered.
+
+        links: list[Link] = []
+
+        for link in event.links:
+            if link.trace_id is None or link.span_id is None:
+                continue
+
+            origin = SpanContext(
+                trace_id=int(link.trace_id, 16),
+                span_id=int(link.span_id, 16),
+                is_remote=link.seq is None,
+                trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            )
+            attributes = {
+                name: self._coerce(value) for name, value in link.attributes.items()
+            } or None
+            links.append(Link(origin, attributes=attributes))
+
+        return links or None
 
     def _claim(self, slot: TraceSlot, span: trace.Span) -> None:
         # Write the exported span into the slot, per the TraceSlot

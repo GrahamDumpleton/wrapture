@@ -92,6 +92,7 @@ _SLICE_ARGS = (
     "phase",
     "stack",
     "data",
+    "links",
 )
 
 
@@ -105,7 +106,9 @@ def chrome_trace(source: TraceSource) -> str:
     clicked. Timestamps are shifted so the earliest event starts at
     zero. An event that never closed becomes a begin-only slice, and
     a generator's slice spans creation to close, its accumulated body
-    time riding along as body_duration.
+    time riding along as body_duration. A root handed off from an
+    event in the same trace (a detached thread's work) is joined to
+    its origin by a flow arrow.
     """
 
     records = _records(source)
@@ -120,6 +123,7 @@ def chrome_trace(source: TraceSource) -> str:
 
     lanes: dict[int, str] = {}
     slices: list[dict[str, Any]] = []
+    placed: dict[int, dict[str, Any]] = {}
 
     for record in records:
         started = record.get("started")
@@ -148,6 +152,40 @@ def chrome_trace(source: TraceSource) -> str:
             entry["ph"] = "B"
 
         slices.append(entry)
+        placed[record["seq"]] = entry
+
+    # A root handed off from an event in the same file becomes a flow:
+    # a start at the origin slice and a finish at the root's own, which
+    # Perfetto draws as an arrow between the two lanes. An origin in
+    # another process has no slice here to draw from; its ids stay
+    # readable in the slice's args.
+
+    flows: list[dict[str, Any]] = []
+
+    for record in records:
+        target = placed.get(record["seq"])
+        if target is None:
+            continue
+
+        for link in record.get("links") or ():
+            from_slice = placed.get(link.get("seq"))
+            if from_slice is None:
+                continue
+
+            flow_id = len(flows) // 2 + 1
+            for phase, slice_entry in (("s", from_slice), ("f", target)):
+                flows.append(
+                    {
+                        "ph": phase,
+                        "name": "handoff",
+                        "cat": "link",
+                        "id": flow_id,
+                        "ts": slice_entry["ts"],
+                        "pid": 1,
+                        "tid": slice_entry["tid"],
+                        "bp": "e",
+                    }
+                )
 
     metadata: list[dict[str, Any]] = [
         {
@@ -168,7 +206,7 @@ def chrome_trace(source: TraceSource) -> str:
             }
         )
 
-    return json.dumps({"traceEvents": metadata + slices}, ensure_ascii=False)
+    return json.dumps({"traceEvents": metadata + slices + flows}, ensure_ascii=False)
 
 
 def canonical(source: TraceSource) -> str:
@@ -176,9 +214,11 @@ def canonical(source: TraceSource) -> str:
 
     One event per line, indented by nesting: the kind, the path, `!!`
     with the exception type for a failure, `(injected)` for an
-    outcome supplied by behaviour rather than the real code, and one
+    outcome supplied by behaviour rather than the real code, one
     further `!!` marker per exception caught inside the scope and
-    noted with note_exception(), as tree() draws them.
+    noted with note_exception(), as tree() draws them, and `<-` with
+    the origin's path on a root that was handed off from an event
+    in the same trace.
     Everything unstable between runs (sequence numbers, timings,
     captured values, thread identity) is left out, so the output is an
     architectural fingerprint: snapshot it once, and a change that
@@ -188,6 +228,7 @@ def canonical(source: TraceSource) -> str:
 
     records = _records(source)
     roots, children = _children(records)
+    paths = {record["seq"]: record["path"] for record in records}
 
     lines: list[str] = []
 
@@ -203,6 +244,15 @@ def canonical(source: TraceSource) -> str:
 
         for caught in record.get("caught") or ():
             line += f" !! {caught['type']}"
+
+        # A root handed off from an event in the same trace names its
+        # origin's path, which is architecture; an origin elsewhere is
+        # identified only by ids, which are not, so it is left out.
+
+        for link in record.get("links") or ():
+            origin = paths.get(link.get("seq"))
+            if origin is not None:
+                line += f" <- {origin}"
 
         lines.append(line)
 
