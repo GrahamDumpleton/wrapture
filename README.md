@@ -16,9 +16,10 @@ safe monkey-patching machinery wrapt provides.
 > **Status: alpha, ahead of 1.0.0.** Pre-releases are published to PyPI,
 > and until 1.0.0 is final a plain `pip install wrapture` picks up the
 > latest pre-release automatically, so there is no need to pin a specific
-> version. The existing API is not foreseen to break: the alpha series is
-> mainly adding functionality rather than reworking what is already here,
-> so code written against it today is expected to carry forward to 1.0.0.
+> version. The existing API is not foreseen to break: the alpha series
+> has reached the point of mainly evaluating performance overheads and
+> tuning the code behind the API, so code written against it today is
+> expected to carry forward to 1.0.0.
 
 ## Installation
 
