@@ -85,6 +85,23 @@ they apply rather than each corner growing its own variant, and when
 validation showed a design could be better, it was redesigned rather
 than worked around.
 
+## An experiment
+
+It is worth being honest about what wrapture is for me. In large part
+it is an experiment: a chance to find out whether an idea I had carried
+around for years actually held up once built, and, just as much,
+whether a library of this kind could be produced this way, with an AI
+doing the writing and me doing the directing, to a standard I would be
+happy to put my name to. Both of those questions I now have answers to,
+and getting them was the point.
+
+What it was never premised on is anyone else using it. I built wrapture
+because I wanted to see it exist, not because I had identified a gap in
+the market or a user base waiting for it. If people find it useful and
+pick it up, that is wonderful, and I will happily support it. If nobody
+does, that is fine too: the experiment still ran, the questions still
+got answered, and I still had the satisfaction of scratching the itch.
+
 ## If you would rather not
 
 Some people are firmly opposed to AI-written software. If that is you,
