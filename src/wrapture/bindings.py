@@ -55,7 +55,7 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, _signature, normalized_arguments, var_keyword_name
+from .events import Event, SignatureInfo, cached_signature_info, normalized_arguments
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
@@ -775,6 +775,11 @@ class Binding:
         # real callable is still checked against its signature.
 
         self._strict = strict
+
+        # Signatures of the target as wrapt presents it, one per form
+        # seen (see events.cached_signature_info).
+
+        self._signatures: dict[type, SignatureInfo] = {}
 
         # The behaviour phases, keyed by operation ("call", "get", "set"
         # or "delete"): each operation has a chain of Phase records
@@ -1898,9 +1903,10 @@ class Binding:
         # recording: the call stays visible, its values do not.
 
         if level > NONE:
-            arguments = normalized_arguments(wrapped, args, kwargs)
+            info = cached_signature_info(self._signatures, wrapped)
+            arguments = normalized_arguments(info.signature, args, kwargs)
             if arguments is not None:
-                event.var_keyword = var_keyword_name(wrapped)
+                event.var_keyword = info.var_keyword
 
             if not callable(policy) and level == REFERENCE:
                 event.args = args
@@ -2076,7 +2082,7 @@ class Binding:
         if active is None or active.terminal is None:
             return
 
-        signature = _signature(wrapped)
+        signature = cached_signature_info(self._signatures, wrapped).signature
         if signature is None:
             return
 

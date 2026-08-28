@@ -65,7 +65,7 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, normalized_arguments, var_keyword_name
+from .events import Event, SignatureInfo, cached_signature_info, normalized_arguments
 from .exceptions import RecordingGapWarning
 from .sinks import (
     _active_sinks,
@@ -149,7 +149,9 @@ class ObservedCallable(
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
         signature: Any = None,
         convention: str | None = None,
-        precheck: Callable[[Callable[..., Any], tuple[Any, ...], dict[str, Any]], None]
+        precheck: Callable[
+            [inspect.Signature | None, tuple[Any, ...], dict[str, Any]], None
+        ]
         | None = None,
     ) -> None:
         # The wrapper function hands every call, bound or not, back to
@@ -173,6 +175,7 @@ class ObservedCallable(
         self._self_capture_result = capture_result
         self._self_stack_depth = stack
         self._self_when = when
+        self._self_signatures: dict[type, SignatureInfo] = {}
 
         self._self_suspended = False
         self._self_suspended_calls = 0
@@ -311,9 +314,10 @@ class ObservedCallable(
             event.stack = _capture_stack(self._self_stack_depth)
 
         if level > NONE:
-            arguments = normalized_arguments(target, args, kwargs)
+            info = cached_signature_info(self._self_signatures, target)
+            arguments = normalized_arguments(info.signature, args, kwargs)
             if arguments is not None:
-                event.var_keyword = var_keyword_name(target)
+                event.var_keyword = info.var_keyword
 
             if not callable(policy) and level == REFERENCE:
                 event.args = args
@@ -348,7 +352,8 @@ class ObservedCallable(
 
         precheck = self._self_precheck
         if precheck is not None:
-            precheck(target, args, kwargs)
+            signature = cached_signature_info(self._self_signatures, target).signature
+            precheck(signature, args, kwargs)
 
         if self._self_suspended:
             self._self_suspended_calls += 1

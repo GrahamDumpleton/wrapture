@@ -34,7 +34,6 @@ from typing import Any
 
 from wrapt import MISSING
 
-from .events import _signature
 from .observed import ObservedCallable, _describe
 
 KINDS = ("function", "generator", "coroutine", "async_generator")
@@ -300,11 +299,10 @@ def stub(
     if mimics is not None:
 
         def precheck(
-            target: Callable[..., Any],
+            signature: inspect.Signature | None,
             args: tuple[Any, ...],
             kwargs: dict[str, Any],
         ) -> None:
-            signature = _signature(target)
             if signature is None:
                 return
 

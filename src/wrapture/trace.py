@@ -38,7 +38,7 @@ territory, co-maintained with wrapture itself.
 
 from __future__ import annotations
 
-import secrets
+import random
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -150,10 +150,16 @@ def _mint_w3c() -> TraceSlot:
     # A fresh identity: random 128-bit trace id, random 64-bit span
     # id for the root, sampled, since a locally minted trace exists
     # because somebody wanted it.
+    #
+    # The ids only need to be unique, not unguessable, so they come
+    # from the random module, chosen over secrets because this runs
+    # on every root event and secrets costs a urandom syscall per id.
+    # The random module reseeds itself after fork, so children of a
+    # forked worker do not repeat the parent's sequence.
 
     return TraceSlot(
-        trace_id=secrets.token_hex(16),
-        span_id=secrets.token_hex(8),
+        trace_id=f"{random.getrandbits(128):032x}",
+        span_id=f"{random.getrandbits(64):016x}",
         sampled=True,
     )
 
