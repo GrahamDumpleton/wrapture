@@ -51,6 +51,7 @@ from ._wrappermixins import (
 )
 from .behaviours import _named_after
 from .bindings import (
+    _outcome_kind,
     _record_async_generator,
     _record_awaited,
     _record_generator,
@@ -315,7 +316,7 @@ class ObservedCallable(
 
         if level > NONE:
             info = cached_signature_info(self._self_signatures, target)
-            arguments = normalized_arguments(info.signature, args, kwargs)
+            arguments = normalized_arguments(info.signature, args, kwargs, info.table)
             if arguments is not None:
                 event.var_keyword = info.var_keyword
 
@@ -411,16 +412,18 @@ class ObservedCallable(
         if result_policy is None:
             result_policy = _required_policy(active, "capture_result")
 
-        if inspect.isgenerator(outcome):
+        kind = _outcome_kind(outcome)
+
+        if kind == "generator":
             return _record_generator(outcome, event, base, result_policy, active)
 
-        if inspect.isasyncgen(outcome):
+        if kind == "asyncgen":
             return _named_after(
                 _record_async_generator(outcome, event, base, result_policy, active),
                 outcome,
             )
 
-        if inspect.isawaitable(outcome):
+        if kind == "awaitable":
             return _named_after(
                 _record_awaited(outcome, event, base, result_policy, active), outcome
             )

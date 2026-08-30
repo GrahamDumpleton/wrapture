@@ -33,8 +33,8 @@ from wrapture import (
     load_config,
     window,
 )
+from wrapture import sinks as sinks_module
 from wrapture.scheduler import _next_at
-from wrapture.sinks import _process_sinks
 
 
 class Gateway:
@@ -110,14 +110,14 @@ def test_the_context_manager_opens_a_run_and_yields_it() -> None:
 
         with window(collect=[counting, Printer(output, timing=False)]) as run:
             assert counting.armed
-            assert counting in _process_sinks
+            assert counting in sinks_module._process_sinks
             Gateway().charge(2)
             Gateway().charge(3)
 
         Gateway().charge(4)
 
     assert not counting.armed
-    assert counting not in _process_sinks
+    assert counting not in sinks_module._process_sinks
     assert output.getvalue().count("Gateway.charge(") == 2
 
     (report,) = run.reports
@@ -647,7 +647,7 @@ def test_shutdown_closes_open_runs_then_flushes_sinks_and_is_repeatable() -> Non
         assert report.cut_short is True
         assert report.data == {"count": 1}
         assert calls == ["flush"]
-        assert flushing in _process_sinks
+        assert flushing in sinks_module._process_sinks
 
         shutdown()
 

@@ -746,10 +746,17 @@ def _pop(token: contextvars.Token[tuple[Event, ...]]) -> None:
 
 
 def _capture_result(event: Event, outcome: Any, policy: CapturePolicy) -> None:
-    # Result capture runs under the recorder guard: at SUMMARY and above
-    # it calls user code (repr, deepcopy), which must not record.
+    # A plain REFERENCE policy keeps the object itself and runs no
+    # code of anyone's. Anything else (a level that summarises or
+    # copies, or a callable policy) is user code and runs under the
+    # recorder guard so it does not record.
 
-    if _level_of(policy) <= NONE:
+    level = _level_of(policy)
+    if level <= NONE:
+        return
+
+    if level == REFERENCE and not callable(policy):
+        event.result = outcome
         return
 
     guard = _in_recorder.set(True)

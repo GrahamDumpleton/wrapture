@@ -161,6 +161,87 @@ def test_normalization_returns_none_when_arguments_do_not_fit() -> None:
     assert normalized_arguments(signature, (), {"unknown": 1}) is None
 
 
+def _both_ways(func: Any, *shapes: tuple[tuple[Any, ...], dict[str, Any]]) -> None:
+    # The parameter table must agree with Signature.bind exactly, on
+    # the values, on which shapes are rejected, and on the order of
+    # the names, since the dict's order is what str(event) and the
+    # serialised record show.
+
+    info = signature_info(func)
+    assert info.signature is not None
+
+    for args, kwargs in shapes:
+        slow = normalized_arguments(info.signature, args, kwargs)
+        fast = normalized_arguments(info.signature, args, kwargs, info.table)
+
+        assert fast == slow, (args, kwargs)
+        if slow is not None and fast is not None:
+            assert list(fast.items()) == list(slow.items()), (args, kwargs)
+
+
+def test_the_parameter_table_binds_like_signature_bind() -> None:
+    def simple(a: int, b: int = 2, c: int = 3) -> None:
+        pass
+
+    assert signature_info(simple).table is not None
+
+    _both_ways(
+        simple,
+        ((1,), {}),
+        ((1, 20), {}),
+        ((1, 20, 30), {}),
+        ((1,), {"c": 30}),
+        ((1,), {"c": 30, "b": 20}),
+        ((), {"a": 1}),
+        ((), {"c": 30, "a": 1}),
+        ((1, 20), {"c": 30}),
+        # Rejected shapes: too many positionals, a keyword for a
+        # parameter already given positionally, an unknown keyword,
+        # a required parameter left unfilled.
+        ((1, 2, 3, 4), {}),
+        ((1,), {"a": 5}),
+        ((1,), {"d": 5}),
+        ((), {"b": 2}),
+        ((), {}),
+    )
+
+
+def test_the_parameter_table_respects_positional_only() -> None:
+    def constrained(a: int, /, b: int, c: int = 3) -> None:
+        pass
+
+    table = signature_info(constrained).table
+    assert table is not None and table.positional_only == 1
+
+    _both_ways(
+        constrained,
+        ((1, 2), {}),
+        ((1,), {"b": 2}),
+        ((1,), {"b": 2, "c": 4}),
+        # A positional-only parameter cannot be passed by keyword.
+        ((), {"a": 1, "b": 2}),
+        ((1,), {"a": 1, "b": 2}),
+    )
+
+
+def test_signatures_beyond_the_table_fall_back_to_bind() -> None:
+    def variadic(a: int, *rest: Any) -> None:
+        pass
+
+    def keyword_only(a: int, *, flag: bool = False) -> None:
+        pass
+
+    def options(a: int, **extra: Any) -> None:
+        pass
+
+    for func in (variadic, keyword_only, options):
+        assert signature_info(func).table is None
+
+    _both_ways(variadic, ((1, 2, 3), {}), ((1,), {}))
+    _both_ways(keyword_only, ((1,), {}), ((1,), {"flag": True}), ((1, True), {}))
+    _both_ways(options, ((1,), {"x": 2}), ((1,), {}))
+
+
 # ---------------------------------------------------------------------------
 # signature resolution and the per-owner cache
 # ---------------------------------------------------------------------------

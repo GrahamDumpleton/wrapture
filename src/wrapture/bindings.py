@@ -378,6 +378,30 @@ def _async_kind(wrapped: Any) -> str | None:
     return None
 
 
+def _outcome_kind(outcome: Any) -> str | None:
+    """Classify what a call returned: "generator", "asyncgen" or
+    "awaitable" for an outcome whose body has not run yet and is
+    recorded around its iteration or await instead, else None.
+
+    Exact type checks, since the generator and coroutine types cannot
+    be subclassed, with the awaitable protocol read off the type
+    (`__await__`) rather than through the `Awaitable` ABC, which is
+    what the ABC's own subclass hook checks and costs a fraction of
+    the isinstance.
+    """
+
+    kind = type(outcome)
+
+    if kind is types.GeneratorType:
+        return "generator"
+    if kind is types.AsyncGeneratorType:
+        return "asyncgen"
+    if kind is types.CoroutineType or hasattr(kind, "__await__"):
+        return "awaitable"
+
+    return None
+
+
 def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
     """The `wrapped` handed to behaviour, recording what the original
     actually received, which may differ from what the caller sent."""
@@ -1780,6 +1804,10 @@ class Binding:
 
             slot: list[Phase | None] = [phase]
 
+            # Only behaviour receives the forwarder, so without a phase
+            # there is nothing to build one for: the real callable is
+            # called directly.
+
             try:
                 outcome = bnd._invoke(
                     "call",
@@ -1789,7 +1817,7 @@ class Binding:
                     args,
                     kwargs,
                     event,
-                    via=_forwarder(wrapped, event),
+                    via=_forwarder(wrapped, event) if phase is not None else None,
                     slot=slot,
                 )
             except BaseException as exc:
@@ -1821,15 +1849,14 @@ class Binding:
             if watching and _level_of(result_policy) < REFERENCE:
                 result_policy = REFERENCE
 
-            def completed(event: Event) -> None:
-                bnd._completed("call", phase, event)
+            kind = _outcome_kind(outcome)
 
-            if inspect.isgenerator(outcome):
-                completed(event)
+            if kind == "generator":
+                bnd._completed("call", phase, event)
                 return _record_generator(outcome, event, base, result_policy, active)
 
-            if inspect.isasyncgen(outcome):
-                completed(event)
+            if kind == "asyncgen":
+                bnd._completed("call", phase, event)
                 return _named_after(
                     _record_async_generator(
                         outcome, event, base, result_policy, active
@@ -1837,15 +1864,20 @@ class Binding:
                     outcome,
                 )
 
-            if inspect.isawaitable(outcome):
+            # An awaited outcome completes later, so the watching phase
+            # is shown it through a callback, built only when there is
+            # a phase watching.
+
+            if kind == "awaitable":
+                on_complete = None
+                if watching:
+
+                    def on_complete(event: Event) -> None:
+                        bnd._completed("call", phase, event)
+
                 return _named_after(
                     _record_awaited(
-                        outcome,
-                        event,
-                        base,
-                        result_policy,
-                        active,
-                        completed if watching else None,
+                        outcome, event, base, result_policy, active, on_complete
                     ),
                     outcome,
                 )
@@ -1853,7 +1885,7 @@ class Binding:
             event.duration = time.perf_counter() - started
             _capture_result(event, outcome, result_policy)
             _notify_exit(event, active)
-            completed(event)
+            bnd._completed("call", phase, event)
             return outcome
 
         return wrapper
@@ -1904,7 +1936,7 @@ class Binding:
 
         if level > NONE:
             info = cached_signature_info(self._signatures, wrapped)
-            arguments = normalized_arguments(info.signature, args, kwargs)
+            arguments = normalized_arguments(info.signature, args, kwargs, info.table)
             if arguments is not None:
                 event.var_keyword = info.var_keyword
 

@@ -32,7 +32,8 @@ from wrapture import (
     remove_sink,
     timeline,
 )
-from wrapture.sinks import _active_sinks, _process_sinks, _scoped_sinks
+from wrapture import sinks as sinks_module
+from wrapture.sinks import _active_sinks, _scoped_sinks
 
 # The package exports binding() and bindings() from these submodules, so
 # the submodule attributes on the package are shadowed by the functions;
@@ -190,7 +191,7 @@ def test_process_sinks_hear_events_alongside_scoped_ones() -> None:
 
     assert [kind for kind, _ in process_probe.notified] == ["enter", "exit"]
     assert [kind for kind, _ in scoped_probe.notified] == ["enter", "exit"]
-    assert _process_sinks == []
+    assert sinks_module._process_sinks == ()
 
 
 def test_removing_an_unregistered_sink_raises() -> None:
