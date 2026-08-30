@@ -378,6 +378,30 @@ def _async_kind(wrapped: Any) -> str | None:
     return None
 
 
+def _outcome_kind(outcome: Any) -> str | None:
+    """Classify what a call returned: "generator", "asyncgen" or
+    "awaitable" for an outcome whose body has not run yet and is
+    recorded around its iteration or await instead, else None.
+
+    Exact type checks, since the generator and coroutine types cannot
+    be subclassed, with the awaitable protocol read off the type
+    (`__await__`) rather than through the `Awaitable` ABC, which is
+    what the ABC's own subclass hook checks and costs a fraction of
+    the isinstance.
+    """
+
+    kind = type(outcome)
+
+    if kind is types.GeneratorType:
+        return "generator"
+    if kind is types.AsyncGeneratorType:
+        return "asyncgen"
+    if kind is types.CoroutineType or hasattr(kind, "__await__"):
+        return "awaitable"
+
+    return None
+
+
 def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
     """The `wrapped` handed to behaviour, recording what the original
     actually received, which may differ from what the caller sent."""
@@ -1825,11 +1849,13 @@ class Binding:
             if watching and _level_of(result_policy) < REFERENCE:
                 result_policy = REFERENCE
 
-            if inspect.isgenerator(outcome):
+            kind = _outcome_kind(outcome)
+
+            if kind == "generator":
                 bnd._completed("call", phase, event)
                 return _record_generator(outcome, event, base, result_policy, active)
 
-            if inspect.isasyncgen(outcome):
+            if kind == "asyncgen":
                 bnd._completed("call", phase, event)
                 return _named_after(
                     _record_async_generator(
@@ -1842,7 +1868,7 @@ class Binding:
             # is shown it through a callback, built only when there is
             # a phase watching.
 
-            if inspect.isawaitable(outcome):
+            if kind == "awaitable":
                 on_complete = None
                 if watching:
 

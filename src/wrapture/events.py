@@ -65,7 +65,15 @@ class CaughtException:
     at: float
 
 
-@dataclass(eq=False)
+# Slotted: an Event is built on every recorded operation, and slots
+# halve the cost of constructing one against a dict-backed instance.
+# The fields below are the whole of an event; annotations go in
+# `data`, never as attributes of the event itself. The weakref slot
+# is for sinks that remember events without keeping them alive
+# (Filter's set of accepted events).
+
+
+@dataclass(eq=False, slots=True, weakref_slot=True)
 class Event:
     """One recorded occurrence at a binding.
 
