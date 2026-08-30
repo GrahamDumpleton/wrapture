@@ -119,7 +119,12 @@ class Sink:
 # than a contextvar, because a sink meant to observe the whole process
 # must see events from every thread and task.
 
-_process_sinks: list[Sink] = []
+# Held as a tuple replaced on every change rather than a list mutated
+# in place, so the active set handed to the recording path is the
+# same object from one call to the next while nothing changes, which
+# is what lets the effective capture policy be cached against it.
+
+_process_sinks: tuple[Sink, ...] = ()
 _scoped_sinks: contextvars.ContextVar[tuple[Sink, ...]] = contextvars.ContextVar(
     "wrapture_scoped_sinks", default=()
 )
@@ -142,8 +147,10 @@ def add_sink(sink: Sink) -> Sink:
     Returns the sink, so registration can wrap construction.
     """
 
+    global _process_sinks
+
     with _registry_lock:
-        _process_sinks.append(sink)
+        _process_sinks = (*_process_sinks, sink)
 
     _on_shutdown("flush process sinks", _flush_process_sinks, phase=SINKS)
     _register_at_fork()
@@ -159,11 +166,15 @@ def remove_sink(sink: Sink) -> None:
     forever.
     """
 
+    global _process_sinks
+
     with _registry_lock:
-        try:
-            _process_sinks.remove(sink)
-        except ValueError:
-            raise ValueError(f"{sink!r} is not a registered process sink") from None
+        if sink not in _process_sinks:
+            raise ValueError(f"{sink!r} is not a registered process sink")
+
+        remaining = list(_process_sinks)
+        remaining.remove(sink)
+        _process_sinks = tuple(remaining)
 
 
 def flush_sinks() -> None:
@@ -179,7 +190,7 @@ def flush_sinks() -> None:
 
 
 def _flush_process_sinks() -> None:
-    for sink in tuple(_process_sinks):
+    for sink in _process_sinks:
         try:
             sink.flush()
         except Exception:
@@ -187,15 +198,18 @@ def _flush_process_sinks() -> None:
 
 
 def _active_sinks() -> tuple[Sink, ...]:
-    # The common cases allocate nothing: with no process sinks the
-    # scoped tuple is returned as is, and the not-recording fast path
-    # only asks whether the result is empty.
+    # The common cases allocate nothing and return a stable object:
+    # with only process sinks or only scoped ones, that tier's tuple
+    # is returned as is. The not-recording fast path only asks whether
+    # the result is empty.
 
     scoped = _scoped_sinks.get()
 
+    if not scoped:
+        return _process_sinks
     if not _process_sinks:
         return scoped
-    return tuple(_process_sinks) + scoped
+    return _process_sinks + scoped
 
 
 # The reentrancy guard. Set while the recording machinery itself runs,
@@ -287,11 +301,40 @@ def _notify_error(event: Event, active: tuple[Sink, ...]) -> None:
     _deliver("on_error", event, active)
 
 
+# The effective policies of the active set most recently asked about,
+# keyed by the tuple itself: (active, capture_args, capture_result).
+# The active set is the same object call after call while no sink is
+# added or removed and no timeline opens or closes, so one entry
+# answers nearly every call; a change misses once and recomputes.
+# A sink's declarations are fixed at construction, so an entry never
+# goes stale while its tuple stands. Replaced whole, never mutated,
+# so a reader on another thread sees a consistent triple.
+
+_policy_cache: tuple[tuple[Sink, ...], CapturePolicy, CapturePolicy] | None = None
+
+
 def _required_policy(active: tuple[Sink, ...], axis: str) -> CapturePolicy:
-    # The effective capture policy for one axis ("capture_args" or
-    # "capture_result"): the declaration with the highest level among
-    # the active sinks, so a test's tape cannot downgrade what a
-    # streaming sink sharing the process needs.
+    """The effective capture policy for one axis ("capture_args" or
+    "capture_result") across the active sinks, from the cache when
+    the active set is the one last asked about."""
+
+    global _policy_cache
+
+    cached = _policy_cache
+    if cached is None or cached[0] is not active:
+        cached = _policy_cache = (
+            active,
+            _resolve_required(active, "capture_args"),
+            _resolve_required(active, "capture_result"),
+        )
+
+    return cached[1] if axis == "capture_args" else cached[2]
+
+
+def _resolve_required(active: tuple[Sink, ...], axis: str) -> CapturePolicy:
+    # The declaration with the highest level among the active sinks,
+    # so a test's tape cannot downgrade what a streaming sink sharing
+    # the process needs.
 
     required: CapturePolicy = NONE
     required_level = -1
