@@ -23,6 +23,14 @@ supplies defaults for OTel's own environment variables, so the same
 config reaches an http/protobuf collector or a gRPC one with the
 deployment environment always able to override the file.
 
+The export pipelines are wrapture's own: the factory builds them
+from the table and the environment and hands them to the sinks
+directly, without installing or consulting the SDK's global
+providers. The span sink in particular does not go through the
+SDK's tracer at all; it builds each finished span itself and hands
+it to the span processor, which is where the cost of exporting a
+span is kept to the export.
+
 The OpenTelemetry dependencies are not part of base wrapture; the
 `wrapture[otel]` extra installs them. The code ships in every wheel,
 but nothing in wrapture imports this subpackage until a config or
@@ -37,14 +45,10 @@ from typing import Any
 import wrapture
 from wrapture.sinks import _exception_level
 
+from . import providers
 from .environment import _apply_environment
 from .logs import OpenTelemetryLogsSink
 from .metrics import OpenTelemetryMetricsSink
-from .providers import (
-    _configure_logger_provider,
-    _configure_meter_provider,
-    _configure_provider,
-)
 from .spans import OpenTelemetrySink
 
 _SIGNALS = ("traces", "metrics", "logs")
@@ -65,17 +69,22 @@ def sink(
     `signals` says which are enabled (all by default), and each has
     an optional table of its own tuning: `traces` takes the span
     sink's options plus `sample`, a keep rate applied to the trace
-    export alone (the metrics beside it still hear every event),
-    `metrics` takes the metrics sink's options plus
-    `export_interval`, seconds between metric exports, and `logs`
-    takes the logs sink's options.
+    export alone (the metrics beside it still hear every event), and
+    `sampler` with `sampler_arg`, the OTel sampler by its documented
+    name ("parentbased_traceidratio" with a keep rate, say), the
+    config spelling of OTEL_TRACES_SAMPLER that reaches only
+    wrapture's own pipeline; `metrics` takes the metrics sink's
+    options plus `export_interval`, seconds between metric exports;
+    and `logs` takes the logs sink's options.
 
     `environment` holds defaults for OTel's own environment
     variables: each key is uppercased, prefixed with OTEL_ when not
     already, and applied with setdefault, so a variable set in the
-    real environment always wins. Named options like
-    `export_interval` are passed to constructors explicitly and beat
-    both. `service_name` names the service for every enabled signal.
+    real environment always wins. The variables are process-wide,
+    visible to any other OTel setup in the application too. Named
+    options like `export_interval` and `sampler` are passed to
+    constructors explicitly, beat both, and touch nothing shared.
+    `service_name` names the service for every enabled signal.
 
     `exceptions` says how much of an exception the traces and logs
     signals export: "full" (type, message and stacktrace, the
@@ -108,10 +117,27 @@ def sink(
     if "traces" in signals:
         options = dict(traces or {})
         sample = options.pop("sample", None)
+        sampler_name = options.pop("sampler", None)
+        sampler_arg = options.pop("sampler_arg", None)
 
-        _configure_provider(service_name)
+        if sampler_name is not None and not isinstance(sampler_name, str):
+            raise ValueError(f"sampler must be a sampler name, got {sampler_name!r}")
+        if sampler_arg is not None and (
+            not isinstance(sampler_arg, (int, float)) or isinstance(sampler_arg, bool)
+        ):
+            raise ValueError(f"sampler_arg must be a number, got {sampler_arg!r}")
 
-        spans = OpenTelemetrySink(exceptions=exceptions, **options)
+        processor, resource, sampler = providers._trace_pipeline(
+            service_name, sampler_name, sampler_arg
+        )
+
+        spans = OpenTelemetrySink(
+            processor=processor,
+            resource=resource,
+            sampler=sampler,
+            exceptions=exceptions,
+            **options,
+        )
         span_sink: wrapture.Sink = spans
         if sample is not None:
             span_sink = wrapture.Sample(sample, span_sink)
@@ -131,15 +157,17 @@ def sink(
                 f" got {export_interval!r}"
             )
 
-        _configure_meter_provider(service_name, export_interval)
-        sinks.append(OpenTelemetryMetricsSink(**options))
+        provider = providers._meter_provider(service_name, export_interval)
+        sinks.append(OpenTelemetryMetricsSink(provider=provider, **options))
 
     if "logs" in signals:
         options = dict(logs or {})
 
-        _configure_logger_provider(service_name)
+        provider = providers._logger_provider(service_name)
         sinks.append(
-            OpenTelemetryLogsSink(spans=spans, exceptions=exceptions, **options)
+            OpenTelemetryLogsSink(
+                provider=provider, spans=spans, exceptions=exceptions, **options
+            )
         )
 
     # A lone signal is returned bare; several fan out. Either way the

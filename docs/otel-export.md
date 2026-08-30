@@ -153,7 +153,14 @@ root. Sampling lives here rather than gating the whole registration
 deliberately: a gate on everything would starve the metrics
 histograms, while sampling inside drops only the span export,
 keeping the always-on cheap signal complete beside the sampled
-drill-down.
+drill-down. The same table takes `sampler` and `sampler_arg`, the
+OTel sampler by its documented name (`"parentbased_traceidratio"`
+with a keep rate, say): the config spelling of
+`OTEL_TRACES_SAMPLER`, with the difference that it reaches
+wrapture's own pipeline alone rather than the process environment.
+Where `sample` is wrapture's gate, dropping whole trees before the
+sink hears them, `sampler` is OTel's, honouring an upstream decision
+carried in inbound headers and leaving the metrics signal complete.
 
 ### The request data-key contract
 
@@ -180,9 +187,9 @@ inside the request with `annotate()`.
 The result of a request event is its status line, exported as
 `http.response.status_code`, with a 5xx setting the span's error
 status. Because routing happens after the request event opens, the
-route-based name is applied when the span closes; a span processor
-or head sampler that reads the name at start sees the path-based
-name, the same as the SDK's own HTTP instrumentations. A request that
+route-based name is only known when the span closes; the sampler,
+which decides at the root's open, sees the path-based name, the
+same as with the SDK's own HTTP instrumentations. A request that
 matches no route keeps its path-based name and has no `http.route`.
 Every other key on a request event, `endpoint` or anything else an
 instrumentation annotates, is exported as ordinary
@@ -196,23 +203,31 @@ data on `"call"` and `"block"` events is never interpreted.
 ### One trace id everywhere
 
 The sink completes wrapture's trace identity story by claiming the
-tree's w3c slot. There are two id generators in the room, wrapture's
-minting (which must work with no OTel installed) and the SDK's, and
-the sink makes them agree:
+tree's w3c slot. The identity exported is the slot's own; the sink
+mints no trace id of its own, so there is nothing to reconcile:
 
-- For an identity that arrived in request headers, the root span is
-  created with a remote parent built from the slot, so the exported
-  tree continues the caller's trace rather than starting a detached
-  one, and the arrived sampled flag rides along for the SDK's
-  parent-based sampler to honour: an upstream "do not sample"
-  exports nothing. The sampler is the SDK default,
-  `parentbased_always_on`, overridable through the standard
-  `OTEL_TRACES_SAMPLER` variables.
-- For an identity wrapture minted locally, the root span is created
-  normally, the SDK generating its own trace id, and the slot takes
-  the whole identity at that moment, before the operation's body
-  runs, so serialised files, outbound headers and exported spans all
-  read one id and the backend shows a clean native root.
+- For an identity wrapture minted locally, the root span carries the
+  minted trace id and takes the minted span id as its own, and the
+  slot is marked claimed, so serialised files, outbound headers and
+  exported spans all read one id and the backend shows a clean
+  native root.
+- For an identity that arrived in request headers, the root span
+  continues the caller's trace with a remote parent built from the
+  slot, so the exported tree joins the caller's rather than starting
+  a detached one. The arrived sampled flag rides on that parent for
+  the parent-based sampler to honour: an upstream "do not sample"
+  exports nothing.
+
+The sampler decides once per tree, at the root, and the spans
+beneath inherit the decision. It is `parentbased_always_on` by
+default, overridable by the `sampler` and `sampler_arg` keys of
+`[otel.traces]` or the standard `OTEL_TRACES_SAMPLER` and
+`OTEL_TRACES_SAMPLER_ARG` variables, either naming the SDK's
+documented samplers (`always_on`, `always_off`, `traceidratio`, and
+their `parentbased_` forms). A tree the sampler drops exports no spans but
+is still claimed, its slot recording the decision, so outbound
+headers tell downstream services "not sampled" and the trace stays
+consistently absent end to end.
 
 In both cases the slot's span-id register then tracks the innermost
 exported span as spans open and close, so `trace_headers()` carries
@@ -221,6 +236,26 @@ attach to spans that really got exported. When wrapture's own
 `sample =` gate drops a tree, the sink never hears it: the minted id
 stands unclaimed and outbound headers carry it, which is what "not
 sampled" means.
+
+### How a span is built
+
+The sink does not use the SDK's tracer. The SDK's own pipeline is
+layered: a tracer builds a mutable span, validating each attribute
+as it is set; ending the span snapshots it as a `ReadableSpan` and
+hands it to the span processor; the processor batches and the
+exporter encodes and sends. Everything a wrapture span needs is
+known when its event closes, so the sink builds the `ReadableSpan`
+itself at that moment, in one step from the event, and hands it to
+the same processor. What the sink keeps between an event's enter
+and its close is a small entry holding the ids, the parent and the
+start time. The processor, exporter and wire format are the SDK's,
+unchanged; only the tracer's intermediate span object, with its
+validated attribute store and its locks, is skipped, which is where
+most of the per-span cost of exporting used to go. The exception
+stacktrace attribute is formatted from a plain walk of the
+traceback's frames rather than `traceback.format_exception`, which
+on current Pythons also parses each frame's source to draw caret
+underlines no backend renders.
 
 ## The metrics signal
 
@@ -271,21 +306,28 @@ environment always wins. That gives the file three postures:
 self-contained (endpoint in the file, runs with no environment
 setup), deployment-owned (no environment table, the real environment
 decides everything), or mixed, defaults in the file with the
-deployment overriding what differs. Named keys such as
-`export_interval` are passed to constructors explicitly and beat
-both spellings.
+deployment overriding what differs. The variables are process-wide:
+anything else in the application that builds OTel providers or
+exporters from the environment sees the file's defaults too, which
+is what makes the table convenient and is worth knowing about when
+an application has OTel setup of its own. Named keys such as
+`export_interval` and `sampler` are passed to constructors
+explicitly, beat both spellings, and touch nothing shared.
 
 The SDK posture is wrapture-first: choosing wrapture means taking
-all it does, including standing up the tracer, meter and logger
-providers, which is what the zero-code story requires, since in the
-config-driven case there is no application code to configure the
-SDK. An application that already configured its own providers wins
-as the failsafe, the telemetry flowing through the exporters the
-application chose, and wrapture warns (a `ConfigWarning` per signal)
-naming what is lost: the table's provider-level settings no longer
-apply, and behaviour wrapture relies on, such as the sampler
-honouring an upstream sampling decision, is whatever the application
-installed.
+all it does, including standing up the export pipelines, which is
+what the zero-code story requires, since in the config-driven case
+there is no application code to configure the SDK. The pipelines are
+wrapture's own: the span processor and sampler for traces, and the
+meter and logger providers for the other signals, are built from the
+table and the environment and handed to wrapture's sinks directly.
+The SDK's global providers are neither consulted nor installed, so
+an application that uses the OpenTelemetry API on its own account
+keeps whatever it set up for itself, its spans going wherever it
+sends them, and wrapture's telemetry is unaffected by it. The two do
+not interleave in one pipeline; they were never parented together in
+any case, since wrapture parents through its own event tree rather
+than OTel's ambient context.
 
 For a look without a collector, `OTEL_TRACES_EXPORTER=console`,
 `OTEL_METRICS_EXPORTER=console` and `OTEL_LOGS_EXPORTER=console`

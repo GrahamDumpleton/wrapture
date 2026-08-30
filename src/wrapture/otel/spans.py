@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 from collections.abc import Sequence
 from typing import Any
 
-from opentelemetry import trace
 from opentelemetry.context import Context
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import Event as SpanEvent
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+from opentelemetry.sdk.trace.sampling import DEFAULT_ON, Decision, Sampler
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import (
     Link,
     NonRecordingSpan,
@@ -17,6 +22,7 @@ from opentelemetry.trace import (
     Status,
     StatusCode,
     TraceFlags,
+    set_span_in_context,
 )
 from opentelemetry.util.types import AttributeValue
 
@@ -27,32 +33,77 @@ from ..sinks import _exception_level
 from ..trace import TraceSlot
 from .common import _PRIMITIVES, _SEMCONV_DATA, _exception_attributes, _status_code
 
+_SAMPLED = TraceFlags(TraceFlags.SAMPLED)
+_NOT_SAMPLED = TraceFlags(TraceFlags.DEFAULT)
+
+_UNSET = Status(StatusCode.UNSET)
+_ERROR = Status(StatusCode.ERROR)
+_ABANDONED = Status(StatusCode.ERROR, "operation never completed")
+
+_NO_LINKS: tuple[Link, ...] = ()
+
+
+class _OpenSpan:
+    """What the sink remembers about a span between its enter and its
+    close: the identity it was given, its parent, when it started, and
+    whether the tree is sampled at all. The event itself is kept so a
+    span abandoned by its event can still be built by reap()."""
+
+    __slots__ = ("context", "event", "links", "opened", "parent", "sampled", "start")
+
+    def __init__(
+        self,
+        event: Event,
+        context: SpanContext,
+        parent: SpanContext | None,
+        links: Sequence[Link],
+        start: int,
+        sampled: bool,
+    ) -> None:
+        self.event = event
+        self.context = context
+        self.parent = parent
+        self.links = links
+        self.start = start
+        self.sampled = sampled
+        self.opened = time.monotonic()
+
 
 class OpenTelemetrySink(wrapture.Sink):
     """Emit one OTel span per wrapture event.
 
-    Spans are parented explicitly through `event.parent_id` rather than
-    OTel's ambient context. That is deliberate: sink notifications
-    arrive on the thread that ran the observed operation, but a
-    generator or a streamed response body may begin on one thread and
-    close on another, so the ambient context at close time is not
-    reliably the one that was current at the start. wrapture's parent
-    link is a process-wide sequence number that is correct in all of
-    those cases. An event's links (`event.links`, the origins of work
-    handed off with detach() or named by a consumer block) become the
-    span's links, the causal-but-not-nested relationship OTel draws
-    the same way.
+    The sink does not use the SDK's tracer. Everything a span needs is
+    known when the event closes, so the sink builds the finished
+    `ReadableSpan` there, in one step, and hands it to the span
+    processor, the same object the SDK's own tracer hands spans to.
+    The processor batches and exports exactly as it would for the
+    tracer's spans; only the mutable `Span` the tracer would have
+    kept open in between, with its validated attribute store and its
+    locks, is skipped. What the sink records at enter is a small
+    slotted entry: the ids, the parent, the start time.
 
-    The sink also claims the tree's trace identity, writing into the
-    w3c slot per the TraceSlot contract so that files, outbound
-    headers and exported spans agree. An identity that arrived in
-    headers is continued: the root span gets a remote parent built
-    from the slot, and only the span-id register and the claimed flag
-    are written. An identity wrapture minted locally is replaced
-    wholesale at the root event's delivery, before the operation's
-    body runs: the SDK generates its own trace id, and the slot takes
-    it, so the backend shows a clean native root. As spans open and
-    close, the register tracks the innermost exported span, so
+    Spans are parented explicitly through `event.parent_id` rather
+    than OTel's ambient context. That is deliberate: sink
+    notifications arrive on the thread that ran the observed
+    operation, but a generator or a streamed response body may begin
+    on one thread and close on another, so the ambient context at
+    close time is not reliably the one that was current at the start.
+    wrapture's parent link is a process-wide sequence number that is
+    correct in all of those cases. An event's links (`event.links`,
+    the origins of work handed off with detach() or named by a
+    consumer block) become the span's links, the causal-but-not-nested
+    relationship OTel draws the same way.
+
+    The sink also claims the tree's trace identity, per the TraceSlot
+    contract, so that files, outbound headers and exported spans
+    agree. The identity is the slot's: a trace id wrapture minted is
+    exported as is, with the root span taking the minted span id as
+    its own, and an identity that arrived in headers is continued,
+    the root span getting a remote parent built from the slot. The
+    sampler decides once per tree at the root, seeing the remote
+    parent when there is one so an upstream decision is honoured, and
+    children inherit the decision. As spans open and close, the
+    slot's span-id register tracks the innermost exported span, so
     `trace_headers()` carries a live parent at any moment inside the
     tree.
     """
@@ -67,23 +118,51 @@ class OpenTelemetrySink(wrapture.Sink):
     def __init__(
         self,
         *,
+        processor: SpanProcessor | None = None,
+        resource: Resource | None = None,
+        sampler: Sampler | None = None,
         tracer_name: str = "wrapture",
         kinds: Sequence[str] = ("call", "request", "block"),
         max_value_length: int = 512,
         attribute_prefix: str = "wrapture",
         exceptions: str = "full",
     ) -> None:
-        self._tracer = trace.get_tracer(tracer_name)
+        # The export pipeline: a processor to hand finished spans to,
+        # the resource and scope stamped on each. Left unspecified,
+        # the processor is built from the standard OTel environment,
+        # the way the [otel] table's factory does it.
+
+        if processor is None:
+            from .providers import _span_processor
+
+            processor = _span_processor()
+
+        self._processor = processor
+        self._resource = resource if resource is not None else Resource.create({})
+        self._sampler = sampler if sampler is not None else DEFAULT_ON
+        self._scope = InstrumentationScope(tracer_name)
+
         self._kinds = frozenset(kinds)
         self._max_value_length = max_value_length
-        self._prefix = attribute_prefix
         self._exceptions = _exception_level(exceptions)
 
-        # Open spans by event.seq, so a close pairs with its start and
-        # a child finds its parent. The wall-clock entry lets reap()
-        # end spans whose events never close.
+        # The attribute names this sink writes, formatted once.
 
-        self._spans: dict[int, tuple[trace.Span, float]] = {}
+        self._key_path = f"{attribute_prefix}.path"
+        self._key_kind = f"{attribute_prefix}.kind"
+        self._key_seq = f"{attribute_prefix}.seq"
+        self._key_thread = f"{attribute_prefix}.thread_name"
+        self._key_result = f"{attribute_prefix}.result"
+        self._key_items = f"{attribute_prefix}.items"
+        self._key_body_duration = f"{attribute_prefix}.body_duration"
+        self._key_abandoned = f"{attribute_prefix}.abandoned"
+        self._arg_prefix = f"{attribute_prefix}.arg."
+        self._data_prefix = f"{attribute_prefix}.data."
+
+        # Open spans by event.seq, so a close pairs with its start and
+        # a child finds its parent.
+
+        self._spans: dict[int, _OpenSpan] = {}
         self._lock = threading.Lock()
 
         # wrapture stamps events on the perf_counter clock; OTel wants
@@ -107,182 +186,96 @@ class OpenTelemetrySink(wrapture.Sink):
             return
 
         # Parent explicitly. A missing parent means it was filtered out
-        # or reaped; the child becomes a root rather than being lost.
+        # or reaped; the child then hangs off whatever the register
+        # names rather than being lost.
 
-        context = None
+        enclosing = None
         if event.parent_id is not None:
             with self._lock:
-                entry = self._spans.get(event.parent_id)
-            if entry is not None:
-                context = trace.set_span_in_context(entry[0])
-            else:
+                enclosing = self._spans.get(event.parent_id)
+            if enclosing is None:
                 self.orphaned += 1
 
-        # A root whose identity arrived in headers continues the
-        # caller's trace: the span gets a remote parent built from the
-        # slot, with the sampled flag riding along for the parent-based
-        # sampler to honour, instead of starting a detached trace.
+        links = self._links(event) if event.links else _NO_LINKS
 
-        slot = self._slot(event)
-        if context is None and slot is not None and slot.headers and not slot.claimed:
-            context = self._remote_parent(slot)
+        if enclosing is not None:
+            trace_id = enclosing.context.trace_id
+            span_id = random.getrandbits(64)
+            parent: SpanContext | None = enclosing.context
+            sampled = enclosing.sampled
+        else:
+            trace_id, span_id, parent, sampled = self._root(event, links)
+
+        context = SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=False,
+            trace_flags=_SAMPLED if sampled else _NOT_SAMPLED,
+        )
+
+        # A child's span id goes into the register so outbound
+        # injection parents downstream services onto it; the root's
+        # was written by _root().
+
+        if enclosing is not None:
+            slot = self._slot(event)
+            if slot is not None:
+                slot.span_id = format(span_id, "016x")
 
         # The recording path stamps event.started just after on_enter
         # is delivered, so its bookkeeping is not charged to the
         # observed code; at this moment it is still None, and the
-        # start must be taken from this sink's own pinned clock. The
-        # SDK's fallback (wall-clock now) would put the start and the
-        # close-time end on two different clocks, and their drift
-        # since the pinning would make short spans come out negative.
+        # start must be taken from this sink's own pinned clock. Using
+        # wall-clock now would put the start and the close-time end on
+        # two different clocks, and their drift since the pinning
+        # would make short spans come out negative.
 
-        start_time = self._to_epoch_ns(event.started)
-        if start_time is None:
-            start_time = self._epoch_offset_ns + int(time.perf_counter() * 1e9)
-
-        span = self._tracer.start_span(
-            name=self._name(event),
-            context=context,
-            kind=SpanKind.SERVER if event.kind == "request" else SpanKind.INTERNAL,
-            start_time=start_time,
-            attributes=self._enter_attributes(event),
-            links=self._links(event),
-            record_exception=False,
-            set_status_on_exception=False,
-        )
-
-        if slot is not None:
-            self._claim(slot, span)
+        start = self._to_epoch_ns(event.started)
+        if start is None:
+            start = self._epoch_offset_ns + int(time.perf_counter() * 1e9)
 
         with self._lock:
-            self._spans[event.seq] = (span, time.monotonic())
+            self._spans[event.seq] = _OpenSpan(
+                event, context, parent, links, start, sampled
+            )
 
     def on_exit(self, event: Event) -> None:
         """Close the event's span with its outcome and timing."""
 
-        span = self._take(event.seq)
-        if span is None:
+        opened = self._take(event.seq)
+        if opened is None:
             return
 
-        # A request's result is its status line; report it the semconv
-        # way and mark server errors. Anything else is just a result.
+        if opened.sampled:
+            self._export(opened, escaped=None, end=self._end_time(event))
 
-        errored = False
-
-        if event.kind == "request":
-            status = _status_code(event.result)
-            if status is not None:
-                span.set_attribute("http.response.status_code", status)
-                if status >= 500:
-                    span.set_status(Status(StatusCode.ERROR))
-                    errored = True
-        elif event.result is not wrapture.MISSING:
-            span.set_attribute(f"{self._prefix}.result", self._coerce(event.result))
-
-        # Routing matches after the span opened, so a route annotation
-        # (the matched pattern, "/quote/<item>") is only known now:
-        # export it under its semconv name and rename the span to the
-        # low-cardinality "METHOD route" form backends group by. A
-        # request that matched no route keeps its path-based name.
-
-        if event.kind == "request":
-            route = event.data.get("route")
-            if route:
-                span.set_attribute("http.route", str(route))
-                span.update_name(f"{self._method(event)} {route}")
-
-        # A streamed body carries two extra numbers worth keeping: how
-        # many items it produced and the time spent producing them.
-
-        if event.items is not None:
-            span.set_attribute(f"{self._prefix}.items", event.items)
-        if event.body_duration is not None:
-            span.set_attribute(f"{self._prefix}.body_duration", event.body_duration)
-
-        # Exceptions the code caught and noted against the event each
-        # become an exception event on the span, placed at the moment
-        # of the note, and the first of them sets the error status
-        # unless a 5xx already did: the two agree rather than fight.
-
-        self._record_caught(span, event, errored=errored)
-
-        self._sweep_data(span, event)
-        span.end(end_time=self._end_time(event))
         self._restore_register(event)
 
     def on_error(self, event: Event) -> None:
         """Close the event's span as failed, recording the exception
         that escaped and any noted against the event besides."""
 
-        span = self._take(event.seq)
-        if span is None:
+        opened = self._take(event.seq)
+        if opened is None:
             return
 
-        if event.exception is not None:
-            self._record_exception(span, event.exception)
-            span.set_status(Status(StatusCode.ERROR, type(event.exception).__name__))
-        else:
-            span.set_status(Status(StatusCode.ERROR))
+        if opened.sampled:
+            self._export(opened, escaped=event.exception, end=self._end_time(event))
 
-        self._record_caught(span, event, errored=True)
-
-        self._sweep_data(span, event)
-        span.end(end_time=self._end_time(event))
         self._restore_register(event)
-
-    def _record_caught(self, span: trace.Span, event: Event, *, errored: bool) -> None:
-        # One exception event per noted exception, timestamped from the
-        # note's perf_counter moment through the sink's pinned clock so
-        # it sits inside the span on the same clock as its start and
-        # end. The status is set to ERROR once, from the first note,
-        # and left alone when the span is already in error.
-
-        for caught in event.caught:
-            self._record_exception(
-                span, caught.exception, timestamp=self._to_epoch_ns(caught.at)
-            )
-
-            if not errored:
-                span.set_status(
-                    Status(StatusCode.ERROR, type(caught.exception).__name__)
-                )
-                errored = True
-
-    def _record_exception(
-        self,
-        span: trace.Span,
-        exception: BaseException,
-        *,
-        timestamp: int | None = None,
-    ) -> None:
-        # At "full" the SDK records type, message and stacktrace; the
-        # reduced levels add the exception event by hand with only the
-        # attributes the level allows.
-
-        if self._exceptions == "full":
-            span.record_exception(exception, timestamp=timestamp)
-        else:
-            span.add_event(
-                "exception",
-                attributes=_exception_attributes(exception, self._exceptions),
-                timestamp=timestamp,
-            )
 
     def flush(self) -> None:
         """Push batched spans to the exporter; called by wrapture at
         interpreter exit and from flush_sinks()."""
 
         self.reap()
-
-        provider = trace.get_tracer_provider()
-        force_flush = getattr(provider, "force_flush", None)
-        if force_flush is not None:
-            force_flush()
+        self._processor.force_flush()
 
     def on_fork(self) -> None:
         """Reset for a child process after os.fork(): a fresh lock,
         and the open-span table dropped, since the in-flight spans
         belong to the parent, which will close them. The SDK's own
-        at-fork handling restarts the exporter worker threads."""
+        at-fork handling restarts the exporter worker thread."""
 
         self._lock = threading.Lock()
         self._spans = {}
@@ -300,13 +293,15 @@ class OpenTelemetrySink(wrapture.Sink):
 
         cutoff = time.monotonic() - max_age
         with self._lock:
-            stale = [seq for seq, (_, opened) in self._spans.items() if opened < cutoff]
+            stale = [
+                seq for seq, opened in self._spans.items() if opened.opened < cutoff
+            ]
             entries = [self._spans.pop(seq) for seq in stale]
 
-        for span, _ in entries:
-            span.set_status(Status(StatusCode.ERROR, "operation never completed"))
-            span.set_attribute(f"{self._prefix}.abandoned", True)
-            span.end()
+        now = self._epoch_offset_ns + int(time.perf_counter() * 1e9)
+        for opened in entries:
+            if opened.sampled:
+                self._export(opened, escaped=None, end=now, abandoned=True)
 
         return len(entries)
 
@@ -319,41 +314,105 @@ class OpenTelemetrySink(wrapture.Sink):
 
     # -- internals -------------------------------------------------------
 
-    def _take(self, seq: int) -> trace.Span | None:
+    def _take(self, seq: int) -> _OpenSpan | None:
         with self._lock:
-            entry = self._spans.pop(seq, None)
-        return entry[0] if entry is not None else None
+            return self._spans.pop(seq, None)
 
     def _slot(self, event: Event) -> TraceSlot | None:
         if event.trace is None:
             return None
         return event.trace.slots.get("w3c")
 
-    def _remote_parent(self, slot: TraceSlot) -> Context:
-        # The caller's identity as a remote parent SpanContext, so the
-        # exported root continues the upstream trace and the sampler
-        # sees the upstream sampling decision.
+    def _root(
+        self, event: Event, links: Sequence[Link]
+    ) -> tuple[int, int, SpanContext | None, bool]:
+        # A root's identity comes from the tree's slot, and the root
+        # claims it. Three shapes: an identity that arrived in headers
+        # is continued, the root taking the caller's span as a remote
+        # parent; an identity wrapture minted is used as is, the root
+        # taking the minted span id as its own; and a slot already
+        # claimed (this event's parent was filtered or reaped) parents
+        # onto whatever exported span the register names. A tree with
+        # no slot at all, trace identity off, mints ids of its own.
+        # The sampler runs here, once per tree, and sees the remote
+        # parent when there is one.
 
-        sampled = TraceFlags.SAMPLED if slot.sampled else TraceFlags.DEFAULT
-        parent = SpanContext(
-            trace_id=int(slot.trace_id, 16),
-            span_id=int(slot.span_id, 16),
-            is_remote=True,
-            trace_flags=TraceFlags(sampled),
+        slot = self._slot(event)
+        parent: SpanContext | None
+
+        if slot is None:
+            trace_id = random.getrandbits(128)
+            span_id = random.getrandbits(64)
+            sampled = self._sample(None, trace_id, event, links)
+            return trace_id, span_id, None, sampled
+
+        trace_id = int(slot.trace_id, 16)
+
+        if slot.claimed:
+            parent = SpanContext(
+                trace_id=trace_id,
+                span_id=int(slot.span_id, 16),
+                is_remote=False,
+                trace_flags=_SAMPLED if slot.sampled else _NOT_SAMPLED,
+            )
+            span_id = random.getrandbits(64)
+            slot.span_id = format(span_id, "016x")
+            return trace_id, span_id, parent, bool(slot.sampled)
+
+        if slot.headers:
+            parent = SpanContext(
+                trace_id=trace_id,
+                span_id=int(slot.span_id, 16),
+                is_remote=True,
+                trace_flags=_SAMPLED if slot.sampled else _NOT_SAMPLED,
+            )
+            span_id = random.getrandbits(64)
+            sampled = self._sample(parent, trace_id, event, links)
+            slot.span_id = format(span_id, "016x")
+        else:
+            parent = None
+            span_id = int(slot.span_id, 16)
+            sampled = self._sample(None, trace_id, event, links)
+
+        slot.sampled = sampled
+        slot.claimed = True
+
+        return trace_id, span_id, parent, sampled
+
+    def _sample(
+        self,
+        parent: SpanContext | None,
+        trace_id: int,
+        event: Event,
+        links: Sequence[Link],
+    ) -> bool:
+        # The sampler's view: the parent as a context holding a
+        # non-recording span, the way the SDK's tracer presents a
+        # remote parent, so a parent-based sampler reads its flags.
+
+        parent_context: Context | None = None
+        if parent is not None:
+            parent_context = set_span_in_context(NonRecordingSpan(parent))
+
+        result = self._sampler.should_sample(
+            parent_context,
+            trace_id,
+            self._name(event),
+            self._kind(event),
+            None,
+            links or None,
         )
 
-        return trace.set_span_in_context(NonRecordingSpan(parent))
+        return result.decision is Decision.RECORD_AND_SAMPLE
 
-    def _links(self, event: Event) -> list[Link] | None:
+    def _links(self, event: Event) -> Sequence[Link]:
         # wrapture's event links map one to one onto span links: a
         # detached root (work handed to a thread, or a consumer block
         # naming the message it drained) carries the origin's ids,
         # captured from the register at the hand-off, so the link
         # lands on the span that was actually exported for the origin.
         # A link whose origin carried no trace identity has nothing a
-        # span could point at and is left out. Links can only be set
-        # at span creation, which is why the recording path stamps
-        # them before on_enter is delivered.
+        # span could point at and is left out.
 
         links: list[Link] = []
 
@@ -365,33 +424,14 @@ class OpenTelemetrySink(wrapture.Sink):
                 trace_id=int(link.trace_id, 16),
                 span_id=int(link.span_id, 16),
                 is_remote=link.seq is None,
-                trace_flags=TraceFlags(TraceFlags.SAMPLED),
+                trace_flags=_SAMPLED,
             )
             attributes = {
                 name: self._coerce(value) for name, value in link.attributes.items()
             } or None
             links.append(Link(origin, attributes=attributes))
 
-        return links or None
-
-    def _claim(self, slot: TraceSlot, span: trace.Span) -> None:
-        # Write the exported span into the slot, per the TraceSlot
-        # contract: the register takes the new span's id so outbound
-        # injection parents downstream services onto a span that
-        # really got exported. A minted identity is replaced wholesale
-        # at its first (root) claim, trace id and all, so files,
-        # headers and spans agree on the SDK's id; an identity that
-        # arrived in headers keeps its trace id, which the remote
-        # parenting above already made the span's own.
-
-        span_context = span.get_span_context()
-
-        if not slot.claimed and not slot.headers:
-            slot.trace_id = format(span_context.trace_id, "032x")
-            slot.sampled = bool(span_context.trace_flags.sampled)
-
-        slot.span_id = format(span_context.span_id, "016x")
-        slot.claimed = True
+        return links or _NO_LINKS
 
     def _restore_register(self, event: Event) -> None:
         # A span just closed, so point the register back at the
@@ -400,16 +440,89 @@ class OpenTelemetrySink(wrapture.Sink):
         # root's close nothing is enclosing and nothing is in flight,
         # so the register is left at the root's own id.
 
+        if event.parent_id is None:
+            return
+
         slot = self._slot(event)
-        if slot is None or not slot.claimed or event.parent_id is None:
+        if slot is None or not slot.claimed:
             return
 
         with self._lock:
-            entry = self._spans.get(event.parent_id)
+            enclosing = self._spans.get(event.parent_id)
 
-        if entry is not None:
-            parent_context = entry[0].get_span_context()
-            slot.span_id = format(parent_context.span_id, "016x")
+        if enclosing is not None:
+            slot.span_id = format(enclosing.context.span_id, "016x")
+
+    def _export(
+        self,
+        opened: _OpenSpan,
+        *,
+        escaped: BaseException | None,
+        end: int | None,
+        abandoned: bool = False,
+    ) -> None:
+        # The one place a span is built: attributes, exception events
+        # and status assembled from the closed event, then the
+        # finished ReadableSpan handed to the processor.
+
+        event = opened.event
+        attributes, status = self._attributes(event)
+
+        # Exceptions the code caught and noted against the event each
+        # become an exception event on the span, placed at the moment
+        # of the note, and the first of them sets the error status
+        # unless a 5xx already did: the two agree rather than fight.
+        # An exception that escaped is recorded last, at the close,
+        # and names the error status whatever else was set.
+
+        events: list[SpanEvent] = []
+
+        for caught in event.caught:
+            noted_at = self._to_epoch_ns(caught.at)
+            events.append(self._exception_event(caught.exception, noted_at))
+            if status is _UNSET:
+                status = Status(StatusCode.ERROR, type(caught.exception).__name__)
+
+        if escaped is not None:
+            events.append(self._exception_event(escaped, end, escaped=True))
+            status = Status(StatusCode.ERROR, type(escaped).__name__)
+
+        if abandoned:
+            attributes[self._key_abandoned] = True
+            status = _ABANDONED
+
+        span = ReadableSpan(
+            name=self._name(event),
+            context=opened.context,
+            parent=opened.parent,
+            resource=self._resource,
+            attributes=attributes,
+            events=events,
+            links=opened.links,
+            kind=self._kind(event),
+            instrumentation_scope=self._scope,
+            status=status,
+            start_time=opened.start,
+            end_time=end,
+        )
+
+        self._processor.on_end(span)
+
+    def _exception_event(
+        self,
+        exception: BaseException,
+        timestamp: int | None,
+        *,
+        escaped: bool = False,
+    ) -> SpanEvent:
+        # The semconv exception event, holding as much of the
+        # exception as the `exceptions=` level allows.
+
+        return SpanEvent(
+            "exception",
+            _exception_attributes(exception, self._exceptions, escaped=escaped),
+            timestamp,
+        )
 
     def _to_epoch_ns(self, perf_seconds: float | None) -> int | None:
         if perf_seconds is None:
@@ -421,41 +534,43 @@ class OpenTelemetrySink(wrapture.Sink):
             return None
         return self._to_epoch_ns(event.started + event.duration)
 
-    def _sweep_data(self, span: trace.Span, event: Event) -> None:
-        # annotate() merges into the in-flight event's data dict, after
-        # on_enter has already read it, and a request gains fields
-        # (bytes, app_duration) as its body streams, so the dict is
-        # swept again at close. Re-setting a key exported at enter is
-        # fine: the last write before end() wins.
-
-        skip = _SEMCONV_DATA if event.kind == "request" else frozenset()
-
-        for name, value in event.data.items():
-            if name not in skip:
-                span.set_attribute(f"{self._prefix}.data.{name}", self._coerce(value))
+    def _kind(self, event: Event) -> SpanKind:
+        return SpanKind.SERVER if event.kind == "request" else SpanKind.INTERNAL
 
     def _name(self, event: Event) -> str:
         # Requests read access-log style, the way HTTP spans usually
-        # do; everything else uses the binding's friendly name.
+        # do, named by the matched route pattern when the app
+        # annotated one ("GET /quote/<item>", the low-cardinality form
+        # backends group by) and by the path otherwise; everything
+        # else uses the binding's friendly name.
 
         if event.kind == "request":
-            return f"{self._method(event)} {event.data.get('path', '')}"
+            route = event.data.get("route")
+            return f"{self._method(event)} {route or event.data.get('path', '')}"
 
         return event.label or event.path
 
     def _method(self, event: Event) -> str:
         return str(event.data.get("method") or "?")
 
-    def _enter_attributes(self, event: Event) -> dict[str, AttributeValue]:
+    def _attributes(self, event: Event) -> tuple[dict[str, AttributeValue], Status]:
+        # Everything the event says about itself, read once at close:
+        # annotate() merges into the data dict while the operation
+        # runs, and a request gains fields (bytes, app_duration, the
+        # matched route) as its body streams, so reading at enter
+        # would only have to be repeated here.
+
         attributes: dict[str, AttributeValue] = {
-            f"{self._prefix}.path": event.path,
-            f"{self._prefix}.kind": event.kind,
-            f"{self._prefix}.seq": event.seq,
-            f"{self._prefix}.thread_name": event.thread_name,
+            self._key_path: event.path,
+            self._key_kind: event.kind,
+            self._key_seq: event.seq,
+            self._key_thread: event.thread_name,
         }
+        status = _UNSET
 
         # A request's descriptive fields live in event.data; map the
-        # obvious ones onto their semantic-convention names.
+        # reserved ones onto their semantic-convention names. Its
+        # result is its status line; a 5xx marks the span in error.
 
         if event.kind == "request":
             method = event.data.get("method")
@@ -467,17 +582,39 @@ class OpenTelemetrySink(wrapture.Sink):
             query = event.data.get("query")
             if query:
                 attributes["url.query"] = str(query)
-            return attributes
+            route = event.data.get("route")
+            if route:
+                attributes["http.route"] = str(route)
 
-        if event.arguments:
-            for name, value in event.arguments.items():
-                attributes[f"{self._prefix}.arg.{name}"] = self._coerce(value)
+            code = _status_code(event.result)
+            if code is not None:
+                attributes["http.response.status_code"] = code
+                if code >= 500:
+                    status = _ERROR
 
-        if event.data:
             for name, value in event.data.items():
-                attributes[f"{self._prefix}.data.{name}"] = self._coerce(value)
+                if name not in _SEMCONV_DATA:
+                    attributes[self._data_prefix + name] = self._coerce(value)
+        else:
+            if event.arguments:
+                for name, value in event.arguments.items():
+                    attributes[self._arg_prefix + name] = self._coerce(value)
 
-        return attributes
+            if event.result is not wrapture.MISSING:
+                attributes[self._key_result] = self._coerce(event.result)
+
+            for name, value in event.data.items():
+                attributes[self._data_prefix + name] = self._coerce(value)
+
+        # A streamed body carries two extra numbers worth keeping: how
+        # many items it produced and the time spent producing them.
+
+        if event.items is not None:
+            attributes[self._key_items] = event.items
+        if event.body_duration is not None:
+            attributes[self._key_body_duration] = event.body_duration
+
+        return attributes, status
 
     def _coerce(self, value: Any) -> AttributeValue:
         # Values arriving here are already bounded summaries, because

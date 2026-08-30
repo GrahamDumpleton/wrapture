@@ -5,8 +5,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from opentelemetry._logs import LogRecord, SeverityNumber, get_logger
-from opentelemetry._logs import get_logger_provider as _get_logger_provider
+from opentelemetry._logs import (
+    LoggerProvider,
+    LogRecord,
+    SeverityNumber,
+    get_logger,
+    get_logger_provider,
+)
 from opentelemetry.context import Context
 from opentelemetry.trace import (
     NonRecordingSpan,
@@ -63,11 +68,20 @@ class OpenTelemetryLogsSink(wrapture.Sink):
     def __init__(
         self,
         *,
+        provider: LoggerProvider | None = None,
         logger_name: str = "wrapture",
         spans: OpenTelemetrySink | None = None,
         exceptions: str = "full",
     ) -> None:
-        self._logger = get_logger(logger_name)
+        # The provider is wrapture's own when the factory built it;
+        # left unspecified, the SDK's global one is used.
+
+        self._provider = provider if provider is not None else get_logger_provider()
+        self._logger = (
+            provider.get_logger(logger_name)
+            if provider is not None
+            else get_logger(logger_name)
+        )
         self._spans = spans
         self._exceptions = _exception_level(exceptions)
 
@@ -126,8 +140,7 @@ class OpenTelemetryLogsSink(wrapture.Sink):
         """Push batched records to the exporter; called by wrapture at
         interpreter exit and from flush_sinks()."""
 
-        provider = _get_logger_provider()
-        force_flush = getattr(provider, "force_flush", None)
+        force_flush = getattr(self._provider, "force_flush", None)
         if force_flush is not None:
             force_flush()
 
@@ -152,9 +165,9 @@ class OpenTelemetryLogsSink(wrapture.Sink):
         span_id = 0
         if self._spans is not None and event.parent_id is not None:
             with self._spans._lock:
-                entry = self._spans._spans.get(event.parent_id)
-            if entry is not None:
-                span_id = entry[0].get_span_context().span_id
+                opened = self._spans._spans.get(event.parent_id)
+            if opened is not None:
+                span_id = opened.context.span_id
 
         flags = TraceFlags(TraceFlags.SAMPLED if slot.sampled else TraceFlags.DEFAULT)
         span_context = SpanContext(
