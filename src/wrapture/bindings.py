@@ -1910,7 +1910,7 @@ class Binding:
 
         if level > NONE:
             info = cached_signature_info(self._signatures, wrapped)
-            arguments = normalized_arguments(info.signature, args, kwargs)
+            arguments = normalized_arguments(info.signature, args, kwargs, info.table)
             if arguments is not None:
                 event.var_keyword = info.var_keyword
 

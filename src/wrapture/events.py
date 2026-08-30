@@ -352,13 +352,32 @@ def _own_time(event: Event) -> float | None:
 # is exact, and the owner's lifetime is the cache's lifetime.
 
 
+class ParameterTable(NamedTuple):
+    """A flattened view of a signature made only of positional and
+    positional-or-keyword parameters: their names in order, how many
+    leading ones are positional-only, and the defaults by name. The
+    common case, which binds by walking the names without going
+    through `Signature.bind`."""
+
+    names: tuple[str, ...]
+    positional_only: int
+    defaults: dict[str, Any]
+
+
 class SignatureInfo(NamedTuple):
     """A callable's signature as inspect reports it, None when it has no
     readable one, with the name of its var-keyword parameter (**kwargs)
-    resolved once alongside."""
+    resolved once alongside, and the parameter table when the signature
+    is simple enough to bind without `Signature.bind`."""
 
     signature: inspect.Signature | None
     var_keyword: str | None
+    table: ParameterTable | None = None
+
+
+_SIMPLE_KINDS = frozenset(
+    {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+)
 
 
 def signature_info(func: Any) -> SignatureInfo:
@@ -369,11 +388,34 @@ def signature_info(func: Any) -> SignatureInfo:
     except (TypeError, ValueError):
         return SignatureInfo(None, None)
 
+    var_keyword = None
     for parameter in signature.parameters.values():
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return SignatureInfo(signature, parameter.name)
+            var_keyword = parameter.name
 
-    return SignatureInfo(signature, None)
+    return SignatureInfo(signature, var_keyword, _parameter_table(signature))
+
+
+def _parameter_table(signature: inspect.Signature) -> ParameterTable | None:
+    # Only a signature with nothing but positional and
+    # positional-or-keyword parameters gets a table; *args, **kwargs
+    # and keyword-only parameters are left to Signature.bind.
+
+    parameters = signature.parameters.values()
+    if any(parameter.kind not in _SIMPLE_KINDS for parameter in parameters):
+        return None
+
+    names = tuple(parameter.name for parameter in parameters)
+    positional_only = sum(
+        parameter.kind is inspect.Parameter.POSITIONAL_ONLY for parameter in parameters
+    )
+    defaults = {
+        parameter.name: parameter.default
+        for parameter in parameters
+        if parameter.default is not inspect.Parameter.empty
+    }
+
+    return ParameterTable(names, positional_only, defaults)
 
 
 def cached_signature_info(
@@ -392,7 +434,10 @@ def cached_signature_info(
 
 
 def normalized_arguments(
-    signature: inspect.Signature | None, args: tuple[Any, ...], kwargs: dict[str, Any]
+    signature: inspect.Signature | None,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    table: ParameterTable | None = None,
 ) -> dict[str, Any] | None:
     """Bind args and kwargs against a signature, defaults applied.
 
@@ -400,10 +445,20 @@ def normalized_arguments(
     and f(1, b=2) produce the same recorded arguments. Returns None when
     no signature is available or the arguments do not fit it, in which
     case the caller falls back to the raw call shape.
+
+    With `table` given, the signature's parameter table, the common
+    shapes bind by walking the names, which costs a fraction of
+    `Signature.bind`; anything the walk cannot settle exactly falls
+    back to `Signature.bind`, so the result is the same either way.
     """
 
     if signature is None:
         return None
+
+    if table is not None:
+        arguments = _bind_by_table(table, args, kwargs)
+        if arguments is not None:
+            return arguments
 
     try:
         bound = signature.bind(*args, **kwargs)
@@ -412,3 +467,48 @@ def normalized_arguments(
 
     bound.apply_defaults()
     return dict(bound.arguments)
+
+
+def _bind_by_table(
+    table: ParameterTable, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> dict[str, Any] | None:
+    # Walk the parameters in order, taking each from the positionals,
+    # then the keywords, then the defaults, which is the order
+    # Signature.bind produces. None means "not settled here": too many
+    # positionals, a keyword naming a positional-only or an
+    # already-bound parameter, an unknown keyword, or a parameter with
+    # nothing to fill it. Those are Signature.bind's to judge, and it
+    # reports the same None for the ones that really do not fit.
+
+    names = table.names
+    given = len(args)
+    if given > len(names):
+        return None
+
+    arguments = dict(zip(names, args, strict=False))
+
+    if kwargs:
+        defaults = table.defaults
+        consumed = 0
+        for index in range(given, len(names)):
+            name = names[index]
+            if name in kwargs:
+                if index < table.positional_only:
+                    return None
+                arguments[name] = kwargs[name]
+                consumed += 1
+            elif name in defaults:
+                arguments[name] = defaults[name]
+            else:
+                return None
+
+        if consumed != len(kwargs):
+            return None
+    elif given < len(names):
+        defaults = table.defaults
+        for name in names[given:]:
+            if name not in defaults:
+                return None
+            arguments[name] = defaults[name]
+
+    return arguments
