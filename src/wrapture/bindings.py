@@ -1780,6 +1780,10 @@ class Binding:
 
             slot: list[Phase | None] = [phase]
 
+            # Only behaviour receives the forwarder, so without a phase
+            # there is nothing to build one for: the real callable is
+            # called directly.
+
             try:
                 outcome = bnd._invoke(
                     "call",
@@ -1789,7 +1793,7 @@ class Binding:
                     args,
                     kwargs,
                     event,
-                    via=_forwarder(wrapped, event),
+                    via=_forwarder(wrapped, event) if phase is not None else None,
                     slot=slot,
                 )
             except BaseException as exc:
@@ -1821,15 +1825,12 @@ class Binding:
             if watching and _level_of(result_policy) < REFERENCE:
                 result_policy = REFERENCE
 
-            def completed(event: Event) -> None:
-                bnd._completed("call", phase, event)
-
             if inspect.isgenerator(outcome):
-                completed(event)
+                bnd._completed("call", phase, event)
                 return _record_generator(outcome, event, base, result_policy, active)
 
             if inspect.isasyncgen(outcome):
-                completed(event)
+                bnd._completed("call", phase, event)
                 return _named_after(
                     _record_async_generator(
                         outcome, event, base, result_policy, active
@@ -1837,15 +1838,20 @@ class Binding:
                     outcome,
                 )
 
+            # An awaited outcome completes later, so the watching phase
+            # is shown it through a callback, built only when there is
+            # a phase watching.
+
             if inspect.isawaitable(outcome):
+                on_complete = None
+                if watching:
+
+                    def on_complete(event: Event) -> None:
+                        bnd._completed("call", phase, event)
+
                 return _named_after(
                     _record_awaited(
-                        outcome,
-                        event,
-                        base,
-                        result_policy,
-                        active,
-                        completed if watching else None,
+                        outcome, event, base, result_policy, active, on_complete
                     ),
                     outcome,
                 )
@@ -1853,7 +1859,7 @@ class Binding:
             event.duration = time.perf_counter() - started
             _capture_result(event, outcome, result_policy)
             _notify_exit(event, active)
-            completed(event)
+            bnd._completed("call", phase, event)
             return outcome
 
         return wrapper
