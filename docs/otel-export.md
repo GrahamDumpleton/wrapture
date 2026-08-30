@@ -257,6 +257,39 @@ traceback's frames rather than `traceback.format_exception`, which
 on current Pythons also parses each frame's source to draw caret
 underlines no backend renders.
 
+### What it costs
+
+The point of building spans this way is that exporting through
+wrapture should cost no more than instrumenting with OpenTelemetry
+directly, and the comparison is worth stating in numbers, since the
+overhead of Python instrumentation is the usual objection to it.
+Measured in August 2026 against wrapture 1.0.0a10 on Python 3.14 on a
+MacBook Air M4, best of five timeit runs of 100,000 calls, with every
+column exporting through the same `BatchSpanProcessor` to an exporter
+that discards what it receives, microseconds per call:
+
+| | root call | nested, 3 spans | call that raises |
+|---|---:|---:|---:|
+| wrapture: binding recorded and exported by the span sink | 7.2 | 19.9 | 28.7 |
+| OTel SDK: `start_as_current_span()` and nothing else | 5.8 | 18.6 | 99.9 |
+| OTel instrumentation package style: wrapt wrapper, `code.function`, `code.namespace` and `code.lineno` set at start, exception recorded by the context manager | 7.0 | 22.5 | 105.4 |
+| OTel wrapper collecting what wrapture collects: path, kind, sequence number, thread name, arguments bound to their names with a bounded repr, result, exception | 9.0 | 28.7 | 84.1 |
+
+Of wrapture's 7.2 us, about 3.2 us is recording (the event, its
+normalized arguments, delivery to the sink) and about 4 us is the span
+sink, against about 6 us for the SDK's tracer producing the same span
+and about 1 us for the bare hand-off of a finished span to the
+processor. The raising call is where the difference is largest: the
+SDK's `record_exception` formats the stacktrace with
+`traceback.format_exception`, which on Python 3.11 and later parses
+each frame's source to draw caret underlines, and the sink formats the
+same frames without them. Outside the OTel path, a binding costs about
+70 ns per call while suspended and about 0.5 us while active with
+nothing listening. The figures show relative cost on one machine at
+one point in time and are not a guarantee; a later measurement may be
+taken on different hardware, so compare the columns with each other
+rather than any one of them with a number from elsewhere.
+
 ## The metrics signal
 
 The metrics signal aggregates the same events instead of exporting
