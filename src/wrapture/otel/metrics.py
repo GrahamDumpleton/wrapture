@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from opentelemetry.metrics import get_meter, get_meter_provider
+from opentelemetry.metrics import MeterProvider, get_meter, get_meter_provider
 from opentelemetry.util.types import AttributeValue
 
 import wrapture
@@ -32,8 +32,18 @@ class OpenTelemetryMetricsSink(wrapture.Sink):
     capture_args = "none"
     capture_result = "none"
 
-    def __init__(self, *, meter_name: str = "wrapture") -> None:
-        meter = get_meter(meter_name)
+    def __init__(
+        self, *, provider: MeterProvider | None = None, meter_name: str = "wrapture"
+    ) -> None:
+        # The provider is wrapture's own when the factory built it;
+        # left unspecified, the SDK's global one is used.
+
+        self._provider = provider if provider is not None else get_meter_provider()
+        meter = (
+            provider.get_meter(meter_name)
+            if provider is not None
+            else get_meter(meter_name)
+        )
 
         # The bucket boundaries are advisory: the semconv set for
         # requests, and a finer set for calls, whose durations sit
@@ -119,8 +129,7 @@ class OpenTelemetryMetricsSink(wrapture.Sink):
     def flush(self) -> None:
         """Push the current aggregation out through the exporter."""
 
-        provider = get_meter_provider()
-        force_flush = getattr(provider, "force_flush", None)
+        force_flush = getattr(self._provider, "force_flush", None)
         if force_flush is not None:
             force_flush()
 

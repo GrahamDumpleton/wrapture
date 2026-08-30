@@ -1555,9 +1555,10 @@ Most of the mapping writes itself, because the two models are close:
   sink declares `"summary"` capture on both axes, so the values
   reaching it are already bounded text and scalars, safe to hand to
   an exporter and impossible to retain live objects through.
-- `flush()` forwards to the provider's `force_flush()`, so the flush
-  wrapture gives process sinks at interpreter exit also drains OTel's
-  batch processor, and the tail of a trace is not lost in its buffer.
+- `flush()` forwards to the span processor's `force_flush()`, so the
+  flush wrapture gives process sinks at interpreter exit also drains
+  OTel's batch processor, and the tail of a trace is not lost in its
+  buffer.
 
 Two moves are less obvious, and they are the part worth copying into
 a bridge to any other backend. The first is parenting. OTel normally
@@ -1612,6 +1613,5 @@ heard about them.
 Everything else about the shipped sink, the `[otel]` table and its
 per-signal tuning, the trace identity claiming that makes files,
 headers and exported spans agree on one id, the metrics and logs
-signals, the provider posture and its warnings, and the fork
-behaviour, lives in the
+signals, the pipeline posture, and the fork behaviour, lives in the
 [OpenTelemetry export](otel-export.md) guide.

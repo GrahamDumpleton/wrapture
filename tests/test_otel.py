@@ -5,12 +5,11 @@ the enabled switch, registration ahead of the [[sink]] list, the
 validation of the table's keys, both faces of the import guard
 (the packages present building the sink, their absence failing the
 load with the wrapture[otel] extra named), and the SDK posture
-(wrapture standing up providers when none exist, an application's
-provider winning as the warned failsafe).
+(wrapture standing up its own pipelines from the environment).
 """
 
+import os
 import sys
-import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -26,67 +25,85 @@ from wrapture import load_config
 
 pytest.importorskip("opentelemetry")
 
-# The module fixture below installs application providers, so every
-# sink built through the config path defers to them and warns; the
-# posture section asserts that warning deliberately, and the rest of
-# the module ignores it as incidental.
-
-pytestmark = pytest.mark.filterwarnings("ignore::wrapture.ConfigWarning")
-
 
 @pytest.fixture(autouse=True, scope="module")
-def _providers() -> Iterator[dict[str, Any]]:
-    # Install SDK providers once for the module, so building the sink
-    # under test never stands up real exporters with their network
-    # endpoints and worker threads: the factory finds a provider
-    # already configured and defers to it. Spans and log records land
-    # synchronously in in-memory exporters, so the trace and log
-    # tests can assert on what was actually exported.
+def _pipelines() -> Iterator[dict[str, Any]]:
+    # Replace the factory's pipeline builders once for the module, so
+    # building the sink under test never stands up real exporters
+    # with their network endpoints and worker threads. Spans and log
+    # records land synchronously in in-memory exporters, so the trace
+    # and log tests can assert on what was actually exported; the
+    # sampler is still resolved from the environment per build, so
+    # the sampling tests can vary it.
 
-    from opentelemetry import trace as otel_trace
-    from opentelemetry._logs import set_logger_provider
-    from opentelemetry.metrics import set_meter_provider
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk._logs.export import (
         InMemoryLogRecordExporter,
         SimpleLogRecordProcessor,
     )
     from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
         InMemorySpanExporter,
     )
 
+    from wrapture.otel import providers
+
     spans = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(spans))
-    otel_trace.set_tracer_provider(provider)
+    span_processor = SimpleSpanProcessor(spans)
 
     logs = InMemoryLogRecordExporter()  # type: ignore[no-untyped-call]
     logger_provider = LoggerProvider()
     logger_provider.add_log_record_processor(SimpleLogRecordProcessor(logs))
-    set_logger_provider(logger_provider)
 
-    set_meter_provider(MeterProvider())
+    meter_provider = MeterProvider()
 
-    yield {"spans": spans, "logs": logs}
+    # The real builders are handed out too, for the posture tests,
+    # which stand up and shut down pipelines of their own.
+
+    real = {
+        "trace_pipeline": providers._trace_pipeline,
+        "meter_provider": providers._meter_provider,
+        "logger_provider": providers._logger_provider,
+    }
+
+    patch = pytest.MonkeyPatch()
+
+    def trace_pipeline(
+        service_name: str | None,
+        sampler: str | None = None,
+        sampler_arg: float | None = None,
+    ) -> Any:
+        return (
+            span_processor,
+            Resource.create({}),
+            providers._sampler(sampler, sampler_arg),
+        )
+
+    patch.setattr(providers, "_trace_pipeline", trace_pipeline)
+    patch.setattr(providers, "_meter_provider", lambda *args: meter_provider)
+    patch.setattr(providers, "_logger_provider", lambda *args: logger_provider)
+
+    yield {"spans": spans, "logs": logs, **real}
+
+    patch.undo()
 
 
 @pytest.fixture
-def exported(_providers: dict[str, Any]) -> Any:
+def exported(_pipelines: dict[str, Any]) -> Any:
     # The module's in-memory span exporter, cleared for this test.
 
-    _providers["spans"].clear()
-    return _providers["spans"]
+    _pipelines["spans"].clear()
+    return _pipelines["spans"]
 
 
 @pytest.fixture
-def exported_logs(_providers: dict[str, Any]) -> Any:
+def exported_logs(_pipelines: dict[str, Any]) -> Any:
     # The module's in-memory log exporter, cleared for this test.
 
-    _providers["logs"].clear()
-    return _providers["logs"]
+    _pipelines["logs"].clear()
+    return _pipelines["logs"]
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +237,8 @@ def test_a_missing_extra_names_the_fix(
     # Simulate the packages being absent by evicting the subpackage
     # from the module cache (and the parent package's attribute, which
     # `from . import otel` would otherwise return unrefreshed) and
-    # blocking opentelemetry itself, so the deferred import fails the
-    # way a plain install's would.
+    # blocking opentelemetry and every cached module beneath it, so
+    # the deferred import fails the way a plain install's would.
 
     for name in [
         each
@@ -230,7 +247,12 @@ def test_a_missing_extra_names_the_fix(
     ]:
         monkeypatch.delitem(sys.modules, name)
     monkeypatch.delattr(wrapture, "otel", raising=False)
-    monkeypatch.setitem(sys.modules, "opentelemetry", None)
+    for name in [
+        each
+        for each in sys.modules
+        if each == "opentelemetry" or each.startswith("opentelemetry.")
+    ]:
+        monkeypatch.setitem(sys.modules, name, None)
 
     source = tmp_path / "wrapture.toml"
     source.write_text('[otel]\nsignals = ["traces"]\n')
@@ -248,71 +270,135 @@ def test_a_broken_factory_call_reports_the_cause(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the SDK posture: wrapture-first, app provider as the failsafe
+# the SDK posture: wrapture-first, its own pipelines
 # ---------------------------------------------------------------------------
 
 
-def test_an_existing_tracer_provider_wins_with_a_warning(tmp_path: Path) -> None:
-    # The module fixture installed an application provider, so the
-    # factory defers to it and the warning names what is lost.
-
-    source = tmp_path / "wrapture.toml"
-    source.write_text('[otel]\nsignals = ["traces"]\n')
-
-    with pytest.warns(wrapture.ConfigWarning, match="tracer provider is already"):
-        load_config(source)
-
-
-def test_an_existing_meter_provider_wins_with_a_warning(tmp_path: Path) -> None:
-    source = tmp_path / "wrapture.toml"
-    source.write_text('[otel]\nsignals = ["metrics"]\n')
-
-    with pytest.warns(wrapture.ConfigWarning, match="meter provider is already"):
-        load_config(source)
-
-
-def test_no_tracer_provider_stands_one_up(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The wrapture-first path: nothing configured (the API's default
-    # proxy provider is not an SDK one), so the factory stands up a
-    # provider from its arguments and the environment, silently. The
-    # global setters are patched to observe rather than install.
+def test_the_traces_pipeline_is_built_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, _pipelines: dict[str, Any]
+) -> None:
+    # The wrapture-first path: the pipeline is built from the
+    # factory's arguments and the environment, and is wrapture's own
+    # rather than the SDK's global provider, which is left untouched.
 
     from opentelemetry import trace as otel_trace
     from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.sdk.trace.sampling import DEFAULT_ON
 
-    from wrapture.otel.providers import _configure_provider
-
-    installed: list[Any] = []
-    monkeypatch.setattr(otel_trace, "get_tracer_provider", lambda: object())
-    monkeypatch.setattr(otel_trace, "set_tracer_provider", installed.append)
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", wrapture.ConfigWarning)
-        _configure_provider("shop")
+    processor, resource, sampler = _pipelines["trace_pipeline"]("shop")
+    try:
+        assert isinstance(processor, BatchSpanProcessor)
+        assert resource.attributes["service.name"] == "shop"
+        assert sampler is DEFAULT_ON
+    finally:
+        processor.shutdown()  # type: ignore[no-untyped-call]
 
-    (provider,) = installed
-    assert isinstance(provider, TracerProvider)
-    assert provider.resource.attributes["service.name"] == "shop"
+    assert not isinstance(otel_trace.get_tracer_provider(), TracerProvider)
 
 
-def test_no_meter_provider_stands_one_up(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_meter_provider_is_built_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, _pipelines: dict[str, Any]
+) -> None:
     from opentelemetry.sdk.metrics import MeterProvider
 
-    from wrapture.otel import providers
-
-    installed: list[Any] = []
-    monkeypatch.setattr(providers, "get_meter_provider", lambda: object())
-    monkeypatch.setattr(providers, "set_meter_provider", installed.append)
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "console")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", wrapture.ConfigWarning)
-        providers._configure_meter_provider("shop", export_interval=5)
+    provider = _pipelines["meter_provider"]("shop", export_interval=5)
+    try:
+        assert isinstance(provider, MeterProvider)
+        assert provider._sdk_config.resource.attributes["service.name"] == "shop"
+    finally:
+        provider.shutdown()
 
-    (provider,) = installed
-    assert isinstance(provider, MeterProvider)
-    assert provider._sdk_config.resource.attributes["service.name"] == "shop"
+
+def test_the_logger_provider_is_built_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, _pipelines: dict[str, Any]
+) -> None:
+    from opentelemetry.sdk._logs import LoggerProvider
+
+    monkeypatch.setenv("OTEL_LOGS_EXPORTER", "console")
+
+    provider = _pipelines["logger_provider"]("shop")
+    try:
+        assert isinstance(provider, LoggerProvider)
+        assert provider.resource.attributes["service.name"] == "shop"
+    finally:
+        provider.shutdown()
+
+
+def test_the_sampler_follows_the_standard_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opentelemetry.sdk.trace.sampling import (
+        ALWAYS_OFF,
+        DEFAULT_ON,
+        ParentBasedTraceIdRatio,
+        TraceIdRatioBased,
+    )
+
+    from wrapture.otel.providers import _sampler
+
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_off")
+    assert _sampler() is ALWAYS_OFF
+
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "traceidratio")
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER_ARG", "0.25")
+    ratio = _sampler()
+    assert isinstance(ratio, TraceIdRatioBased)
+    assert ratio.rate == 0.25
+
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+    assert isinstance(_sampler(), ParentBasedTraceIdRatio)
+
+    # An unknown name falls back to the default, as the SDK does.
+
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "coin_toss")
+    assert _sampler() is DEFAULT_ON
+
+    # Explicit arguments beat the environment, and reach nothing
+    # shared: the variables are left as they were.
+
+    explicit = _sampler("parentbased_traceidratio", 0.5)
+    assert isinstance(explicit, ParentBasedTraceIdRatio)
+    assert isinstance(explicit._root, TraceIdRatioBased)
+    assert explicit._root.rate == 0.5
+    assert _sampler("always_off") is ALWAYS_OFF
+    assert os.environ["OTEL_TRACES_SAMPLER"] == "coin_toss"
+
+
+def test_the_traces_table_names_the_sampler(
+    tmp_path: Path, exported: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The config spelling of the sampler goes to wrapture's pipeline
+    # alone: the environment is untouched, and the tree is dropped.
+
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text(
+        '[otel]\nsignals = ["traces"]\n\n[otel.traces]\nsampler = "always_off"\n'
+    )
+
+    applied = load_config(source).apply()
+    try:
+        with wrapture.block("outer"):
+            pass
+    finally:
+        applied.revert()
+
+    assert exported.get_finished_spans() == ()
+    assert "OTEL_TRACES_SAMPLER" not in os.environ
+
+
+def test_a_bad_sampler_key_fails_the_load(tmp_path: Path) -> None:
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\n\n[otel.traces]\nsampler_arg = "half"\n')
+
+    with pytest.raises(wrapture.ConfigError, match="sampler_arg must be a number"):
+        load_config(source)
 
 
 # ---------------------------------------------------------------------------
@@ -338,12 +424,10 @@ def _serve(app: Any, environ: dict[str, Any]) -> None:
     body.close()
 
 
-def test_a_minted_identity_is_replaced_with_the_sdk_id(
-    tmp_path: Path, exported: Any
-) -> None:
-    # Claim-time identity replacement: the root span is created
-    # normally, the SDK generating its own trace id, and the slot
-    # takes the whole identity, so the serialised record, outbound
+def test_a_minted_identity_is_exported_as_is(tmp_path: Path, exported: Any) -> None:
+    # The identity wrapture minted is the one exported: the root span
+    # carries the slot's trace id and takes the minted span id as its
+    # own, and the slot is claimed, so the serialised record, outbound
     # headers and the exported span all read one id and the backend
     # shows a clean native root.
 
@@ -364,12 +448,42 @@ def test_a_minted_identity_is_replaced_with_the_sdk_id(
 
     assert slot.claimed
     assert slot.trace_id == format(span.context.trace_id, "032x")
+    assert slot.span_id == format(span.context.span_id, "016x")
     assert headers["traceparent"].split("-")[1] == slot.trace_id
-    assert _parent_id(headers) == format(span.context.span_id, "016x")
+    assert _parent_id(headers) == slot.span_id
     assert span.parent is None
+    assert span.context.trace_flags.sampled
 
     record = _event_record(event)
     assert record["trace"]["w3c"]["trace_id"] == slot.trace_id
+
+
+def test_a_root_the_sampler_drops_exports_nothing_but_claims_the_slot(
+    tmp_path: Path, exported: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sampler decides once at the root and the children inherit:
+    # nothing is exported for the tree, and the slot still records
+    # the decision so outbound headers say "not sampled" downstream.
+
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_off")
+
+    applied = _apply_traces(tmp_path)
+    try:
+        with wrapture.timeline() as tape:
+            with wrapture.block("outer"):
+                with wrapture.block("inner"):
+                    headers = wrapture.trace_headers()
+    finally:
+        applied.revert()
+
+    assert exported.get_finished_spans() == ()
+
+    event = tape.all[0]
+    assert event.trace is not None
+    slot = event.trace.slots["w3c"]
+    assert slot.claimed
+    assert slot.sampled is False
+    assert headers["traceparent"].endswith("-00")
 
 
 def test_an_arrived_identity_continues_the_callers_trace(
@@ -861,9 +975,7 @@ def test_a_noted_exception_that_escapes_is_one_span_event(
     assert [event.attributes["exception.type"] for event in span.events] == ["KeyError"]
 
 
-def test_metrics_attribute_a_noted_exception_as_the_error_type(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_metrics_attribute_a_noted_exception_as_the_error_type() -> None:
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -871,9 +983,8 @@ def test_metrics_attribute_a_noted_exception_as_the_error_type(
 
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
-    monkeypatch.setattr(metrics_module, "get_meter", provider.get_meter)
 
-    sink = metrics_module.OpenTelemetryMetricsSink()
+    sink = metrics_module.OpenTelemetryMetricsSink(provider=provider)
     dispatch = wrapture.binding(_Shop, "dispatch")
     handle = _noting_handler(dispatch)
 
@@ -984,7 +1095,7 @@ def test_a_request_matching_no_route_keeps_its_path_name(
     assert "http.route" not in span.attributes
 
 
-def test_metrics_attribute_requests_by_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_metrics_attribute_requests_by_route() -> None:
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
@@ -992,9 +1103,8 @@ def test_metrics_attribute_requests_by_route(monkeypatch: pytest.MonkeyPatch) ->
 
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
-    monkeypatch.setattr(metrics_module, "get_meter", provider.get_meter)
 
-    sink = metrics_module.OpenTelemetryMetricsSink()
+    sink = metrics_module.OpenTelemetryMetricsSink(provider=provider)
     routed = wrapture.WSGIMiddleware(_Router("/quote/<item>"))
     unrouted = wrapture.WSGIMiddleware(_Router(None))
 
