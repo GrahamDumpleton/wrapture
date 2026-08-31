@@ -173,12 +173,15 @@ three choke points:
 - `Flask.handle_exception` is where a view's exception ends up once
   Flask has caught it, on its way to becoming the 500 response, so
   the request itself completes normally with a status and no
-  exception. The binding's behaviour on it calls
-  `wrapture.note_exception()` aimed at the enclosing request event
-  (`current_event(kind="request")`), so the request shows the
-  failure beside its status: `!! KeyError` after the `500` on the
-  printed line, and an exception event with error status on the
-  exported span.
+  exception. The binding's behaviour on it notes the exception
+  against the enclosing request event, with
+  `wrapture.current_event(kind="request").note_exception(exc)`, so
+  the request shows the failure beside its status: `!! KeyError`
+  after the `500` on the printed line, and an exception event with
+  error status on the exported span. The note carries the moment it
+  was made, so on the request span the exception sits partway
+  through, where Flask caught it, while on the view's own span it
+  sits at the end, where it escaped.
 
 The one observe entry in `wrapture.toml` covers this application's
 own `quote` helper, the kind of addition an operator layers on top

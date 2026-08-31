@@ -25,10 +25,12 @@ Three patches, all at Flask's own choke points:
   seen after Flask catches it: wsgi_app catches around the dispatch
   and hands the exception here, which returns the 500 response, so
   the request itself completes normally. The binding notes the
-  exception against the enclosing request event with
-  note_exception(), so the request shows the failure beside its
-  status: as a `!!` marker on the printed line, and as an exception
-  event with error status on the exported span.
+  exception against the enclosing request event, with
+  current_event(kind="request").note_exception(exc), so the request
+  shows the failure beside its status: as a `!!` marker on the
+  printed line, and as an exception event with error status on the
+  exported span, stamped at the moment of the note rather than at
+  the end of the request.
 
 All three bindings are created with when=False, making them
 behaviour-only: the plumbing is not the trace, so they act without
@@ -92,9 +94,7 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 
             exception = args[0] if args else kwargs.get("e")
             if exception is not None:
-                wrapture.note_exception(
-                    exception, event=wrapture.current_event(kind="request")
-                )
+                wrapture.current_event(kind="request").note_exception(exception)
 
             return wrapped(*args, **kwargs)
 
