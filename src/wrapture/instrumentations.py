@@ -24,6 +24,7 @@ functions that need it.
 from __future__ import annotations
 
 import importlib
+import platform
 import sys
 import threading
 import warnings
@@ -560,7 +561,7 @@ class Instrumentation:
             else "local"
         )
         found = self.target_version
-        target = f"{self.target} {found}" if found else f"{self.target} (no version)"
+        target = _target_text(self.target, found) or f"{self.target} (no version)"
 
         parts = [f"{self.name} [{source}] target {target}"]
         applied = self.applied
@@ -1108,13 +1109,40 @@ def _packages_distributions() -> Mapping[str, list[str]]:
         return mapping
 
 
+def _target_text(target: str, version: str | None) -> str | None:
+    """The target with its version as report() and the listing tool
+    print it, saying where a standard library module's version comes
+    from; None when there is no version."""
+
+    if version is None:
+        return None
+
+    if _is_stdlib(target):
+        return f"{target} (standard library, python {version})"
+
+    return f"{target} {version}"
+
+
+def _is_stdlib(target: str) -> bool:
+    """Whether a top-level import name is a standard library module."""
+
+    return target in sys.stdlib_module_names
+
+
 def _target_version(target: str) -> str | None:
-    """The installed version of the distribution behind a top-level
-    import name, from metadata alone, or None when no distribution
-    stands behind it."""
+    """The installed version of the target behind a top-level import
+    name: the interpreter's own version for a standard library module,
+    otherwise the version of the distribution behind the name from
+    metadata alone, or None when no distribution stands behind it."""
 
     if not target:
         return None
+
+    # The standard library wins over site-packages on sys.path, so a
+    # same-named distribution cannot be what the name imports.
+
+    if _is_stdlib(target):
+        return platform.python_version()
 
     candidates = list(_packages_distributions().get(target, ()))
     candidates.append(target)

@@ -46,7 +46,15 @@ from typing import TYPE_CHECKING, Any
 from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
-from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
+from .capture import (
+    _REDACTED,
+    NONE,
+    CapturePolicy,
+    _capture_value,
+    _level_of,
+    _resolve_policy,
+    capture_query,
+)
 from .events import Event, _check_category
 from .filters import _scope_fields
 from .sinks import (
@@ -68,7 +76,7 @@ from .timeline import (
     _timelines_active,
     seed_data,
 )
-from .wsgi import _REDACTED, _captured_query, _describe, _Hooks, _request_predicate
+from .wsgi import _describe, _Hooks, _request_predicate
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -150,7 +158,7 @@ def _scope_data(scope: Mapping[str, Any], policy: CapturePolicy) -> dict[str, An
     # The scope subset recorded on the event, the ASGI sources for the
     # same fields the WSGI middleware records. Values are captured at
     # the policy's level but under no name: by-name redaction pertains
-    # to query string parameters only, matched inside _captured_query,
+    # to query string parameters only, matched inside capture_query(),
     # never to these fields. scope["path"] is already the full decoded
     # path, and the query string is separate by construction.
 
@@ -174,7 +182,7 @@ def _scope_data(scope: Mapping[str, Any], policy: CapturePolicy) -> dict[str, An
         except Exception:
             data["query"] = _REDACTED
         else:
-            data["query"] = _captured_query(query, policy)
+            data["query"] = capture_query(query, policy)
 
     return data
 

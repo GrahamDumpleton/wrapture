@@ -44,7 +44,10 @@ Reading down:
 - `target` is the one top-level import name the class covers. Every
   trigger module a hook declares must live under it; wrapture refuses
   a class that claims a module outside its target the moment the
-  class is defined.
+  class is defined. A standard library module (`urllib`, `sqlite3`)
+  is a target like any other: its version is the interpreter's own,
+  so `supports` on such a class is a Python version range, and the
+  listing says where the version came from.
 - `supports` is a PEP 440 specifier against the target's installed
   version, read from package metadata. Outside the range, nothing
   registers and the user sees a `ConfigWarning`, never an error: the
@@ -295,8 +298,12 @@ both, and the [OTel page](otel-export.md#the-category-data-key-contracts)
 lists the data keys each category is expected to carry; the
 instrumentation fills those with `annotate()` from inside the
 operation, which lands on the leaf, or with `data=` for a value
-fixed for the target. Offer a per-target setting (`leaf`, default
-true) so a user debugging the client itself can see its internals.
+fixed for the target. A `url` carries no query string; the query
+goes under `query` through `wrapture.capture_query()`, which records
+it the way the request middlewares do, the built-in sensitive names
+redacted and any `redact()` names the instrumentation's own setting
+adds on top. Offer a per-target setting (`leaf`, default true) so a
+user debugging the client itself can see its internals.
 
 ## Registering the class
 

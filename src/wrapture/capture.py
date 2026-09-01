@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import unquote_plus
 
 NONE = 0
 TYPES = 1
@@ -157,6 +158,83 @@ def redact(
 
     policy.level = _level_of(level)  # type: ignore[attr-defined]
     return policy
+
+
+# Query parameters whose values never leave the process, whatever the
+# capture policy says. Matched case-insensitively against the decoded
+# parameter name; names given to redact() add to this set rather than
+# replace it.
+
+_SENSITIVE_QUERY = frozenset(
+    {
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "apikey",
+        "client_secret",
+        "session",
+        "session_id",
+        "sessionid",
+        "sessid",
+        "jsessionid",
+        "phpsessid",
+        "sig",
+        "signature",
+        "x-amz-signature",
+        "x-goog-signature",
+    }
+)
+
+_REDACTED = "<redacted>"
+
+
+def capture_query(query: str, policy: CapturePolicy | str = "reference") -> str:
+    """The recorded form of a URL query string.
+
+        wrapture.annotate(query=wrapture.capture_query(parts.query, policy))
+
+    Each parameter's decoded value passes through the capture policy
+    (a level name such as `"reference"`, or a callable, as for
+    `capture_args=`) under the parameter's name, so redact() covers
+    query parameters with the same vocabulary it uses for call
+    arguments; the built-in
+    set of sensitive names (passwords, tokens, keys, session ids and
+    signatures) is then enforced on top, whatever the policy says. The
+    result is in decoded display form, `name=value&...`. A query string
+    that cannot be processed is recorded as the marker wholesale, never
+    raw.
+
+    This is what the request middlewares record under `query`, made
+    available for instrumentation recording the outbound side, where a
+    `url` should carry no query string and the `query` key carries this.
+    """
+
+    resolved = _resolve_policy(policy)
+    level = REFERENCE if resolved is None else resolved
+
+    try:
+        pairs: list[str] = []
+
+        for part in query.split("&"):
+            name_raw, _, value_raw = part.partition("=")
+            name = unquote_plus(name_raw)
+            value = unquote_plus(value_raw)
+
+            if name.casefold() in _SENSITIVE_QUERY:
+                captured: Any = _REDACTED
+            else:
+                captured = _capture_value(level, name, value)
+
+            pairs.append(f"{name}={captured}")
+
+        return "&".join(pairs)
+    except Exception:
+        return _REDACTED
 
 
 def _level_of(policy: CapturePolicy) -> int:
