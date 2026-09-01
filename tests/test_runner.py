@@ -211,3 +211,153 @@ def test_a_script_can_import_from_its_own_directory(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "from-helper" in completed.stdout
+
+
+# ---------------------------------------------------------------------------
+# sys.path matches what python itself would have set up
+# ---------------------------------------------------------------------------
+
+_PRINT_SYS_PATH = (
+    "import json, os, sys\n"
+    "print(json.dumps([os.path.realpath(p) if p else p for p in sys.path]))\n"
+)
+
+
+def _sys_path_seen(tmp: Path, *command: str) -> list[str]:
+    # The sys.path a target prints when run by `python *command` from
+    # tmp, with each entry resolved so the two runs compare like for
+    # like. An empty config is present so the runner form has one.
+
+    (tmp / "wrapture.toml").write_text("")
+
+    environment = dict(os.environ)
+    environment.pop("WRAPTURE_CONFIG", None)
+
+    completed = subprocess.run(
+        [sys.executable, *command],
+        cwd=tmp,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    entries: list[str] = json.loads(completed.stdout)
+
+    return entries
+
+
+def _script_in_subdirectory(tmp: Path) -> str:
+    sub = tmp / "sub"
+    sub.mkdir()
+    (sub / "main.py").write_text(_PRINT_SYS_PATH)
+
+    return os.path.join("sub", "main.py")
+
+
+def test_a_script_does_not_see_the_launcher_working_directory(
+    tmp_path: Path,
+) -> None:
+    # python -m wrapture inherits the working directory at the front of
+    # sys.path, as any -m run does; python sub/main.py has no such
+    # entry, so the runner must not leave it behind the script's own
+    # directory, where it would change what the script can import.
+
+    script = _script_in_subdirectory(tmp_path)
+
+    native = _sys_path_seen(tmp_path, script)
+    wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", script)
+
+    assert native[0] == os.path.realpath(tmp_path / "sub")
+    assert os.path.realpath(tmp_path) not in native
+    assert wrapped == native
+
+
+def test_safe_path_mode_adds_nothing_for_a_script(tmp_path: Path) -> None:
+    # Under -P python puts neither the script's directory nor the
+    # working directory on sys.path; the runner follows suit.
+
+    script = _script_in_subdirectory(tmp_path)
+
+    native = _sys_path_seen(tmp_path, "-P", script)
+    wrapped = _sys_path_seen(tmp_path, "-P", "-m", "wrapture", script)
+
+    assert os.path.realpath(tmp_path / "sub") not in native
+    assert wrapped == native
+
+
+def test_a_symlinked_script_resolves_to_its_real_directory(
+    tmp_path: Path,
+) -> None:
+    # python follows symlinks when placing a script's directory on
+    # sys.path, so a link in the working directory to sub/main.py runs
+    # with sub/ at the front, not the directory holding the link.
+
+    _script_in_subdirectory(tmp_path)
+
+    try:
+        (tmp_path / "link.py").symlink_to(tmp_path / "sub" / "main.py")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+    native = _sys_path_seen(tmp_path, "link.py")
+    wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", "link.py")
+
+    assert native[0] == os.path.realpath(tmp_path / "sub")
+    assert wrapped == native
+
+
+def test_a_directory_target_is_placed_on_the_path_itself(tmp_path: Path) -> None:
+    # python pkgdir runs pkgdir/__main__.py with pkgdir itself at the
+    # front of sys.path, not its parent, and run_path arranges that;
+    # the runner must add nothing of its own.
+
+    package = tmp_path / "pkgdir"
+    package.mkdir()
+    (package / "__main__.py").write_text(_PRINT_SYS_PATH)
+
+    native = _sys_path_seen(tmp_path, "pkgdir")
+    wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", "pkgdir")
+
+    assert native[0] == os.path.realpath(package)
+    assert wrapped == native
+
+
+def test_a_module_target_keeps_the_working_directory(tmp_path: Path) -> None:
+    # python -m sub.main has the working directory at the front of
+    # sys.path, and so does python -m wrapture -m sub.main: the entry
+    # the runner inherited is exactly the one python -m would add.
+
+    _script_in_subdirectory(tmp_path)
+
+    native = _sys_path_seen(tmp_path, "-m", "sub.main")
+    wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", "-m", "sub.main")
+
+    assert native[0] == os.path.realpath(tmp_path)
+    assert wrapped == native
+
+
+def test_config_pythonpath_entries_precede_the_script_directory(
+    tmp_path: Path,
+) -> None:
+    # The script's directory is settled before the config loads, so
+    # the config's pythonpath entries land in front of it, the order
+    # the injection path gives when python has already set sys.path.
+
+    script = _script_in_subdirectory(tmp_path)
+    (tmp_path / "lib").mkdir()
+
+    wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", script)
+    (tmp_path / "wrapture.toml").write_text('pythonpath = ["lib"]\n')
+
+    completed = _run(tmp_path, script)
+
+    assert completed.returncode == 0, completed.stderr
+    with_lib = json.loads(completed.stdout)
+
+    assert with_lib[:2] == [
+        os.path.realpath(tmp_path / "lib"),
+        os.path.realpath(tmp_path / "sub"),
+    ]
+    assert with_lib[1:] == wrapped

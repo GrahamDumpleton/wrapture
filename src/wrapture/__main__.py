@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import runpy
 import sys
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NoReturn
@@ -104,6 +105,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     invocation = _parse(sys.argv[1:] if argv is None else argv)
 
+    if invocation.script is not None:
+        _prepare_script_path(invocation.script)
+
     # Resolve and apply the config before anything else happens, so
     # patches and instrumentation are in place before the target module
     # imports anything. Finding no config is an error rather than a
@@ -129,8 +133,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Hand over to the target as python itself would have run it. For
     # a module target, alter_sys replaces sys.argv[0] with the
-    # module's own file, matching python -m; for a script, its
-    # directory joins the front of sys.path, matching python script.py.
+    # module's own file, matching python -m, and the working directory
+    # python -m wrapture put at the front of sys.path is the entry
+    # python -m MODULE would have put there. A script's sys.path was
+    # arranged above, before the config loaded.
 
     if invocation.module is not None:
         sys.argv[:] = [invocation.module, *invocation.arguments]
@@ -140,8 +146,37 @@ def main(argv: Sequence[str] | None = None) -> None:
         assert script is not None
 
         sys.argv[:] = [script, *invocation.arguments]
-        sys.path.insert(0, os.path.dirname(os.path.abspath(script)))
         runpy.run_path(script, run_name="__main__")
+
+
+def _prepare_script_path(script: str) -> None:
+    """Give a script target the sys.path[0] python SCRIPT would have.
+
+    python -m wrapture is a -m run, so python put the full path of the
+    working directory at the front of sys.path; python SCRIPT would not
+    have, so that entry is removed rather than left behind the script's
+    own directory, where it would let the script import from, or be
+    shadowed by, the directory the runner was launched from. In its
+    place goes what python puts there: the script's directory, after
+    following symlinks, for a file; nothing for a directory or zip
+    target, which run_path adds itself. Under -P or PYTHONSAFEPATH
+    python adds nothing at all, and neither does the runner.
+
+    This runs before the config loads, so any pythonpath entries the
+    config prepends land in front of the script's directory, the same
+    order the injection path gives.
+    """
+
+    if sys.flags.safe_path:
+        return
+
+    if sys.path and sys.path[0] == os.getcwd():
+        del sys.path[0]
+
+    target = os.path.realpath(script)
+
+    if not (os.path.isdir(target) or zipfile.is_zipfile(target)):
+        sys.path.insert(0, os.path.dirname(target))
 
 
 if __name__ == "__main__":
