@@ -331,9 +331,9 @@ The target is a module, a class, or a string naming one (`"module"` or
 entry use). `match`
 is one `fnmatchcase` pattern or a sequence of them, and `exclude`
 subtracts from whatever matched. The remaining keyword options
-(`capture=`, `capture_args=`, `capture_result=`, `stack=`, `when=`) are
-the uniform subset of `binding()`'s options, applied to every selected
-member.
+(`capture=`, `capture_args=`, `capture_result=`, `stack=`, `when=`,
+`tree=`) are the uniform subset of `binding()`'s options, applied to
+every selected member.
 
 Selection is deliberately confined, and is shared with the config file's
 `match` entries so a pattern selects the same members however it is
@@ -383,9 +383,9 @@ from the callable itself (`module:qualname`); no label is derived,
 so events carry label None and every renderer falls back to the
 path, with `label=` to assign a name where one adds something the
 path cannot say. The keyword options are the uniform subset
-`binding()` takes: `capture=`, `capture_args=`, `capture_result=`, `stack=` and
+`binding()` takes: `capture=`, `capture_args=`, `capture_result=`, `stack=`,
 `when=` (which receives `(instance, args, kwargs)`; the instance is
-None for a free-standing callable). Placed on a class, the proxy binds
+None for a free-standing callable) and `tree=`. Placed on a class, the proxy binds
 as a method exactly as the wrapped function would: calls made through
 instances record the instance (so `with_instance()` applies), the
 bound signature drops `self`, and the normalized arguments never
@@ -969,7 +969,10 @@ Four situations produce no event, each deliberate:
   `enabled`, a boolean is accepted in place of the predicate:
   `when=False` makes a behaviour-only binding that never records and
   counts nothing, for plumbing that must not put itself in the trace.
-  The [ad-hoc tracing page](ad-hoc-tracing.md) covers it fully.
+  With `tree=True` a decline also silences everything beneath the
+  operation, and the inner bindings count the skip on their own
+  `filtered_calls`. The [ad-hoc tracing page](ad-hoc-tracing.md)
+  covers both fully.
 
 ### How much is captured
 

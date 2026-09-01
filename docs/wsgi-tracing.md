@@ -35,11 +35,14 @@ The standalone constructor carries the recording options the binding
 mode would otherwise supply, under the same names, so a middleware
 built in code loses nothing to the config-declared form. `when=`
 decides per request whether to record, the application running and
-answering either way: a callable taking the environ, or a glob
-string or list of glob strings naming request paths not to record
-(`when=["/health", "/static/*"]`, matched against `SCRIPT_NAME` plus
-`PATH_INFO`), the form that keeps health checks and static assets
-out of the tape. `capture_args=` is the capture policy for the
+answering either way: a callable taking the environ, or a
+`filter_requests()` filter over the request's recorded fields
+(`when=wrapture.filter_requests(ignore={"path": ["/health",
+"/static/*"]})`), the form that keeps health checks and static
+assets out of the tape; `tree=True` extends a decline to everything
+beneath the request, which is what an ignored request wants (see
+[Ignoring whole requests](#ignoring-whole-requests)). `capture_args=`
+is the capture policy for the
 request's descriptive data, where `redact("voucher")` masks query
 parameters by name over and above the built-in sensitive set,
 `capture_result=` the policy for the status-line result, and `data=`
@@ -128,6 +131,69 @@ the request and see the real environ, and a secret somewhere by-name
 redaction cannot see, in a path segment or the request body, is out
 of its scope.
 
+## Ignoring whole requests
+
+Health checks, readiness probes and static assets make up most of
+the traffic on many services and none of the interest. `when=` on a
+request binding decides per request whether to record, and
+`filter_requests()` is that decision declared as tables of request
+fields to glob patterns rather than written as a callable:
+
+```python
+app = wrapture.binding(
+    "myapp.wsgi:application", mode="wsgi",
+    when=wrapture.filter_requests(ignore={"path": ["/health", "/static/*"]}),
+    tree=True,
+)
+```
+
+The fields are the ones the request event records: `method`, `path`,
+`scheme`, `protocol` and `remote`, valued exactly as the event would
+record them (the path is `SCRIPT_NAME` plus `PATH_INFO`, never
+`REQUEST_URI`). Each field maps to one `fnmatchcase` glob or a list
+of them, any of which may match, so a list of plain strings reads as
+a set of exact values; methods compare case-insensitively. `ignore`
+names requests not to record: a request matching any pattern of any
+field it lists is declined. `accept` names the requests to record:
+every field it lists must match. Given both, a request must pass
+both, so `ignore` wins where they overlap, and a field absent from a
+table is unconstrained:
+
+```python
+wrapture.filter_requests(
+    accept={"method": ["GET", "POST", "DELETE"], "scheme": "https"},
+    ignore={"path": ["/health", "/static/*"], "remote": "10.0.0.*"},
+)
+```
+
+An empty table, a table naming something that is not a request
+field, and a call with neither table are errors at construction, not
+filters that can never act. The filter decides recording only: a
+declined request is served exactly as it would be otherwise, and the
+decline counts on the binding's `filtered_calls`.
+
+`tree=True` is the other half. On its own, `when=` declines one
+event, the request's, and whatever records while the request is
+served (the view, its queries, a template render) still records,
+each as a root of its own with no request above it: a declined
+health check would leave its `SELECT 1` on the tape as an anonymous
+tree. `tree=True` extends the decline to everything beneath the
+request for its whole extent, streaming body included, so an ignored
+request is gone entirely; the inner bindings count the skip on their
+own `filtered_calls`, so a shorter tape stays explainable. It is a
+flag on `when=` rather than a mode of the filter, because the two
+reaches are both wanted: a behaviour-only binding (`when=False`) on
+an interception point must not silence what runs beneath it, while
+an ignored request must. `tree=True` without a `when=` to act on is
+refused.
+
+The request modes are where `filter_requests()` applies; a call or
+attribute binding refuses it, since the fields it names exist only on
+a request, and takes a callable `when=` instead. `tree=True` applies
+to every binding kind: the [ad-hoc tracing
+guide](ad-hoc-tracing.md#declining-a-whole-tree-tree) covers it on
+calls.
+
 ## The on_request namespace
 
 Requests get their own behaviour namespace, named for the event kind
@@ -195,6 +261,10 @@ app = wrapture.binding(
 )
 ```
 
+A `filter_requests()` filter is accepted in the callable's place, and
+`tree=True` extends a decline to everything beneath the request; see
+[Ignoring whole requests](#ignoring-whole-requests).
+
 ## Asserting on requests in tests
 
 The status is the result, so the existing assertion vocabulary needs
@@ -217,9 +287,11 @@ def test_export_streams_and_succeeds():
 
 An observe entry takes `mode = "wsgi"`, valid only with `name`, never
 `match`: a pattern must never bulk-install middleware. For a wsgi
-entry, `redact` names query string parameters, and a `data` table
-seeds every request event with static tags (the request's own fields
-are written over it, so it cannot respell them):
+entry, `redact` names query string parameters, a `data` table seeds
+every request event with static tags (the request's own fields are
+written over it, so it cannot respell them), and a `requests` table
+is `filter_requests()` spelt as TOML, with `tree=True` implied, since
+a request a config ignores is meant to be gone entirely:
 
 ```toml
 [[observe]]
@@ -227,11 +299,32 @@ target = "myapp.wsgi"
 name = "application"
 mode = "wsgi"
 redact = ["signature"]
+requests = { ignore = { path = ["/health", "/static/*"] } }
 
 [[sink]]
 type = "jsonlines"
 path = "trace.jsonl"
 ```
+
+The long form suits a filter with several fields a side; a sub-table
+attaches to the `[[observe]]` entry above it:
+
+```toml
+[[observe]]
+target = "myapp.wsgi"
+name = "application"
+mode = "wsgi"
+
+[observe.requests]
+ignore.path = ["/health", "/static/*"]
+accept.method = ["GET", "POST", "DELETE"]
+```
+
+The keys are `accept` and `ignore`, each a table of request field to
+one glob or a list of globs, with the meanings and rules of
+[Ignoring whole requests](#ignoring-whole-requests); `requests` on an
+entry without `mode` is a config error, as is a field that is not a
+request field.
 
 With that config, `python -m wrapture manage.py runserver`, or the
 autowrapt injection path, gives request-tied tracing of an inherited
@@ -348,7 +441,12 @@ middleware obligations of PEP 3333:
   application's iterable is returned untouched, which preserves the
   `wsgi.file_wrapper` optimisation exactly when it matters. While a
   request records, the body is necessarily wrapped, so sendfile is
-  bypassed for that request; that is the cost of observing it.
+  bypassed for that request; that is the cost of observing it. A
+  request a `tree=True` filter declined is served with recording
+  suppressed beneath it: a lazily produced body is wrapped so that
+  streaming stays silenced, while a list body and the server's own
+  `wsgi.file_wrapper` are returned untouched, so sendfile survives
+  for the static assets a filter typically ignores.
 
 One limitation, stated plainly: the legacy `write()` callable that
 `start_response` returns is passed through but not observed, so body

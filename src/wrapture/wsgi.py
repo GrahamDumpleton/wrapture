@@ -25,7 +25,6 @@ and does not extend the recorded timing.
 
 from __future__ import annotations
 
-import fnmatch
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
@@ -36,6 +35,7 @@ from wrapt import MISSING, CallableObjectProxy
 from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
 from .events import Event
+from .filters import RequestFilter, _environ_fields, _predicate_for
 from .sinks import (
     Sink,
     _active_sinks,
@@ -45,7 +45,15 @@ from .sinks import (
     _required_policy,
 )
 from .stacks import _capture as _capture_stack
-from .timeline import _pop, _push, _stack, _timelines_active, seed_data
+from .timeline import (
+    _check_tree,
+    _pop,
+    _push,
+    _stack,
+    _suppressed,
+    _timelines_active,
+    seed_data,
+)
 
 if TYPE_CHECKING:
     from .bindings import Binding
@@ -102,17 +110,15 @@ def _describe(app: Any) -> str:
     return f"{module}:{qualname}"
 
 
-def _request_predicate(when: Any, path_of: Callable[[Any], str]) -> Any:
+def _request_predicate(when: Any, mode: str) -> Any:
     """Normalize a middleware when= to the internal calling convention.
 
     The standalone forms are friendlier than the binding-internal
     (instance, args, kwargs) convention: a callable takes the carrier
-    (the WSGI environ, or the ASGI scope) directly, and a glob string
-    or an iterable of glob strings names request paths not to record,
-    the form a configuration file can express. Booleans pass as with
-    when= elsewhere: True is the always-record default, False never
-    records. `path_of` extracts the request path from the carrier for
-    the glob forms.
+    (the WSGI environ, or the ASGI scope) directly, and a
+    filter_requests() filter is adapted to the fields of `mode`'s
+    carrier. Booleans pass as with when= elsewhere: True is the
+    always-record default, False never records.
     """
 
     if when is None or when is True:
@@ -121,6 +127,9 @@ def _request_predicate(when: Any, path_of: Callable[[Any], str]) -> Any:
     if when is False:
         return False
 
+    if isinstance(when, RequestFilter):
+        return _predicate_for(when, mode)
+
     if callable(when):
 
         def ask(instance: Any, args: tuple[Any, ...], kwargs: Any) -> Any:
@@ -128,32 +137,75 @@ def _request_predicate(when: Any, path_of: Callable[[Any], str]) -> Any:
 
         return ask
 
-    if isinstance(when, str):
-        when = (when,)
+    raise ValueError(
+        f"when must be a boolean, a callable taking the request carrier, or"
+        f" a filter_requests() filter, got {when!r}"
+    )
 
+
+def _silenced(environ: Mapping[str, Any], produce: Callable[[], Any]) -> Any:
+    """Run the application with recording suppressed beneath it, and
+    keep it suppressed around the body's iteration.
+
+    A materialised body (a list or tuple) and the server's own
+    wsgi.file_wrapper run no application code while iterated, so they
+    are returned untouched, keeping the sendfile optimisation for the
+    static assets a filter typically ignores; anything else is wrapped
+    so that work done while streaming stays silenced too.
+    """
+
+    token = _suppressed.set(True)
     try:
-        patterns = tuple(when)
-    except TypeError:
-        patterns = None
+        iterable = produce()
+    finally:
+        _suppressed.reset(token)
 
-    if patterns is None or not all(isinstance(item, str) for item in patterns):
-        raise ValueError(
-            f"when must be a boolean, a callable taking the request"
-            f" carrier, or a glob string or iterable of glob strings"
-            f" naming paths not to record, got {when!r}"
-        )
+    if isinstance(iterable, (list, tuple)):
+        return iterable
 
-    def decline(instance: Any, args: tuple[Any, ...], kwargs: Any) -> bool:
-        path = path_of(args[0])
-        return not any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    file_wrapper = environ.get("wsgi.file_wrapper")
+    if isinstance(file_wrapper, type) and isinstance(iterable, file_wrapper):
+        return iterable
 
-    return decline
+    return _SilencedIterator(iterable)
 
 
-def _environ_path(environ: Any) -> str:
-    # The path as recorded on the event: SCRIPT_NAME plus PATH_INFO.
+class _SilencedIterator:
+    """The body of a silenced request: each pull and the close() run
+    with recording suppressed, and close() reaches the wrapped
+    iterable exactly once."""
 
-    return str(environ.get("SCRIPT_NAME", "")) + str(environ.get("PATH_INFO", ""))
+    def __init__(self, iterable: Any) -> None:
+        self._iterable = iterable
+        self._iterator: Any = None
+        self._closed = False
+
+    def __iter__(self) -> _SilencedIterator:
+        return self
+
+    def __next__(self) -> Any:
+        token = _suppressed.set(True)
+        try:
+            if self._iterator is None:
+                self._iterator = iter(self._iterable)
+            return next(self._iterator)
+        finally:
+            _suppressed.reset(token)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        inner = getattr(self._iterable, "close", None)
+        if inner is None:
+            return
+
+        token = _suppressed.set(True)
+        try:
+            inner()
+        finally:
+            _suppressed.reset(token)
 
 
 def _captured_query(query: str, policy: CapturePolicy) -> str:
@@ -197,17 +249,7 @@ def _request_data(environ: Mapping[str, Any], policy: CapturePolicy) -> dict[str
 
     data: dict[str, Any] = {"interface": "wsgi"}
 
-    path = environ.get("SCRIPT_NAME", "") + environ.get("PATH_INFO", "")
-
-    plain = {
-        "method": environ.get("REQUEST_METHOD", ""),
-        "path": path,
-        "scheme": environ.get("wsgi.url_scheme", ""),
-        "protocol": environ.get("SERVER_PROTOCOL", ""),
-        "remote": environ.get("REMOTE_ADDR", ""),
-    }
-
-    for name, value in plain.items():
+    for name, value in _environ_fields(environ).items():
         if value:
             data[name] = _capture_value(policy, None, value)
 
@@ -431,11 +473,15 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
     - `when` decides per request whether to record, behaviour still
       applying when it declines: a callable taking the environ and
-      returning a boolean, or a glob string or iterable of glob
-      strings naming request paths not to record ("/health",
-      "/static/*"), matched against the path as recorded (SCRIPT_NAME
-      plus PATH_INFO). Booleans pass as with when= elsewhere: False
-      never records.
+      returning a boolean, or a filter_requests() filter over the
+      request's recorded fields. Booleans pass as with when= elsewhere:
+      False never records.
+
+    - `tree` extends a decline to everything beneath the request:
+      with tree=True nothing that fires while a declined request is
+      served (or streamed) records, where by default a declined
+      request leaves its inner operations recording as roots of their
+      own. It needs a when= to act on.
 
     - `capture_args` is the capture policy for the request's
       descriptive data, the query string foremost, where redact()
@@ -450,6 +496,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         binding: Binding | None = None,
         label: str | None = None,
         when: Any = None,
+        tree: bool = False,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         data: Mapping[str, Any] | None = None,
@@ -472,7 +519,8 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # value, else the default. when= is normalized here to the
         # internal convention, so __call__ treats both sources alike.
 
-        self._self_when = _request_predicate(when, _environ_path)
+        self._self_when = _request_predicate(when, "wsgi")
+        self._self_tree = _check_tree(tree, self._self_when)
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
         self._self_data = seed_data(data) or (binding._data if binding else {})
@@ -492,8 +540,10 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # records, counts nothing, and takes no part in gap detection.
 
         when = self._self_when
+        tree = self._self_tree
         if when is None and binding is not None:
             when = binding._when
+            tree = binding._tree
 
         active = _active_sinks()
         recording = when is not False and bool(active) and not _in_recorder.get()
@@ -508,9 +558,18 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                 binding._note_missed_call()
 
         # The per-request predicate decides recording only; behaviour
-        # still applies when it declines, matching when= elsewhere.
+        # still applies when it declines, matching when= elsewhere. A
+        # request beneath an operation a tree=True binding declined is
+        # declined without consulting anything, and a decline here
+        # with tree=True silences everything beneath this request.
 
-        if recording and callable(when):
+        silenced = when is False and tree and bool(active)
+
+        if recording and _suppressed.get():
+            if binding is not None:
+                binding._filtered_calls += 1
+            recording = False
+        elif recording and callable(when):
             guard = _in_recorder.set(True)
             try:
                 wanted = when(None, (environ,), {})
@@ -521,12 +580,16 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                 if binding is not None:
                     binding._filtered_calls += 1
                 recording = False
+                silenced = tree
 
         # The untouched fast path: nothing recording and no behaviour
         # configured means the server sees exactly what the application
-        # returned, wsgi.file_wrapper included.
+        # returned, wsgi.file_wrapper included. A silenced request runs
+        # with recording suppressed beneath it instead.
 
         if not recording and not hooks.configured():
+            if silenced:
+                return _silenced(environ, lambda: application(environ, start_response))
             return application(environ, start_response)
 
         # Inbound stages see and may replace the environ before the
@@ -631,11 +694,17 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # event anywhere.
 
         if event is None:
-            iterable = produce()
 
-            for stage in hooks.body:
-                iterable = stage(iterable)
-            return iterable
+            def unrecorded() -> Any:
+                iterable = produce()
+
+                for stage in hooks.body:
+                    iterable = stage(iterable)
+                return iterable
+
+            if silenced:
+                return _silenced(environ, unrecorded)
+            return unrecorded()
 
         # Position before delivery, then time from after the recording
         # bookkeeping, exactly as the call wrapper does. The scope here

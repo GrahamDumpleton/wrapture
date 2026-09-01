@@ -65,6 +65,7 @@ from .exceptions import (
     SequenceExhaustedError,
     WrongModeError,
 )
+from .filters import RequestFilter, _predicate_for
 from .sinks import (
     Sink,
     _active_sinks,
@@ -78,10 +79,12 @@ from .stacks import _capture as _capture_stack
 from .stacks import _resolve_depth
 from .timeline import (
     _capture_result,
+    _check_tree,
     _current_tape,
     _pop,
     _push,
     _stack,
+    _suppressed,
     _timelines_active,
     seed_data,
 )
@@ -616,6 +619,109 @@ async def _record_async_generator(
             operation = ("throw", exc)
 
 
+def _run_silenced(fn: Callable[[], Any]) -> Any:
+    """Run fn with recording suppressed for its dynamic extent.
+
+    The suppression marker is set around the call itself, and an
+    outcome whose body has not run yet (a generator, an async
+    generator, a coroutine) is wrapped so the marker is set again
+    around each resumption or the await, exactly where the recording
+    path re-establishes the in-progress stack.
+    """
+
+    token = _suppressed.set(True)
+    try:
+        outcome = fn()
+    finally:
+        _suppressed.reset(token)
+
+    kind = _outcome_kind(outcome)
+
+    if kind == "generator":
+        return _silence_generator(outcome)
+    if kind == "asyncgen":
+        return _named_after(_silence_async_generator(outcome), outcome)
+    if kind == "awaitable":
+        return _named_after(_silence_awaited(outcome), outcome)
+
+    return outcome
+
+
+def _silence_generator(
+    generator: Generator[Any, Any, Any],
+) -> Generator[Any, Any, Any]:
+    """A generator around a generator, with recording suppressed during
+    each resumption; the full generator protocol is preserved."""
+
+    operation: tuple[str, Any] = ("send", None)
+
+    while True:
+        token = _suppressed.set(True)
+        try:
+            if operation[0] == "send":
+                item = generator.send(operation[1])
+            else:
+                item = generator.throw(operation[1])
+        except StopIteration as stop:
+            return stop.value
+        finally:
+            _suppressed.reset(token)
+
+        try:
+            operation = ("send", (yield item))
+        except GeneratorExit:
+            token = _suppressed.set(True)
+            try:
+                generator.close()
+            finally:
+                _suppressed.reset(token)
+            raise
+        except BaseException as exc:
+            operation = ("throw", exc)
+
+
+async def _silence_async_generator(
+    generator: AsyncGenerator[Any, Any],
+) -> AsyncGenerator[Any, Any]:
+    """The async twin of _silence_generator."""
+
+    operation: tuple[str, Any] = ("send", None)
+
+    while True:
+        token = _suppressed.set(True)
+        try:
+            if operation[0] == "send":
+                item = await generator.asend(operation[1])
+            else:
+                item = await generator.athrow(operation[1])
+        except StopAsyncIteration:
+            return
+        finally:
+            _suppressed.reset(token)
+
+        try:
+            operation = ("send", (yield item))
+        except GeneratorExit:
+            token = _suppressed.set(True)
+            try:
+                await generator.aclose()
+            finally:
+                _suppressed.reset(token)
+            raise
+        except BaseException as exc:
+            operation = ("throw", exc)
+
+
+async def _silence_awaited(awaitable: Any) -> Any:
+    """Await an outcome with recording suppressed for the await."""
+
+    token = _suppressed.set(True)
+    try:
+        return await awaitable
+    finally:
+        _suppressed.reset(token)
+
+
 class Binding:
     """The association of a target attribute with a wrapper and behaviour.
 
@@ -650,8 +756,10 @@ class Binding:
         capture_result: CapturePolicy | str | None = None,
         stack: int | str | None = None,
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
+        | RequestFilter
         | bool
         | None = None,
+        tree: bool = False,
         data: Mapping[str, Any] | None = None,
         strict: bool = True,
         attr: str | None = None,
@@ -672,7 +780,15 @@ class Binding:
 
         if slot:
             mode = self._check_slot_options(
-                attr, item, mode, capture, capture_args, capture_result, stack, when
+                attr,
+                item,
+                mode,
+                capture,
+                capture_args,
+                capture_result,
+                stack,
+                when,
+                tree or None,
             )
         elif mode == "value":
             raise ValueError(
@@ -681,7 +797,13 @@ class Binding:
             )
         elif mode == "mapping":
             self._check_holding_options(
-                "mapping", capture, capture_args, capture_result, stack, when
+                "mapping",
+                capture,
+                capture_args,
+                capture_result,
+                stack,
+                when,
+                tree or None,
             )
 
         # Collapse the location to an owner and a dotted name, so the
@@ -699,6 +821,21 @@ class Binding:
                 f" frame count, got {stack!r}"
             )
 
+        # A filter_requests() filter names request fields, so it is
+        # adapted to the calling convention of the request mode it is
+        # bound in and refused everywhere else, before the general
+        # check, since the filter is deliberately not callable.
+
+        if isinstance(when, RequestFilter):
+            if mode not in ("wsgi", "asgi"):
+                raise ValueError(
+                    f"filter_requests() applies to a wsgi or asgi binding only,"
+                    f" got mode={mode!r}; a call or attribute binding takes a"
+                    f" callable when="
+                )
+
+            when = _predicate_for(when, mode)
+
         # As with wrapt's `enabled`, when= accepts a boolean as well as
         # a predicate: True is the always-record default, False makes
         # this a behaviour-only binding that never records.
@@ -708,7 +845,8 @@ class Binding:
         elif when is not False and when is not None and not callable(when):
             raise ValueError(
                 f"when must be a boolean, a callable taking (instance,"
-                f" args, kwargs), or None, got {when!r}"
+                f" args, kwargs), a filter_requests() filter on a request"
+                f" binding, or None, got {when!r}"
             )
 
         if mode is None:
@@ -794,6 +932,7 @@ class Binding:
         )
         self._stack_depth = stack
         self._when = when
+        self._tree = _check_tree(tree, when)
 
         # Whether a call that behaviour answers without reaching the
         # real callable is still checked against its signature.
@@ -904,7 +1043,7 @@ class Binding:
         if any(option is not None for option in recording):
             raise ValueError(
                 f"a {mode} binding records nothing, so capture=, capture_args=,"
-                f" capture_result=, stack= and when= do not apply to it"
+                f" capture_result=, stack=, when= and tree= do not apply to it"
             )
 
     def _bare_path(self, target: Any, name: str) -> str:
@@ -1387,12 +1526,13 @@ class Binding:
 
     @property
     def filtered_calls(self) -> int:
-        """Operations the `when=` predicate declined to record.
+        """Operations the `when=` predicate declined to record, or that
+        ran beneath an operation a `tree=True` binding declined.
 
         Deliberate silence, but counted, so a shorter tape than
         expected can be explained rather than guessed at. A static
-        `when=False` counts nothing: there is no per-operation
-        decision to report.
+        `when=False` counts nothing of its own: there is no
+        per-operation decision to report.
         """
 
         return self._filtered_calls
@@ -1739,9 +1879,14 @@ class Binding:
             phase = bnd._select("call")
 
             # when=False is a behaviour-only binding: it never records,
-            # counts nothing, and takes no part in gap detection.
+            # counts nothing, and takes no part in gap detection. With
+            # tree=True it also silences everything beneath the call
+            # while recording.
 
             if bnd._when is False:
+                if bnd._tree and _active_sinks():
+                    return bnd._silenced("call", phase, wrapped, instance, args, kwargs)
+
                 return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             active = _active_sinks()
@@ -1760,10 +1905,20 @@ class Binding:
 
                 return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
+            # Beneath an operation a tree=True binding declined nothing
+            # records, the predicate included; the call is counted as
+            # filtered so a shorter tape stays explainable.
+
+            if _suppressed.get():
+                bnd._filtered_calls += 1
+                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
+
             # The per-call predicate decides whether this operation is
             # recorded at all, before any event is constructed. It runs
             # under the recorder guard, so observed code it consults
-            # passes through, and if it raises the caller sees it.
+            # passes through, and if it raises the caller sees it. A
+            # decline with tree=True silences everything beneath the
+            # call for its whole extent.
 
             if bnd._when is not None:
                 guard = _in_recorder.set(True)
@@ -1774,6 +1929,12 @@ class Binding:
 
                 if not wanted:
                     bnd._filtered_calls += 1
+
+                    if bnd._tree:
+                        return bnd._silenced(
+                            "call", phase, wrapped, instance, args, kwargs
+                        )
+
                     return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # Create the event under the recorder guard, so anything
@@ -2151,6 +2312,23 @@ class Binding:
             if self._active.get(operation) is phase:
                 self._active[operation] = phase.successor
 
+    def _silenced(
+        self,
+        operation: str,
+        phase: Phase | None,
+        wrapped: WrappedFunction,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        """Run an unrecorded call with recording suppressed beneath it
+        for its whole extent, a generator's iteration or a coroutine's
+        await included, so nothing it triggers records either."""
+
+        return _run_silenced(
+            lambda: self._quiet(operation, phase, wrapped, instance, args, kwargs)
+        )
+
     def _quiet(
         self,
         operation: str,
@@ -2443,7 +2621,11 @@ def binding(
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
-    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
+    | RequestFilter
+    | bool
+    | None = None,
+    tree: bool = False,
     data: Mapping[str, Any] | None = None,
     strict: bool = True,
     attr: str | None = None,
@@ -2528,11 +2710,24 @@ def binding(
     For an attribute binding a set passes the written value as the
     single positional argument; a get or delete passes empty args. For a
     wsgi binding the environ mapping is the single positional argument,
-    and for an asgi binding the scope mapping is.
+    and for an asgi binding the scope mapping is, and either also
+    accepts a `filter_requests()` filter over the request's recorded
+    fields in place of the callable.
     As with wrapt's `enabled`, a boolean is accepted in place of the
     predicate: `when=False` makes a behaviour-only binding that never
     records and counts nothing, for plumbing that must not put itself
     in the trace, and `when=True` is the always-record default.
+
+    `tree=` extends a `when=` decline to everything beneath the
+    operation. By default a decline skips this operation's event only,
+    and whatever records inside it becomes a root of its own; with
+    `tree=True` nothing records for the operation's whole extent (a
+    generator's iteration, a coroutine's await, a request's streaming
+    body included), and the inner bindings count the skip on their
+    own `filtered_calls`. It is the form a request filter wants, so an
+    ignored request drops its views and queries along with itself,
+    and `when=False, tree=True` silences a whole subtree. `tree=True`
+    needs a `when=` to act on and is refused without one.
 
     `data=` seeds every event the binding records with static data, a
     mapping of string keys to scalars (str, int, float, bool) or flat
@@ -2571,6 +2766,7 @@ def binding(
         capture_result=capture_result,
         stack=stack,
         when=when,
+        tree=tree,
         data=data,
         strict=strict,
         attr=attr,
@@ -2606,6 +2802,7 @@ def discover(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    tree: bool = False,
     strict: bool = True,
 ) -> BindingGroup:
     """Create bindings for every member of a target matching a pattern.
@@ -2688,6 +2885,7 @@ def discover(
                 capture_result=capture_result,
                 stack=stack,
                 when=when,
+                tree=tree,
                 strict=strict,
             )
             for member in members

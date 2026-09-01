@@ -52,7 +52,7 @@ from .eventlogs import EventLog, _levelno
 from .events import Event
 from .exceptions import NeverAppliedError
 from .sinks import _active_sinks, _in_recorder, _notify_exit, _record_event
-from .timeline import _current_tape, _stack
+from .timeline import _current_tape, _stack, _suppressed
 
 
 def _patterns(value: str | Sequence[str], *, key: str) -> tuple[str, ...]:
@@ -321,10 +321,11 @@ def _handle(
 
 
 def _record_log(record: logging.LogRecord) -> None:
-    # The same gate every binding uses: nobody listening, no event.
+    # The same gate every binding uses: nobody listening, no event;
+    # and nothing beneath an operation a tree=True binding declined.
 
     active = _active_sinks()
-    if not active:
+    if not active or _suppressed.get():
         return
 
     selected = [capture for capture in _captures if capture._selects(record)]

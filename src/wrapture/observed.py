@@ -55,6 +55,7 @@ from .bindings import (
     _record_async_generator,
     _record_awaited,
     _record_generator,
+    _run_silenced,
     _sequence,
 )
 from .capture import (
@@ -68,6 +69,7 @@ from .capture import (
 from .eventlogs import EventLog
 from .events import Event, SignatureInfo, cached_signature_info, normalized_arguments
 from .exceptions import RecordingGapWarning
+from .filters import RequestFilter
 from .sinks import (
     _active_sinks,
     _in_recorder,
@@ -80,10 +82,12 @@ from .stacks import _capture as _capture_stack
 from .stacks import _resolve_depth
 from .timeline import (
     _capture_result,
+    _check_tree,
     _current_tape,
     _pop,
     _push,
     _stack,
+    _suppressed,
     _timelines_active,
 )
 
@@ -148,6 +152,7 @@ class ObservedCallable(
         capture_result: CapturePolicy | None,
         stack: int | None,
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
+        tree: bool = False,
         signature: Any = None,
         convention: str | None = None,
         precheck: Callable[
@@ -176,6 +181,7 @@ class ObservedCallable(
         self._self_capture_result = capture_result
         self._self_stack_depth = stack
         self._self_when = when
+        self._self_tree = _check_tree(tree, when)
         self._self_signatures: dict[type, SignatureInfo] = {}
 
         self._self_suspended = False
@@ -237,7 +243,8 @@ class ObservedCallable(
 
     @property
     def filtered_calls(self) -> int:
-        """Calls the when= predicate declined to record."""
+        """Calls the when= predicate declined to record, or that ran
+        beneath an operation a tree=True binding declined."""
 
         return self._self_filtered_calls
 
@@ -361,9 +368,13 @@ class ObservedCallable(
             return target(*args, **kwargs)
 
         # when=False never records, counts nothing, and takes no part
-        # in gap detection.
+        # in gap detection. With tree=True it also silences everything
+        # beneath the call while recording.
 
         if self._self_when is False:
+            if self._self_tree and _active_sinks():
+                return _run_silenced(lambda: target(*args, **kwargs))
+
             return target(*args, **kwargs)
 
         active = _active_sinks()
@@ -371,6 +382,13 @@ class ObservedCallable(
         if not active or _in_recorder.get():
             if not active and not _in_recorder.get() and _timelines_active():
                 self._note_missed_call()
+            return target(*args, **kwargs)
+
+        # Beneath an operation a tree=True binding declined nothing
+        # records, the predicate included.
+
+        if _suppressed.get():
+            self._self_filtered_calls += 1
             return target(*args, **kwargs)
 
         when = self._self_when
@@ -383,6 +401,10 @@ class ObservedCallable(
 
             if not wanted:
                 self._self_filtered_calls += 1
+
+                if self._self_tree:
+                    return _run_silenced(lambda: target(*args, **kwargs))
+
                 return target(*args, **kwargs)
 
         guard = _in_recorder.set(True)
@@ -444,6 +466,7 @@ def observed(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    tree: bool = False,
 ) -> ObservedCallable: ...
 
 
@@ -457,6 +480,7 @@ def observed(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    tree: bool = False,
 ) -> Callable[[Callable[..., Any]], ObservedCallable]: ...
 
 
@@ -469,6 +493,7 @@ def observed(
     capture_result: CapturePolicy | str | None = None,
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
+    tree: bool = False,
 ) -> ObservedCallable | Callable[[Callable[..., Any]], ObservedCallable]:
     """Wrap a bare callable so its calls record, wherever it ends up.
 
@@ -495,7 +520,8 @@ def observed(
     the same meanings. `when=` receives (instance, args, kwargs), the
     instance being None for a free-standing callable and the bound
     object when the proxy sits on a class, and accepts a boolean in
-    place of the predicate as binding() does.
+    place of the predicate as binding() does; `tree=True` extends a
+    decline to everything beneath the call, as on a binding.
 
     The assigned label, or the derived module:qualname path when no
     label is given, identifies the observation, and that is what
@@ -537,6 +563,7 @@ def observed(
                 capture_result=capture_result,
                 stack=stack,
                 when=when,
+                tree=tree,
             )
 
         return apply
@@ -553,6 +580,14 @@ def observed(
 
     # As with wrapt's `enabled`, when= accepts a boolean as well as a
     # predicate: True is the always-record default, False never records.
+    # A filter_requests() filter names request fields a plain callable
+    # has none of, so it is refused by name.
+
+    if isinstance(when, RequestFilter):
+        raise ValueError(
+            "filter_requests() applies to a wsgi or asgi binding only;"
+            " observed() wraps a plain callable and takes a callable when="
+        )
 
     if when is True:
         when = None
@@ -592,4 +627,5 @@ def observed(
         ),
         stack=depth,
         when=when,
+        tree=tree,
     )

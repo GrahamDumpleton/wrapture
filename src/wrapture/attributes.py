@@ -52,6 +52,7 @@ from .timeline import (
     _capture_result,
     _pop,
     _push,
+    _suppressed,
     _timelines_active,
 )
 
@@ -179,6 +180,25 @@ def _build_event(
     return event
 
 
+def _silenced(
+    binding: Binding,
+    kind: EventKind,
+    instance: Any,
+    attribute: str,
+    operate: Callable[[Event | None], Any],
+    value: Any,
+    slot: list[Phase | None],
+) -> Any:
+    """Run an unrecorded attribute operation with recording suppressed
+    beneath it for its extent, so nothing it triggers records either."""
+
+    token = _suppressed.set(True)
+    try:
+        return _quiet(binding, kind, instance, attribute, operate, value, slot)
+    finally:
+        _suppressed.reset(token)
+
+
 def _quiet(
     binding: Binding,
     kind: EventKind,
@@ -242,9 +262,13 @@ def _record(
         slot = [None]
 
     # when=False is a behaviour-only binding: it never records, counts
-    # nothing, and takes no part in gap detection.
+    # nothing, and takes no part in gap detection. With tree=True it
+    # also silences everything beneath the access while recording.
 
     if binding._when is False:
+        if binding._tree and _active_sinks():
+            return _silenced(binding, kind, instance, attribute, operate, value, slot)
+
         return _quiet(binding, kind, instance, attribute, operate, value, slot)
 
     active = _active_sinks()
@@ -254,9 +278,17 @@ def _record(
 
         return _quiet(binding, kind, instance, attribute, operate, value, slot)
 
+    # Beneath an operation a tree=True binding declined nothing
+    # records, the predicate included.
+
+    if _suppressed.get():
+        binding._filtered_calls += 1
+        return _quiet(binding, kind, instance, attribute, operate, value, slot)
+
     # The per-access predicate, mapped onto call shape the same way
     # behaviour stages are: a set passes the written value as the one
-    # positional argument, a get or delete passes empty args.
+    # positional argument, a get or delete passes empty args. A
+    # decline with tree=True silences everything beneath the access.
 
     if binding._when is not None:
         call_args = (value,) if value is not MISSING else ()
@@ -269,6 +301,12 @@ def _record(
 
         if not wanted:
             binding._filtered_calls += 1
+
+            if binding._tree:
+                return _silenced(
+                    binding, kind, instance, attribute, operate, value, slot
+                )
+
             return _quiet(binding, kind, instance, attribute, operate, value, slot)
 
     # The written value and the prior value are inbound data, so they

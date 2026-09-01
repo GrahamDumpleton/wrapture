@@ -375,6 +375,45 @@ Per-operation sampling fits here too
 where nesting matters prefer `Sample`, which decides at the root and
 keeps whole trees together.
 
+## Declining a whole tree: tree=
+
+A `when=` decline skips one event, the declined operation's own.
+Whatever records inside the operation still records, and with no
+event above it each such inner event becomes a root of its own. For
+the tenant predicate above that means the other tenants' gateway
+calls, if the gateway is bound too, appear on the tape as anonymous
+trees with no `charge` to explain them. Sometimes that is exactly
+right: a behaviour-only binding on an interception point
+(`when=False`) must stay out of the trace while what runs beneath it
+records. When the intent is "nothing from here down", say so:
+
+```python
+charge = wrapture.binding(
+    PaymentGateway, "charge",
+    when=lambda instance, args, kwargs: kwargs.get("tenant") == "acme",
+    tree=True,
+)
+```
+
+With `tree=True` a decline suppresses recording for the operation's
+whole dynamic extent: every binding that fires beneath it, attribute
+accesses, blocks and log captures included, a generator's iteration
+and a coroutine's await, and a thread handed the context with
+`propagate()` or `detach()`. Behaviour still applies throughout; only
+recording stops. The inner bindings count each skipped operation on
+their own `filtered_calls`, so a shorter tape than expected can
+still be explained binding by binding. `when=False, tree=True`
+silences a subtree unconditionally, for a noisy library call whose
+internals are never worth seeing. `tree=True` needs a `when=` to act
+on and is refused without one; on a value or mapping binding, which
+records nothing, it is refused like the other recording options.
+
+The flag is the same on `observed()`, `bound()` and `discover()`, and
+on the request modes, where it is what an ignored request wants; the
+[WSGI page](wsgi-tracing.md#ignoring-whole-requests) covers
+`filter_requests()`, the declarative request predicate that pairs
+with it.
+
 ## Streaming to disk: JSONLines
 
 `JSONLines(path)` writes each completed event to a file as one JSON
