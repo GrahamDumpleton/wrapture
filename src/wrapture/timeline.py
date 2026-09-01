@@ -656,6 +656,35 @@ _origin: contextvars.ContextVar[tuple[EventLink, ...]] = contextvars.ContextVar(
     "wrapture_origin", default=()
 )
 
+# Whether a tree=True binding declined the operation this context is
+# inside: set for the dynamic extent of the declined operation, and
+# checked by every producer right after the recording gate, so nothing
+# beneath a declined root records. Carried into threads by propagate()
+# and detach() like any context variable, and left alone by a timeline
+# opened inside the extent: the silence is a property of the code
+# path, not of who is listening.
+
+_suppressed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "wrapture_suppressed", default=False
+)
+
+
+def _check_tree(tree: Any, when: Any) -> bool:
+    """Validate a tree= flag against the when= it extends: a bool, and
+    True only alongside a predicate or when=False, since on its own
+    it can never act."""
+
+    if not isinstance(tree, bool):
+        raise TypeError(f"tree must be True or False, got {tree!r}")
+
+    if tree and when is None:
+        raise ValueError(
+            "tree=True extends a when= decline to everything beneath the"
+            " operation, so it needs a when= predicate or when=False to act on"
+        )
+
+    return tree
+
 
 def _current_tape() -> Tape | None:
     # The innermost scoped Tape, for the views that speak about "the
@@ -1130,12 +1159,13 @@ class Block:
         self._started = 0.0
 
     def __enter__(self) -> None:
-        # Recording gate first: with nobody listening, or inside the
-        # recording machinery itself, the marker does nothing at all,
+        # Recording gate first: with nobody listening, inside the
+        # recording machinery itself, or beneath an operation a
+        # tree=True binding declined, the marker does nothing at all,
         # not even the frame inspection.
 
         active = _active_sinks()
-        if not active or _in_recorder.get():
+        if not active or _in_recorder.get() or _suppressed.get():
             return None
 
         if self._event is not None:

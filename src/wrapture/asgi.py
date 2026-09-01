@@ -48,6 +48,7 @@ from wrapt import MISSING, CallableObjectProxy
 from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
 from .events import Event
+from .filters import _scope_fields
 from .sinks import (
     _active_sinks,
     _in_recorder,
@@ -55,7 +56,14 @@ from .sinks import (
     _required_policy,
 )
 from .stacks import _capture as _capture_stack
-from .timeline import _pop, _push, _timelines_active, seed_data
+from .timeline import (
+    _check_tree,
+    _pop,
+    _push,
+    _suppressed,
+    _timelines_active,
+    seed_data,
+)
 from .wsgi import _REDACTED, _captured_query, _describe, _Hooks, _request_predicate
 
 if TYPE_CHECKING:
@@ -144,18 +152,7 @@ def _scope_data(scope: Mapping[str, Any], policy: CapturePolicy) -> dict[str, An
 
     data: dict[str, Any] = {"interface": "asgi"}
 
-    client = scope.get("client")
-    http_version = scope.get("http_version", "")
-
-    plain = {
-        "method": scope.get("method", ""),
-        "path": scope.get("path", ""),
-        "scheme": scope.get("scheme", ""),
-        "protocol": f"HTTP/{http_version}" if http_version else "",
-        "remote": client[0] if client else "",
-    }
-
-    for name, value in plain.items():
+    for name, value in _scope_fields(scope).items():
         if value:
             data[name] = _capture_value(policy, None, value)
 
@@ -202,13 +199,6 @@ def _content_headers(event: Event, headers: Iterable[Any]) -> None:
                 event.data["content_length"] = text
 
 
-def _scope_path(scope: Any) -> str:
-    # The path as recorded on the event: scope["path"] is already the
-    # full decoded path.
-
-    return str(scope.get("path", ""))
-
-
 class ASGIMiddleware(CallableObjectProxy[Any]):
     """ASGI middleware that records each request as one event.
 
@@ -236,11 +226,15 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
     - `when` decides per request whether to record, behaviour still
       applying when it declines: a callable taking the scope and
-      returning a boolean, or a glob string or iterable of glob
-      strings naming request paths not to record ("/health",
-      "/static/*"), matched against the path as recorded
-      (scope["path"]). Booleans pass as with when= elsewhere: False
-      never records.
+      returning a boolean, or a filter_requests() filter over the
+      request's recorded fields. Booleans pass as with when= elsewhere:
+      False never records.
+
+    - `tree` extends a decline to everything beneath the request:
+      with tree=True nothing that fires while a declined request is
+      served records, where by default a declined request leaves its
+      inner operations recording as roots of their own. It needs a
+      when= to act on.
 
     - `capture_args` is the capture policy for the request's
       descriptive data, the query string foremost, where redact()
@@ -255,6 +249,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         binding: Binding | None = None,
         label: str | None = None,
         when: Any = None,
+        tree: bool = False,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         data: Mapping[str, Any] | None = None,
@@ -277,7 +272,8 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # value, else the default. when= is normalized here to the
         # internal convention, so __call__ treats both sources alike.
 
-        self._self_when = _request_predicate(when, _scope_path)
+        self._self_when = _request_predicate(when, "asgi")
+        self._self_tree = _check_tree(tree, self._self_when)
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
         self._self_data = seed_data(data) or (binding._data if binding else {})
@@ -305,8 +301,10 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # records, counts nothing, and takes no part in gap detection.
 
         when = self._self_when
+        tree = self._self_tree
         if when is None and binding is not None:
             when = binding._when
+            tree = binding._tree
 
         active = _active_sinks()
         recording = when is not False and bool(active) and not _in_recorder.get()
@@ -321,9 +319,18 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                 binding._note_missed_call()
 
         # The per-request predicate decides recording only; behaviour
-        # still applies when it declines, matching when= elsewhere.
+        # still applies when it declines, matching when= elsewhere. A
+        # request beneath an operation a tree=True binding declined is
+        # declined without consulting anything, and a decline here
+        # with tree=True silences everything beneath this request.
 
-        if recording and callable(when):
+        silenced = when is False and tree and bool(active)
+
+        if recording and _suppressed.get():
+            if binding is not None:
+                binding._filtered_calls += 1
+            recording = False
+        elif recording and callable(when):
             guard = _in_recorder.set(True)
             try:
                 wanted = when(None, (scope,), {})
@@ -334,11 +341,21 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                 if binding is not None:
                     binding._filtered_calls += 1
                 recording = False
+                silenced = tree
 
         # The untouched fast path: nothing recording and no behaviour
         # configured means the application sees the original channels.
+        # A silenced request is awaited with recording suppressed
+        # beneath it instead; the application does all its work inside
+        # this await, streaming included.
 
         if not recording and not hooks.configured():
+            if silenced:
+                silence = _suppressed.set(True)
+                try:
+                    return await application(scope, receive, send)
+                finally:
+                    _suppressed.reset(silence)
             return await application(scope, receive, send)
 
         # Inbound stages see and may replace the scope before the
@@ -542,6 +559,12 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # event anywhere.
 
         if event is None:
+            if silenced:
+                silence = _suppressed.set(True)
+                try:
+                    return await produce()
+                finally:
+                    _suppressed.reset(silence)
             return await produce()
 
         # Position before delivery, then time from after the recording

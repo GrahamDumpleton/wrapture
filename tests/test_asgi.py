@@ -22,6 +22,7 @@ from wrapture import (
     ObserveEntry,
     WrongModeError,
     binding,
+    filter_requests,
     redact,
     timeline,
 )
@@ -733,12 +734,14 @@ def test_observe_entry_rejects_asgi_mode_with_match() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_standalone_when_globs_skip_matching_paths() -> None:
-    # A glob list names paths not to record; the application still
-    # runs and answers, matching when= everywhere: the predicate
-    # decides recording only.
+def test_standalone_when_takes_a_request_filter() -> None:
+    # A filter_requests() filter names requests not to record; the
+    # application still runs and answers, matching when= everywhere:
+    # the predicate decides recording only.
 
-    wrapped = ASGIMiddleware(application, when=["/health", "/static/*"])
+    wrapped = ASGIMiddleware(
+        application, when=filter_requests(ignore={"path": ["/health", "/static/*"]})
+    )
 
     with timeline() as tape:
         server = _Server()

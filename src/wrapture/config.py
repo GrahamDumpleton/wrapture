@@ -45,6 +45,7 @@ from .capture import redact as _redact
 from .collectors import Aggregate, Counter
 from .events import Event
 from .exceptions import ConfigError, ConfigWarning
+from .filters import RequestFilter, filter_requests
 from .instrumentations import (
     Instrumentation,
     InstrumentEntry,
@@ -135,6 +136,31 @@ def _resolve_reference(reference: str, *, key: str, where: str) -> Any:
     return resolved
 
 
+def _request_filter(table: Any, where: str) -> RequestFilter:
+    # An observe entry's requests table is filter_requests() spelt as
+    # TOML: accept and ignore sub-tables of request field to one glob
+    # or a list of globs. The helper checks the fields and shapes; its
+    # errors come back as config errors naming the entry.
+
+    if not isinstance(table, Mapping):
+        raise ConfigError(
+            f"{where}: requests must be a table of accept and ignore tables,"
+            f" got {table!r}"
+        )
+
+    unknown = sorted(set(table) - {"accept", "ignore"})
+    if unknown:
+        raise ConfigError(
+            f"{where}: requests: unknown keys {unknown}; the keys are accept and ignore"
+        )
+
+    try:
+        return filter_requests(accept=table.get("accept"), ignore=table.get("ignore"))
+    except (TypeError, ValueError) as exc:
+        detail = str(exc).removeprefix("filter_requests(): ")
+        raise ConfigError(f"{where}: requests: {detail}") from None
+
+
 @dataclass(frozen=True)
 class ObserveEntry:
     """One observation rule: which members of one exact target to bind.
@@ -167,6 +193,13 @@ class ObserveEntry:
     bindings starts with, string keys to scalars or flat lists of
     scalars, the shape `binding(data=)` takes; it is the only way to
     annotate events from code the config observes but does not own.
+
+    `requests` is filter_requests() spelt as TOML, for a wsgi or asgi
+    entry only: a table with `accept` and/or `ignore` sub-tables, each
+    mapping a request field (method, path, scheme, protocol, remote)
+    to one glob or a list of globs. It becomes the entry's `when=`
+    with `tree=True`, so a declined request records nothing beneath
+    it either.
     """
 
     target: str
@@ -177,6 +210,7 @@ class ObserveEntry:
     mode: str = ""
     trace: bool = False
     data: Mapping[str, Any] = field(default_factory=dict)
+    requests: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -228,6 +262,19 @@ class ObserveEntry:
                 f"{where}: mode requires name; a pattern must never"
                 f" bulk-install middleware"
             )
+
+        # A requests table names request fields, which only a request
+        # binding has; its content is checked now, by building the
+        # filter it stands for, so a bad table fails at load.
+
+        if self.requests:
+            if not self.mode:
+                raise ConfigError(
+                    f"{where}: requests applies to a wsgi or asgi entry; add"
+                    f" mode = 'wsgi' or 'asgi'"
+                )
+
+            _request_filter(self.requests, where)
 
         if not isinstance(self.trace, bool):
             raise ConfigError(
@@ -796,6 +843,11 @@ def _bindings_for(
         base = capture if capture is not None else REFERENCE
         effective = _redact(*entry.redact, level=base)
 
+    # A requests table is the entry's when=, reaching the whole tree:
+    # an ignored request drops everything beneath it along with itself.
+
+    request_filter = _request_filter(entry.requests, where) if entry.requests else None
+
     prefix = f"{path}." if path else ""
     bound = [
         binding(
@@ -804,6 +856,8 @@ def _bindings_for(
             capture=effective,
             mode=entry.mode or None,
             data=entry.data or None,
+            when=request_filter,
+            tree=request_filter is not None,
         )
         for member in members
     ]
@@ -1443,7 +1497,16 @@ def _config_from(document: Any, location: str) -> Config:
             raw,
             section="[[observe]]",
             required=("target",),
-            optional=("name", "match", "exclude", "redact", "mode", "trace", "data"),
+            optional=(
+                "name",
+                "match",
+                "exclude",
+                "redact",
+                "mode",
+                "trace",
+                "data",
+                "requests",
+            ),
         )
         observe.append(ObserveEntry(**table))
 

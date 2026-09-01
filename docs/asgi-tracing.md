@@ -35,9 +35,11 @@ application = wrapture.ASGIMiddleware(application)
 The standalone constructor carries the recording options the binding
 mode would otherwise supply, under the same names: `when=` decides
 per request whether to record, the application running and answering
-either way, as a callable taking the scope or a glob string or list
-of glob strings naming request paths not to record
-(`when=["/health", "/static/*"]`, matched against `scope["path"]`);
+either way, as a callable taking the scope or a `filter_requests()`
+filter over the request's recorded fields
+(`when=wrapture.filter_requests(ignore={"path": ["/health",
+"/static/*"]})`, matched against `scope["path"]`), with `tree=True`
+extending a decline to everything beneath the request;
 `capture_args=` is the capture policy for the request's descriptive
 data, where `redact()` masks query parameters by name over and above
 the built-in sensitive set; `capture_result=` the policy for the
@@ -205,6 +207,24 @@ app = wrapture.binding(
 )
 ```
 
+A `filter_requests()` filter is accepted in the callable's place,
+declaring the decision as tables of request fields (`method`,
+`path`, `scheme`, `protocol`, `remote`) to glob patterns, and
+`tree=True` extends a decline to everything beneath the request, so
+an ignored health check leaves no orphaned roots behind:
+
+```python
+app = wrapture.binding(
+    "myapp.main:application", mode="asgi",
+    when=wrapture.filter_requests(ignore={"path": ["/health", "/static/*"]}),
+    tree=True,
+)
+```
+
+The [WSGI page](wsgi-tracing.md#ignoring-whole-requests) has the
+full rules; they are the same on both sides, the fields being valued
+as the ASGI event records them.
+
 ## Asserting on requests in tests
 
 The status is the result, so the existing assertion vocabulary needs
@@ -227,9 +247,13 @@ def test_export_streams_and_succeeds():
 
 An observe entry takes `mode = "asgi"`, valid only with `name`,
 never `match`: a pattern must never bulk-install middleware. For an
-asgi entry, `redact` names query string parameters, and a `data`
-table seeds every request event with static tags (the request's own
-fields are written over it, so it cannot respell them):
+asgi entry, `redact` names query string parameters, a `data` table
+seeds every request event with static tags (the request's own fields
+are written over it, so it cannot respell them), and a `requests`
+table is `filter_requests()` spelt as TOML with `tree=True` implied,
+in the inline form or as an `[observe.requests]` sub-table with
+`accept` and `ignore` tables, exactly as on the
+[WSGI page](wsgi-tracing.md#from-a-config-file):
 
 ```toml
 [[observe]]
@@ -237,6 +261,7 @@ target = "myapp.main"
 name = "application"
 mode = "asgi"
 redact = ["signature"]
+requests = { ignore = { path = ["/health", "/static/*"] } }
 
 [[sink]]
 type = "jsonlines"

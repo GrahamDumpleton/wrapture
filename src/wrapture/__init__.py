@@ -96,6 +96,10 @@ from .export import (
     load_events,
     mermaid,
 )
+from .filters import (
+    RequestFilter,
+    filter_requests,
+)
 from .instrumentations import (
     Instrumentation,
     Instrumented,
@@ -237,6 +241,7 @@ __all__ = [
     "PathStats",
     "Printer",
     "RecordingGapWarning",
+    "RequestFilter",
     "Sample",
     "SequenceExhaustedError",
     "SetBehaviour",
@@ -269,6 +274,7 @@ __all__ = [
     "current_trace",
     "detach",
     "discover",
+    "filter_requests",
     "find_binding",
     "find_bindings",
     "find_config",

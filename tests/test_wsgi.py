@@ -22,6 +22,7 @@ from wrapture import (
     WrongModeError,
     WSGIMiddleware,
     binding,
+    filter_requests,
     iterator,
     redact,
     timeline,
@@ -675,12 +676,14 @@ def test_observe_entry_rejects_unknown_modes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_standalone_when_globs_skip_matching_paths() -> None:
-    # A glob list names paths not to record; the application still
-    # runs and answers, matching when= everywhere: the predicate
-    # decides recording only.
+def test_standalone_when_takes_a_request_filter() -> None:
+    # A filter_requests() filter names requests not to record; the
+    # application still runs and answers, matching when= everywhere:
+    # the predicate decides recording only.
 
-    wrapped = WSGIMiddleware(application, when=["/health", "/static/*"])
+    wrapped = WSGIMiddleware(
+        application, when=filter_requests(ignore={"path": ["/health", "/static/*"]})
+    )
 
     with timeline() as tape:
         for path in ("/health", "/static/logo.png"):
@@ -698,8 +701,10 @@ def test_standalone_when_globs_skip_matching_paths() -> None:
     assert event.data["path"] == "/orders/1"
 
 
-def test_standalone_when_takes_a_single_glob_string() -> None:
-    wrapped = WSGIMiddleware(application, when="/health")
+def test_a_request_filter_takes_a_single_glob_string() -> None:
+    wrapped = WSGIMiddleware(
+        application, when=filter_requests(ignore={"path": "/health"})
+    )
 
     with timeline() as tape:
         server = _Server()
@@ -727,8 +732,16 @@ def test_standalone_when_callable_sees_the_environ() -> None:
 
 
 def test_standalone_when_rejects_a_bad_value() -> None:
-    with pytest.raises(ValueError, match="glob string"):
+    with pytest.raises(ValueError, match="filter_requests"):
         WSGIMiddleware(application, when=42)
+
+
+def test_standalone_when_no_longer_takes_bare_globs() -> None:
+    # The path globs live in filter_requests() now; a bare list points
+    # there rather than being read as an ignore list.
+
+    with pytest.raises(ValueError, match="filter_requests"):
+        WSGIMiddleware(application, when=["/health", "/static/*"])
 
 
 def test_standalone_options_win_over_the_binding() -> None:
