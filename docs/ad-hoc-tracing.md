@@ -414,6 +414,74 @@ on the request modes, where it is what an ignored request wants; the
 `filter_requests()`, the declarative request predicate that pairs
 with it.
 
+## Terminal nodes: leaf= and category=
+
+`tree=True` drops an operation and everything beneath it. The
+related shape is to keep the operation's own event and drop
+everything beneath it: a client library's entry point is worth
+seeing, the HTTP requests it makes internally are not, and the entry
+point's duration should cover them. That binding is a terminal node
+of the tree, and `leaf=True` says so:
+
+```python
+wrapture.binding("billing.client:Client.charge", leaf=True, category="external")
+```
+
+A leaf records as usual, and for its whole extent nothing that would
+make a span records beneath it: nested bindings, attribute accesses,
+blocks, a nested request, through a generator's iteration, a
+coroutine's await and a streamed response body, and into threads
+handed the context with `propagate()` or `detach()`. Behaviour still
+applies beneath it; only recording stops. Log captures are the
+exception: a log record is an instantaneous event on whatever is in
+flight, so beneath a leaf it records attached to the leaf, which is
+the detail a terminal node can still usefully carry. Two properties
+follow from nothing beneath the leaf being pushed: `annotate()` from
+inside the body lands on the leaf, since it is the innermost event
+in flight, and `trace_headers()` still propagates the tree's
+identity outward from it, so an internal HTTP call carries the trace
+on even though its own event is not recorded.
+
+Unlike a `tree=True` decline, a leaf counts nothing on the bindings
+beneath it. The silence is structural, declared with the binding,
+and visible on the tape by construction: the leaf event is there and
+has no children, which is the whole explanation. A leaf beneath a
+`tree=True` decline stays fully silent, since the decline's stronger
+silence is never lowered, and a leaf beneath a leaf is silenced like
+anything else. The flag composes with `when=` and `tree=` on the
+same binding, and is the same on `observed()`, `bound()`,
+`discover()`, `block()` and the request middlewares; a value or
+mapping binding refuses it with the other recording options.
+
+`category=` is the other half of declaring what a target is: the
+kind of operation its events are, one of `"external"` (a call to
+another service), `"database"`, `"datastore"`, `"messaging"`,
+`"task"` or `"template"`, aligned with the categories instrumentation
+packages are organised by. It is carried on every event the binding
+records as a field of its own, `event.category`, never as a data
+key, and never changed afterwards: like a leaf it is a structural
+fact fixed at declaration, not something decided during a call, so
+`annotate()` cannot set it. The two are usually declared together on
+an outbound client, but neither implies the other, for the same
+reason `when=`'s reach never depends on what is passed to it.
+
+The category is for programs, not for the printed tree: `Printer`,
+`canonical()` and `mermaid()` do not show it, since the name already
+says what `urllib.open` is. It is selected on everywhere events are
+selected. On a tape, `of_category("external")` narrows any event log
+as `of_kind()` does, `tape.where(category="database")` selects
+across bindings, and `current_event(category="external")` aims
+`annotate()` or `note_exception()` at the nearest enclosing external
+call without knowing its binding, the way `kind="request"` aims at
+the request. At a sink, a `Filter` predicate reads
+`event.category`, and a config's `filter` table takes `category`
+beside `kind`, `path` and `label`. In the JSON Lines record it is a
+`category` key, present only when set. And the OpenTelemetry export
+uses it for the span kind and, through the category's data-key
+contract, for the semantic-convention attributes; the
+[OTel page](otel-export.md#the-category-data-key-contracts) has the
+contracts.
+
 ## Streaming to disk: JSONLines
 
 `JSONLines(path)` writes each completed event to a file as one JSON
@@ -715,6 +783,11 @@ accepts a single string or a list:
   names query string parameters. The
   [WSGI](wsgi-tracing.md) and [ASGI](asgi-tracing.md) request
   tracing pages cover them.
+- `leaf = true` makes the entry's bindings leaves, and `category`
+  names what kind of operation their events are (`"external"`,
+  `"database"`, `"datastore"`, `"messaging"`, `"task"` or
+  `"template"`): the `binding(leaf=, category=)` options as TOML, see
+  [Terminal nodes](#terminal-nodes-leaf-and-category).
 - `data` is a table of static tags every event from the entry's
   bindings starts with: string keys to scalars or flat lists of
   scalars, the shape `binding(data=)` takes in code. It is the only
@@ -793,8 +866,9 @@ sink alone: `sample = 0.1` keeps that fraction of whole call trees
 (`Sample`), `depth = 2` forwards only the top levels of each tree
 (`Depth`), and `filter` forwards only matching events (`Filter`).
 `filter` is either a table of event fields to patterns, `kind`,
-`path` and `label`, each a string or list of strings matched with
-`fnmatch` rules and all of which must match, or a `module:attr`
+`path`, `label` and `category`, each a string or list of strings
+matched with `fnmatch` rules and all of which must match, or a
+`module:attr`
 reference to a predicate taking the event. Several gating keys on
 one entry wrap in a fixed order however they are written, sample
 outermost, then depth, then filter innermost:

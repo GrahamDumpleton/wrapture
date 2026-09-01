@@ -197,8 +197,51 @@ instrumentation annotates, is exported as ordinary
 binding or the middleware, or an observe entry's `data` table, are
 merged in before the middleware writes the request's own fields, so
 a declaration can add ordinary keys but never override a reserved
-one. The mapping is scoped to `"request"` events;
-data on `"call"` and `"block"` events is never interpreted.
+one. The mapping is scoped to `"request"` events; data on an
+uncategorised `"call"` or `"block"` event is never interpreted.
+
+### The category data-key contracts
+
+A binding declared with `category=` (see the [ad-hoc tracing
+guide](ad-hoc-tracing.md#terminal-nodes-leaf-and-category)) records
+events that carry the category as a field, and the export treats
+them as the client side of an exchange. OTel has no category
+attribute of its own: a span's kind is structural and its category
+is implied by which semantic-convention attributes it carries, so
+the export translates rather than passes through. Every categorised
+span carries `wrapture.category` verbatim, so a backend that does
+not read the conventions can still select on it, and its kind and
+attributes follow the category:
+
+| category | span kind | data key | exported as |
+|----------|-----------|----------|-------------|
+| `external` | CLIENT | `method` | `http.request.method` |
+| | | `url` | `url.full` |
+| | | `host`, `port` | `server.address`, `server.port` |
+| | | `path`, `query` | `url.path`, `url.query` |
+| | | `status` | `http.response.status_code`; 400 and above sets the error status, as the HTTP client conventions say |
+| `database` | CLIENT | `system` | `db.system.name` |
+| | | `operation` | `db.operation.name` |
+| | | `collection` | `db.collection.name` |
+| | | `statement` | `db.query.text`; only ever present when the instrumentation chose to capture it |
+| `datastore` | CLIENT | `system`, `operation`, `collection` | as for `database` |
+| `messaging`, `task` | PRODUCER | `system` | `messaging.system` |
+| | | `destination` | `messaging.destination.name` |
+| | | `operation` | `messaging.operation.type` |
+| `template` | INTERNAL | | `wrapture.category` only |
+
+Instrumentation fills the contract keys with `annotate()` from
+inside the operation (a leaf's body annotates the leaf, since
+nothing beneath it is in flight) or with `data=` where a value is
+fixed for the target, the driver's `system` say. A `status` may be
+an integer or a status line; a `url` should carry no query string,
+which goes under `query` after the same by-name redaction the
+request middleware applies. Keys outside the category's contract,
+and contract keys of some other category, export as ordinary
+`wrapture.data.<key>`. The leaf categories describe the client or
+producing side only: consuming a message or running a queued task
+roots a tree of its own, structurally a request, and is a root event
+kind question for when such a target is instrumented.
 
 ### One trace id everywhere
 

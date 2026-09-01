@@ -55,7 +55,13 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, SignatureInfo, cached_signature_info, normalized_arguments
+from .events import (
+    Event,
+    SignatureInfo,
+    _check_category,
+    cached_signature_info,
+    normalized_arguments,
+)
 from .exceptions import (
     AlreadyAppliedError,
     DeferredTargetError,
@@ -78,13 +84,19 @@ from .sinks import (
 from .stacks import _capture as _capture_stack
 from .stacks import _resolve_depth
 from .timeline import (
+    _SILENCE_ALL,
+    _SILENCE_SPANS,
     _capture_result,
+    _check_leaf,
     _check_tree,
     _current_tape,
     _pop,
     _push,
+    _resume,
+    _silence,
     _stack,
     _suppressed,
+    _suspend,
     _timelines_active,
     seed_data,
 )
@@ -432,17 +444,19 @@ async def _record_awaited(
     policy: CapturePolicy,
     active: tuple[Sink, ...],
     on_complete: Callable[[Event], None] | None = None,
+    silenced: bool = False,
 ) -> Any:
     """Record around the await, so the event reflects the real outcome.
 
     Re-establishes the in-progress stack for the duration, so calls made
-    inside the coroutine body nest under this event. The stack is set
-    raw rather than pushed, because the event was already linked to its
-    parent when the call was recorded. `on_complete` sees the finished
-    event, outcome or exception, once the sinks have.
+    inside the coroutine body nest under this event (and a leaf's
+    silence beneath it, with `silenced`). The stack is set raw rather
+    than pushed, because the event was already linked to its parent
+    when the call was recorded. `on_complete` sees the finished event,
+    outcome or exception, once the sinks have.
     """
 
-    token = _stack.set(stack + (event,))
+    tokens = _resume(stack, event, silenced)
     try:
         result = await awaitable
     except BaseException as exc:
@@ -454,7 +468,7 @@ async def _record_awaited(
             on_complete(event)
         raise
     finally:
-        _stack.reset(token)
+        _suspend(tokens)
 
     if event.started is not None:
         event.duration = time.perf_counter() - event.started
@@ -502,15 +516,17 @@ def _record_generator(
     stack: tuple[Event, ...],
     policy: CapturePolicy,
     active: tuple[Sink, ...],
+    silenced: bool = False,
 ) -> Generator[Any, Any, Any]:
     """A generator around a generator, recording as it runs.
 
     One event, already on the tape, covers the whole iteration. The
     in-progress stack is re-established around each resumption only, so
     calls made inside the body nest under the event while the consumer's
-    own work between yields does not. Preserves the full generator
-    protocol: send() and throw() are forwarded, close() closes the
-    wrapped generator, and the return value is returned.
+    own work between yields does not; `silenced` re-establishes a
+    leaf's silence beneath it in the same places. Preserves the full
+    generator protocol: send() and throw() are forwarded, close()
+    closes the wrapped generator, and the return value is returned.
     """
 
     started = time.perf_counter()
@@ -525,7 +541,7 @@ def _record_generator(
         # did, timing the resumption: the body only runs inside send()
         # and throw().
 
-        token = _stack.set(stack + (event,))
+        tokens = _resume(stack, event, silenced)
         resumed = time.perf_counter()
 
         try:
@@ -535,19 +551,19 @@ def _record_generator(
                 item = generator.throw(operation[1])
         except StopIteration as stop:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             _close_iteration(
                 event, started, body, items, policy, active, result=stop.value
             )
             return stop.value
         except BaseException as exc:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             _close_iteration(event, started, body, items, policy, active, exception=exc)
             raise
         else:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
 
         items += 1
         event.items = items
@@ -568,6 +584,7 @@ async def _record_async_generator(
     stack: tuple[Event, ...],
     policy: CapturePolicy,
     active: tuple[Sink, ...],
+    silenced: bool = False,
 ) -> AsyncGenerator[Any, Any]:
     """The async twin of _record_generator, for async generators.
 
@@ -584,7 +601,7 @@ async def _record_async_generator(
     operation: tuple[str, Any] = ("send", None)
 
     while True:
-        token = _stack.set(stack + (event,))
+        tokens = _resume(stack, event, silenced)
         resumed = time.perf_counter()
 
         try:
@@ -594,17 +611,17 @@ async def _record_async_generator(
                 item = await generator.athrow(operation[1])
         except StopAsyncIteration:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             _close_iteration(event, started, body, items, policy, active, result=None)
             return
         except BaseException as exc:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             _close_iteration(event, started, body, items, policy, active, exception=exc)
             raise
         else:
             body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
 
         items += 1
         event.items = items
@@ -629,7 +646,7 @@ def _run_silenced(fn: Callable[[], Any]) -> Any:
     path re-establishes the in-progress stack.
     """
 
-    token = _suppressed.set(True)
+    token = _silence(_SILENCE_ALL)
     try:
         outcome = fn()
     finally:
@@ -656,7 +673,7 @@ def _silence_generator(
     operation: tuple[str, Any] = ("send", None)
 
     while True:
-        token = _suppressed.set(True)
+        token = _silence(_SILENCE_ALL)
         try:
             if operation[0] == "send":
                 item = generator.send(operation[1])
@@ -670,7 +687,7 @@ def _silence_generator(
         try:
             operation = ("send", (yield item))
         except GeneratorExit:
-            token = _suppressed.set(True)
+            token = _silence(_SILENCE_ALL)
             try:
                 generator.close()
             finally:
@@ -688,7 +705,7 @@ async def _silence_async_generator(
     operation: tuple[str, Any] = ("send", None)
 
     while True:
-        token = _suppressed.set(True)
+        token = _silence(_SILENCE_ALL)
         try:
             if operation[0] == "send":
                 item = await generator.asend(operation[1])
@@ -702,7 +719,7 @@ async def _silence_async_generator(
         try:
             operation = ("send", (yield item))
         except GeneratorExit:
-            token = _suppressed.set(True)
+            token = _silence(_SILENCE_ALL)
             try:
                 await generator.aclose()
             finally:
@@ -715,7 +732,7 @@ async def _silence_async_generator(
 async def _silence_awaited(awaitable: Any) -> Any:
     """Await an outcome with recording suppressed for the await."""
 
-    token = _suppressed.set(True)
+    token = _silence(_SILENCE_ALL)
     try:
         return await awaitable
     finally:
@@ -760,6 +777,8 @@ class Binding:
         | bool
         | None = None,
         tree: bool = False,
+        leaf: bool = False,
+        category: str | None = None,
         data: Mapping[str, Any] | None = None,
         strict: bool = True,
         attr: str | None = None,
@@ -789,6 +808,8 @@ class Binding:
                 stack,
                 when,
                 tree or None,
+                leaf or None,
+                category,
             )
         elif mode == "value":
             raise ValueError(
@@ -804,6 +825,8 @@ class Binding:
                 stack,
                 when,
                 tree or None,
+                leaf or None,
+                category,
             )
 
         # Collapse the location to an owner and a dotted name, so the
@@ -934,6 +957,13 @@ class Binding:
         self._when = when
         self._tree = _check_tree(tree, when)
 
+        # What this binding declares its target to be: a leaf records
+        # its own event and silences the spans beneath it, and a
+        # category names the kind of operation for consumers.
+
+        self._leaf = _check_leaf(leaf)
+        self._category = _check_category(category)
+
         # Whether a call that behaviour answers without reaching the
         # real callable is still checked against its signature.
 
@@ -1043,7 +1073,8 @@ class Binding:
         if any(option is not None for option in recording):
             raise ValueError(
                 f"a {mode} binding records nothing, so capture=, capture_args=,"
-                f" capture_result=, stack=, when= and tree= do not apply to it"
+                f" capture_result=, stack=, when=, tree=, leaf= and category="
+                f" do not apply to it"
             )
 
     def _bare_path(self, target: Any, name: str) -> str:
@@ -1081,6 +1112,19 @@ class Binding:
         """
 
         return self._path
+
+    @property
+    def category(self) -> str | None:
+        """The category declared for this binding's events, or None."""
+
+        return self._category
+
+    @property
+    def leaf(self) -> bool:
+        """Whether this binding is a leaf: its events record, nothing
+        that would make a span records beneath them."""
+
+        return self._leaf
 
     @property
     def label(self) -> str | None:
@@ -1905,12 +1949,16 @@ class Binding:
 
                 return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
-            # Beneath an operation a tree=True binding declined nothing
-            # records, the predicate included; the call is counted as
-            # filtered so a shorter tape stays explainable.
+            # Beneath a leaf, or an operation a tree=True binding
+            # declined, nothing records, the predicate included. A tree
+            # decline's silence is counted as filtered so a shorter
+            # tape stays explainable; a leaf's is structural, visible
+            # on the tape as the leaf itself, and counts nothing.
 
-            if _suppressed.get():
-                bnd._filtered_calls += 1
+            silenced = _suppressed.get()
+            if silenced:
+                if silenced >= _SILENCE_ALL:
+                    bnd._filtered_calls += 1
                 return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
 
             # The per-call predicate decides whether this operation is
@@ -1965,9 +2013,12 @@ class Binding:
 
             slot: list[Phase | None] = [phase]
 
-            # Only behaviour receives the forwarder, so without a phase
+            # A leaf silences the spans beneath it for the body; only
+            # behaviour receives the forwarder, so without a phase
             # there is nothing to build one for: the real callable is
             # called directly.
+
+            silence = _silence(_SILENCE_SPANS) if bnd._leaf else None
 
             try:
                 outcome = bnd._invoke(
@@ -1988,6 +2039,8 @@ class Binding:
                 bnd._completed("call", slot[0], event)
                 raise
             finally:
+                if silence is not None:
+                    _suppressed.reset(silence)
                 _pop(token)
 
             phase = slot[0]
@@ -2014,13 +2067,15 @@ class Binding:
 
             if kind == "generator":
                 bnd._completed("call", phase, event)
-                return _record_generator(outcome, event, base, result_policy, active)
+                return _record_generator(
+                    outcome, event, base, result_policy, active, silenced=bnd._leaf
+                )
 
             if kind == "asyncgen":
                 bnd._completed("call", phase, event)
                 return _named_after(
                     _record_async_generator(
-                        outcome, event, base, result_policy, active
+                        outcome, event, base, result_policy, active, silenced=bnd._leaf
                     ),
                     outcome,
                 )
@@ -2038,7 +2093,13 @@ class Binding:
 
                 return _named_after(
                     _record_awaited(
-                        outcome, event, base, result_policy, active, on_complete
+                        outcome,
+                        event,
+                        base,
+                        result_policy,
+                        active,
+                        on_complete,
+                        silenced=bnd._leaf,
                     ),
                     outcome,
                 )
@@ -2079,6 +2140,7 @@ class Binding:
             "call",
             self._path,
             label=self._label,
+            category=self._category,
             instance=instance,
             binding=self,
             capture=level,
@@ -2626,6 +2688,8 @@ def binding(
     | bool
     | None = None,
     tree: bool = False,
+    leaf: bool = False,
+    category: str | None = None,
     data: Mapping[str, Any] | None = None,
     strict: bool = True,
     attr: str | None = None,
@@ -2729,6 +2793,31 @@ def binding(
     and `when=False, tree=True` silences a whole subtree. `tree=True`
     needs a `when=` to act on and is refused without one.
 
+    `leaf=True` makes the binding a terminal node of the tree: its
+    own events record as usual, and nothing that would make a span
+    records beneath them for their whole extent (nested bindings,
+    attribute accesses, blocks, a nested request; a generator's
+    iteration and a coroutine's await included), while log captures
+    still record, attached to the leaf. The event's duration then
+    covers everything the operation did. This is for a call whose
+    internals are not worth subdividing, a client library's entry
+    point that makes HTTP requests of its own, say. It is structural,
+    declared with the binding, and counts nothing: the leaf on the
+    tape is the explanation for its missing children. `annotate()`
+    from inside the body lands on the leaf, since it is the innermost
+    event in flight, and `trace_headers()` still propagates from it.
+
+    `category=` names what kind of operation the binding's events
+    are, one of "external", "database", "datastore", "messaging",
+    "task" or "template", carried on every event for sinks (a
+    `Filter` or a config's `filter` table), tape queries
+    (`of_category()`, `where(category=)`, `current_event(category=)`)
+    and the OpenTelemetry export (the span kind and, with the
+    category's data-key contract, its semantic-convention attributes)
+    to select on. Like `leaf=` it is a declaration about the target,
+    never changed afterwards; the two are usually declared together
+    on an outbound client, but neither implies the other.
+
     `data=` seeds every event the binding records with static data, a
     mapping of string keys to scalars (str, int, float, bool) or flat
     lists of scalars, merged into the event's data at enter before
@@ -2767,6 +2856,8 @@ def binding(
         stack=stack,
         when=when,
         tree=tree,
+        leaf=leaf,
+        category=category,
         data=data,
         strict=strict,
         attr=attr,
@@ -2803,6 +2894,8 @@ def discover(
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
+    leaf: bool = False,
+    category: str | None = None,
     strict: bool = True,
 ) -> BindingGroup:
     """Create bindings for every member of a target matching a pattern.
@@ -2886,6 +2979,8 @@ def discover(
                 stack=stack,
                 when=when,
                 tree=tree,
+                leaf=leaf,
+                category=category,
                 strict=strict,
             )
             for member in members

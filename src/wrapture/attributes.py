@@ -49,9 +49,12 @@ from .sinks import (
 )
 from .stacks import _capture as _capture_stack
 from .timeline import (
+    _SILENCE_ALL,
+    _SILENCE_SPANS,
     _capture_result,
     _pop,
     _push,
+    _silence,
     _suppressed,
     _timelines_active,
 )
@@ -152,6 +155,7 @@ def _build_event(
             kind,
             binding._path,
             label=binding._label,
+            category=binding._category,
             instance=instance,
             binding=binding,
             capture=_level_of(policy),
@@ -192,7 +196,7 @@ def _silenced(
     """Run an unrecorded attribute operation with recording suppressed
     beneath it for its extent, so nothing it triggers records either."""
 
-    token = _suppressed.set(True)
+    token = _silence(_SILENCE_ALL)
     try:
         return _quiet(binding, kind, instance, attribute, operate, value, slot)
     finally:
@@ -278,11 +282,14 @@ def _record(
 
         return _quiet(binding, kind, instance, attribute, operate, value, slot)
 
-    # Beneath an operation a tree=True binding declined nothing
-    # records, the predicate included.
+    # Beneath a leaf, or an operation a tree=True binding declined,
+    # nothing records, the predicate included; only a tree decline's
+    # silence is counted, a leaf's being visible on the tape itself.
 
-    if _suppressed.get():
-        binding._filtered_calls += 1
+    silenced = _suppressed.get()
+    if silenced:
+        if silenced >= _SILENCE_ALL:
+            binding._filtered_calls += 1
         return _quiet(binding, kind, instance, attribute, operate, value, slot)
 
     # The per-access predicate, mapped onto call shape the same way
@@ -336,6 +343,10 @@ def _record(
     started = time.perf_counter()
     event.started = started
 
+    # A leaf silences the spans beneath it for the operation.
+
+    silence = _silence(_SILENCE_SPANS) if binding._leaf else None
+
     try:
         outcome = operate(event)
     except BaseException as exc:
@@ -345,6 +356,8 @@ def _record(
         binding._completed(kind, slot[0], event)
         raise
     finally:
+        if silence is not None:
+            _suppressed.reset(silence)
         _pop(token)
 
     event.duration = time.perf_counter() - started

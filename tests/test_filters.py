@@ -542,7 +542,7 @@ def test_tree_must_be_a_boolean() -> None:
 
 
 def test_tree_is_refused_on_a_value_binding() -> None:
-    with pytest.raises(ValueError, match="tree= do not apply"):
+    with pytest.raises(ValueError, match="tree=, leaf= and category= do not apply"):
         binding(Model, attr="status", tree=True)
 
 

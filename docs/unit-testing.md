@@ -332,8 +332,8 @@ entry use). `match`
 is one `fnmatchcase` pattern or a sequence of them, and `exclude`
 subtracts from whatever matched. The remaining keyword options
 (`capture=`, `capture_args=`, `capture_result=`, `stack=`, `when=`,
-`tree=`) are the uniform subset of `binding()`'s options, applied to
-every selected member.
+`tree=`, `leaf=`, `category=`) are the uniform subset of
+`binding()`'s options, applied to every selected member.
 
 Selection is deliberately confined, and is shared with the config file's
 `match` entries so a pattern selects the same members however it is
@@ -385,7 +385,8 @@ path, with `label=` to assign a name where one adds something the
 path cannot say. The keyword options are the uniform subset
 `binding()` takes: `capture=`, `capture_args=`, `capture_result=`, `stack=`,
 `when=` (which receives `(instance, args, kwargs)`; the instance is
-None for a free-standing callable) and `tree=`. Placed on a class, the proxy binds
+None for a free-standing callable), `tree=`, `leaf=` and `category=`.
+Placed on a class, the proxy binds
 as a method exactly as the wrapped function would: calls made through
 instances record the instance (so `with_instance()` applies), the
 bound signature drops `self`, and the normalized arguments never
@@ -1222,6 +1223,8 @@ assertion name is an `AttributeError`, never a silent pass.
 Each filter returns a new, narrowed `EventLog`, so filters chain freely:
 
 - `of_kind("call", "get", ...)` narrows by event kind.
+- `of_category("external", ...)` narrows by the category the event's
+  binding declared.
 - `matching(predicate)` keeps events the predicate accepts.
 - `raising(TimeoutError)` keeps events that raised one of the given
   exception types; `raising()` keeps events that raised anything.
@@ -1743,13 +1746,15 @@ through the value it returns. `bindings_of(obj)` lists every layer,
 outermost first.
 
 When no binding is obtainable at all, or the strings are what the
-test has, the tape answers by them directly: `tape.where(path=...)`
-and `tape.where(label=...)` return an `EventLog` selected by the
-event's path or its display label under the same rules, so the
-filter and assertion surface applies, and the result is a step for
-`assert_order()` like any other log. `find_binding()` is the usual
-route, since the binding is worth more than its events; `where()` is
-the fallback.
+test has, the tape answers by them directly: `tape.where(path=...)`,
+`tape.where(label=...)` and `tape.where(category=...)` return an
+`EventLog` selected by the event's path, its display label or its
+declared category under the same rules, so the filter and assertion
+surface applies, and the result is a step for `assert_order()` like
+any other log. `find_binding()` is the usual route, since the
+binding is worth more than its events; `where()` is the fallback,
+and the way to ask for every external call a test made across
+bindings.
 
 ## The pytest plugin
 

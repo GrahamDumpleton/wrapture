@@ -34,7 +34,7 @@ from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
-from .events import Event
+from .events import Event, _check_category
 from .filters import RequestFilter, _environ_fields, _predicate_for
 from .sinks import (
     Sink,
@@ -46,11 +46,17 @@ from .sinks import (
 )
 from .stacks import _capture as _capture_stack
 from .timeline import (
+    _SILENCE_ALL,
+    _SILENCE_SPANS,
+    _check_leaf,
     _check_tree,
     _pop,
     _push,
+    _resume,
+    _silence,
     _stack,
     _suppressed,
+    _suspend,
     _timelines_active,
     seed_data,
 )
@@ -154,7 +160,7 @@ def _silenced(environ: Mapping[str, Any], produce: Callable[[], Any]) -> Any:
     so that work done while streaming stays silenced too.
     """
 
-    token = _suppressed.set(True)
+    token = _silence(_SILENCE_ALL)
     try:
         iterable = produce()
     finally:
@@ -184,7 +190,7 @@ class _SilencedIterator:
         return self
 
     def __next__(self) -> Any:
-        token = _suppressed.set(True)
+        token = _silence(_SILENCE_ALL)
         try:
             if self._iterator is None:
                 self._iterator = iter(self._iterable)
@@ -201,7 +207,7 @@ class _SilencedIterator:
         if inner is None:
             return
 
-        token = _suppressed.set(True)
+        token = _silence(_SILENCE_ALL)
         try:
             inner()
         finally:
@@ -339,6 +345,7 @@ class _ResponseIterator:
         policy: CapturePolicy,
         active: tuple[Sink, ...],
         response: dict[str, Any],
+        silenced: bool = False,
     ) -> None:
         self._iterable = iterable
         self._iterator: Any = None
@@ -348,6 +355,7 @@ class _ResponseIterator:
         self._policy = policy
         self._active = active
         self._response = response
+        self._silenced = silenced
 
         self._body = 0.0
         self._items = 0
@@ -386,9 +394,10 @@ class _ResponseIterator:
     def __next__(self) -> Any:
         # Re-establish the request on the in-progress stack around the
         # pull, so anything the application does while producing this
-        # chunk records beneath the request event.
+        # chunk records beneath the request event (or, for a leaf, is
+        # silenced beneath it).
 
-        token = _stack.set(self._stack + (self._event,))
+        tokens = _resume(self._stack, self._event, self._silenced)
         resumed = time.perf_counter()
 
         try:
@@ -397,17 +406,17 @@ class _ResponseIterator:
             chunk = next(self._iterator)
         except StopIteration:
             self._body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             self._finish(result=self._response.get("status", MISSING))
             raise
         except BaseException as exc:
             self._body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
             self._finish(exception=exc)
             raise
         else:
             self._body += time.perf_counter() - resumed
-            _stack.reset(token)
+            _suspend(tokens)
 
         self._items += 1
         self._event.items = self._items
@@ -487,6 +496,10 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
       descriptive data, the query string foremost, where redact()
       masks parameters by name; `capture_result` the policy for the
       status-line result.
+
+    - `leaf` and `category` declare what the application is, as on a
+      binding: a leaf request records its own event and silences the
+      spans beneath it, and a category names the kind of operation.
     """
 
     def __init__(
@@ -497,6 +510,8 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         label: str | None = None,
         when: Any = None,
         tree: bool = False,
+        leaf: bool = False,
+        category: str | None = None,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         data: Mapping[str, Any] | None = None,
@@ -521,6 +536,10 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
         self._self_when = _request_predicate(when, "wsgi")
         self._self_tree = _check_tree(tree, self._self_when)
+        self._self_leaf = _check_leaf(leaf) or (binding._leaf if binding else False)
+        self._self_category = _check_category(category)
+        if self._self_category is None and binding is not None:
+            self._self_category = binding._category
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
         self._self_data = seed_data(data) or (binding._data if binding else {})
@@ -566,7 +585,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         silenced = when is False and tree and bool(active)
 
         if recording and _suppressed.get():
-            if binding is not None:
+            if binding is not None and _suppressed.get() >= _SILENCE_ALL:
                 binding._filtered_calls += 1
             recording = False
         elif recording and callable(when):
@@ -614,6 +633,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                     "request",
                     self._self_path,
                     label=self._self_label,
+                    category=self._self_category,
                     binding=binding,
                     capture=_level_of(args_policy),
                     injected=(
@@ -718,6 +738,11 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         started = time.perf_counter()
         event.started = started
 
+        # A leaf request silences the spans beneath it, here for the
+        # synchronous phase and again around each body chunk.
+
+        silence = _silence(_SILENCE_SPANS) if self._self_leaf else None
+
         try:
             iterable = produce()
 
@@ -729,6 +754,8 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
             _notify_error(event, active)
             raise
         finally:
+            if silence is not None:
+                _suppressed.reset(silence)
             _pop(token)
 
         event.data["app_duration"] = time.perf_counter() - started
@@ -740,7 +767,14 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
             result_policy = _required_policy(active, "capture_result")
 
         return _ResponseIterator(
-            iterable, event, base, started, result_policy, active, response
+            iterable,
+            event,
+            base,
+            started,
+            result_policy,
+            active,
+            response,
+            silenced=self._self_leaf,
         )
 
 

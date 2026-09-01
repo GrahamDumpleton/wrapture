@@ -38,6 +38,7 @@ from .events import (
     Event,
     EventLink,
     _caught_types,
+    _check_category,
     _format_links,
     _format_time,
     _own_time,
@@ -99,30 +100,42 @@ class _EventQueries:
         where = getattr(bnd, "label", None) or getattr(bnd, "path", None) or repr(bnd)
         return EventLog(where, events)
 
-    def where(self, *, path: str | None = None, label: str | None = None) -> EventLog:
+    def where(
+        self,
+        *,
+        path: str | None = None,
+        label: str | None = None,
+        category: str | None = None,
+    ) -> EventLog:
         """A filterable view over this tape's events selected by the
         strings they carry, for when no binding is in hand.
 
         `path` matches an event's path exactly, the module:qualname of
         the target as `Binding.path` spells it. `label` matches the
         name an event is shown under: its assigned label, or its path
-        when it has none. Given together both have to match; one of
+        when it has none. `category` matches the category the event's
+        binding declared. Given together all have to match; one of
         them is required. find_binding() is the usual route, since it
         hands back the binding itself; this is the fallback for events
-        whose binding is not obtainable.
+        whose binding is not obtainable, and the way to ask for every
+        event of one category across bindings.
         """
 
-        if path is None and label is None:
-            raise ValueError("where() needs a path, a label, or both")
+        if path is None and label is None and category is None:
+            raise ValueError(
+                "where() needs a path, a label, a category, or a combination"
+            )
 
         events = [
             event
             for event in self._snapshot()
             if (path is None or event.path == path)
             and (label is None or (event.label or event.path) == label)
+            and (category is None or event.category == category)
         ]
 
-        return EventLog(label if label is not None else str(path), events)
+        name = label if label is not None else path if path is not None else category
+        return EventLog(str(name), events)
 
     def blocks(self, name: str = "*") -> EventLog:
         """A filterable view over this tape's block events, selected by
@@ -656,17 +669,63 @@ _origin: contextvars.ContextVar[tuple[EventLink, ...]] = contextvars.ContextVar(
     "wrapture_origin", default=()
 )
 
-# Whether a tree=True binding declined the operation this context is
-# inside: set for the dynamic extent of the declined operation, and
-# checked by every producer right after the recording gate, so nothing
-# beneath a declined root records. Carried into threads by propagate()
-# and detach() like any context variable, and left alone by a timeline
-# opened inside the extent: the silence is a property of the code
-# path, not of who is listening.
+# How much recording is suppressed in this context, as a level: 0 for
+# none; _SILENCE_SPANS beneath a leaf, where nothing that would make a
+# span records (bindings, attribute accesses, blocks, nested requests)
+# but log captures still do, attached to the leaf; _SILENCE_ALL for
+# the dynamic extent of an operation a tree=True binding declined,
+# where nothing records at all. Every producer checks it right after
+# the recording gate. Carried into threads by propagate() and detach()
+# like any context variable, and left alone by a timeline opened
+# inside the extent: the silence is a property of the code path, not
+# of who is listening.
 
-_suppressed: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "wrapture_suppressed", default=False
+_SILENCE_SPANS = 1
+_SILENCE_ALL = 2
+
+_suppressed: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "wrapture_suppressed", default=0
 )
+
+
+def _silence(level: int) -> contextvars.Token[int]:
+    """Raise the suppression level for the caller's extent, never
+    lowering one already in force; reset with the returned token."""
+
+    return _suppressed.set(max(level, _suppressed.get()))
+
+
+def _resume(
+    stack: tuple[Event, ...], event: Event, silenced: bool
+) -> tuple[contextvars.Token[tuple[Event, ...]], contextvars.Token[int] | None]:
+    """Re-establish the in-progress stack around one resumption of a
+    deferred body (a generator's next, a coroutine's await, a
+    streamed body's pull), and the leaf silence beneath it when the
+    event is a leaf's. Undo with _suspend()."""
+
+    return (
+        _stack.set(stack + (event,)),
+        _silence(_SILENCE_SPANS) if silenced else None,
+    )
+
+
+def _suspend(
+    tokens: tuple[contextvars.Token[tuple[Event, ...]], contextvars.Token[int] | None],
+) -> None:
+    stack_token, silence = tokens
+
+    if silence is not None:
+        _suppressed.reset(silence)
+    _stack.reset(stack_token)
+
+
+def _check_leaf(leaf: Any) -> bool:
+    """Validate a leaf= option: a bool."""
+
+    if not isinstance(leaf, bool):
+        raise TypeError(f"leaf must be True or False, got {leaf!r}")
+
+    return leaf
 
 
 def _check_tree(tree: Any, when: Any) -> bool:
@@ -818,12 +877,19 @@ class EventHandle:
     unconditionally.
     """
 
-    __slots__ = ("_event", "_kind", "_of")
+    __slots__ = ("_event", "_kind", "_of", "_category")
 
-    def __init__(self, event: Event | None, kind: str | None, of: Any) -> None:
+    def __init__(
+        self,
+        event: Event | None,
+        kind: str | None,
+        of: Any,
+        category: str | None = None,
+    ) -> None:
         object.__setattr__(self, "_event", event)
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_of", of)
+        object.__setattr__(self, "_category", category)
 
     def _describe(self) -> str:
         # The current_event() call this handle came from, for messages.
@@ -833,6 +899,8 @@ class EventHandle:
             filters.append(f"kind={self._kind!r}")
         if self._of is not None:
             filters.append(f"binding={self._of!r}")
+        if self._category is not None:
+            filters.append(f"category={self._category!r}")
 
         return f"current_event({', '.join(filters)})"
 
@@ -946,7 +1014,9 @@ class EventHandle:
         _note_exception(event, exception, stacklevel=3)
 
 
-def current_event(kind: str | None = None, binding: Any = None) -> EventHandle:
+def current_event(
+    kind: str | None = None, binding: Any = None, category: str | None = None
+) -> EventHandle:
     """A handle on the in-flight event, empty when nothing matched.
 
     The behaviour pipeline runs after its event is pushed, so this is
@@ -958,10 +1028,13 @@ def current_event(kind: str | None = None, binding: Any = None) -> EventHandle:
     ("request" for the request wrapture's own middleware recorded),
     `binding=` by which binding recorded it (the handle an
     instrumentation holds on its own binding, or a behaviour namespace
-    standing in for it). Either walks the in-flight stack from the
-    innermost event outward and takes the first match; given both,
-    both must match. This is how a handler that was passed an
-    exception reaches the unit of work that actually failed:
+    standing in for it), `category=` by the category the binding
+    declared ("external" for the nearest enclosing call to another
+    service, however it was bound). Each walks the in-flight stack
+    from the innermost event outward and takes the first match;
+    given several, all must match. This is how a handler that was
+    passed an exception reaches the unit of work that actually
+    failed:
 
         current_event(kind="request").note_exception(exc)
 
@@ -974,7 +1047,7 @@ def current_event(kind: str | None = None, binding: Any = None) -> EventHandle:
 
     found: Event | None = None
 
-    if kind is None and binding is None:
+    if kind is None and binding is None and category is None:
         found = stack[-1] if stack else None
     else:
         resolved = getattr(binding, "_binding", binding)
@@ -984,10 +1057,12 @@ def current_event(kind: str | None = None, binding: Any = None) -> EventHandle:
                 continue
             if resolved is not None and event.binding is not resolved:
                 continue
+            if category is not None and event.category != category:
+                continue
             found = event
             break
 
-    return EventHandle(found, kind, binding)
+    return EventHandle(found, kind, binding, category)
 
 
 def current_trace() -> _trace.TraceContext | None:
@@ -1144,7 +1219,13 @@ class Block:
     """
 
     def __init__(
-        self, name: str, data: dict[str, Any], links: tuple[EventLink, ...] = ()
+        self,
+        name: str,
+        data: dict[str, Any],
+        links: tuple[EventLink, ...] = (),
+        *,
+        category: str | None = None,
+        leaf: bool = False,
     ) -> None:
         if not isinstance(name, str) or not name:
             raise TypeError(f"block() needs a non-empty name string, got {name!r}")
@@ -1152,9 +1233,12 @@ class Block:
         self._name = name
         self._data = data
         self._links = links
+        self._category = _check_category(category)
+        self._leaf = _check_leaf(leaf)
 
         self._event: Event | None = None
         self._token: contextvars.Token[tuple[Event, ...]] | None = None
+        self._silence: contextvars.Token[int] | None = None
         self._active: tuple[Sink, ...] = ()
         self._started = 0.0
 
@@ -1182,7 +1266,11 @@ class Block:
         path = f"{module}:{frame.f_code.co_qualname}"
 
         event = Event(
-            "block", path, label=self._name, binding=_block_recorder(self._name)
+            "block",
+            path,
+            label=self._name,
+            category=self._category,
+            binding=_block_recorder(self._name),
         )
         if self._data:
             event.data.update(self._data)
@@ -1215,6 +1303,11 @@ class Block:
 
         _record_event(event, active)
 
+        # A leaf block silences the spans beneath it for the body.
+
+        if self._leaf:
+            self._silence = _silence(_SILENCE_SPANS)
+
         self._started = time.perf_counter()
         event.started = self._started
 
@@ -1243,6 +1336,11 @@ class Block:
             else:
                 _notify_exit(event, self._active)
         finally:
+            silence = self._silence
+            self._silence = None
+            if silence is not None:
+                _suppressed.reset(silence)
+
             token = self._token
             self._token = None
             if token is not None:
@@ -1295,6 +1393,8 @@ def block(
     *,
     data: Mapping[str, Any] | None = None,
     links: Iterable[EventLink | Mapping[str, str]] | None = None,
+    category: str | None = None,
+    leaf: bool = False,
 ) -> Block:
     """Declare the enclosed stretch of code as one recorded event.
 
@@ -1323,6 +1423,17 @@ def block(
     is nested inside an in-flight operation they are dropped with a
     ConfigWarning, since a nested block is that operation's child.
 
+    `category=` and `leaf=` declare what the block is, as they do on
+    a binding: `category` names the kind of operation the body
+    performs ("external", "database", "datastore", "messaging",
+    "task" or "template"), carried on the event for sinks, tape
+    queries and the OTel export to select on, and `leaf=True` makes
+    the block a terminal node, recording its own event while nothing
+    that would make a span records beneath it (log captures still
+    do, attached to the block). Both are the convenient spelling for
+    a hand-written call to another service whose entry point is not
+    a bindable attribute.
+
     Like a log statement, a marker left permanently in code is inert
     when nothing is listening: with no sinks active, nothing is built
     at all. The context manager yields None; code inside the block
@@ -1330,7 +1441,9 @@ def block(
     current_event().
     """
 
-    return Block(name, seed_data(data), _link_entries(links))
+    return Block(
+        name, seed_data(data), _link_entries(links), category=category, leaf=leaf
+    )
 
 
 def _link_entries(

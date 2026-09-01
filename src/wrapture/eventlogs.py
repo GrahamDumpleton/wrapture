@@ -85,6 +85,16 @@ class EventLog:
         wanted = set(kinds)
         return self._narrow(f"[{','.join(kinds)}]", lambda event: event.kind in wanted)
 
+    def of_category(self, *categories: str) -> EventLog:
+        """Events whose binding declared one of the given categories:
+        "external", "database", "datastore", "messaging", "task" or
+        "template"."""
+
+        wanted = set(categories)
+        return self._narrow(
+            f"[{','.join(categories)}]", lambda event: event.category in wanted
+        )
+
     def in_phase(self, index: int) -> EventLog:
         """Events handled by phase `index` of a phased binding. Events of
         a binding with a single phase carry no phase and never match."""

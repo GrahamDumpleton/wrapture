@@ -852,7 +852,7 @@ binding left applied like any other.
 What a value binding does not do is record: there is no call to
 observe, only a value in a slot. It has no `on_*` namespaces, no
 events, no phases, and the recording options (`capture=`, `stack=`,
-`when=`, `tree=`) are refused rather than ignored. If what you want is to see
+`when=`, `tree=`, `leaf=`, `category=`) are refused rather than ignored. If what you want is to see
 who reads a setting, or to transform the value as it is read, give the
 code an accessor (`get_setting("TIMEOUT")`, `config.timeout()`) and
 bind that in callable mode: reads then go through one callable with

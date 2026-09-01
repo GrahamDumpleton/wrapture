@@ -22,6 +22,44 @@ _PREFIX = "wrapture"
 
 _SEMCONV_DATA = frozenset({"method", "path", "query", "route"})
 
+# The category data-key contracts: for an event of each category, the
+# data keys the export reads specially, mapped onto their semantic
+# convention attribute names instead of being flattened onto
+# wrapture.data.* names. Keys not listed export as ordinary data.
+
+_CATEGORY_SEMCONV: dict[str, dict[str, str]] = {
+    "external": {
+        "method": "http.request.method",
+        "url": "url.full",
+        "host": "server.address",
+        "port": "server.port",
+        "path": "url.path",
+        "query": "url.query",
+        "status": "http.response.status_code",
+    },
+    "database": {
+        "system": "db.system.name",
+        "operation": "db.operation.name",
+        "collection": "db.collection.name",
+        "statement": "db.query.text",
+    },
+    "datastore": {
+        "system": "db.system.name",
+        "operation": "db.operation.name",
+        "collection": "db.collection.name",
+    },
+    "messaging": {
+        "system": "messaging.system",
+        "destination": "messaging.destination.name",
+        "operation": "messaging.operation.type",
+    },
+    "task": {
+        "system": "messaging.system",
+        "destination": "messaging.destination.name",
+        "operation": "messaging.operation.type",
+    },
+}
+
 
 def _exception_attributes(
     exception: BaseException, level: str, *, escaped: bool = False

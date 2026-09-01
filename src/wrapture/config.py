@@ -43,7 +43,7 @@ from .bindings import Binding, _select_members, binding
 from .capture import REFERENCE, CapturePolicy, _resolve_policy
 from .capture import redact as _redact
 from .collectors import Aggregate, Counter
-from .events import Event
+from .events import CATEGORIES, Event, _check_category
 from .exceptions import ConfigError, ConfigWarning
 from .filters import RequestFilter, filter_requests
 from .instrumentations import (
@@ -200,6 +200,12 @@ class ObserveEntry:
     to one glob or a list of globs. It becomes the entry's `when=`
     with `tree=True`, so a declined request records nothing beneath
     it either.
+
+    `leaf = true` makes the entry's bindings leaves, recording their
+    own events and silencing the spans beneath them, and `category`
+    names what kind of operation they are ("external", "database",
+    "datastore", "messaging", "task" or "template"), the
+    `binding(leaf=, category=)` options as TOML.
     """
 
     target: str
@@ -211,6 +217,8 @@ class ObserveEntry:
     trace: bool = False
     data: Mapping[str, Any] = field(default_factory=dict)
     requests: Mapping[str, Any] = field(default_factory=dict)
+    leaf: bool = False
+    category: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -280,6 +288,23 @@ class ObserveEntry:
             raise ConfigError(
                 f"{where}: trace must be true or false, got {self.trace!r}"
             )
+
+        if not isinstance(self.leaf, bool):
+            raise ConfigError(f"{where}: leaf must be true or false, got {self.leaf!r}")
+
+        if not isinstance(self.category, str):
+            raise ConfigError(
+                f"{where}: category must be a string, got {self.category!r}"
+            )
+
+        if self.category:
+            try:
+                _check_category(self.category)
+            except ValueError:
+                raise ConfigError(
+                    f"{where}: category must be one of {', '.join(CATEGORIES)},"
+                    f" got {self.category!r}"
+                ) from None
 
         # Seed data takes the one shape every declaration point takes;
         # the shared check speaks TypeError, the config speaks
@@ -858,6 +883,8 @@ def _bindings_for(
             data=entry.data or None,
             when=request_filter,
             tree=request_filter is not None,
+            leaf=entry.leaf,
+            category=entry.category or None,
         )
         for member in members
     ]
@@ -1031,7 +1058,7 @@ _BUILTIN_COLLECTORS: dict[str, Callable[..., Sink]] = {
     "counter": Counter,
 }
 
-_FILTER_FIELDS = ("kind", "path", "label")
+_FILTER_FIELDS = ("kind", "path", "label", "category")
 
 
 def _filter_predicate(spec: Any, *, where: str) -> Callable[[Event], bool]:
@@ -1506,6 +1533,8 @@ def _config_from(document: Any, location: str) -> Config:
                 "trace",
                 "data",
                 "requests",
+                "leaf",
+                "category",
             ),
         )
         observe.append(ObserveEntry(**table))

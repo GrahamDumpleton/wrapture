@@ -410,5 +410,5 @@ def test_where_selects_events_by_path_and_by_display_label() -> None:
 
 def test_where_needs_a_path_or_a_label() -> None:
     with timeline() as tape:
-        with pytest.raises(ValueError, match="needs a path, a label, or both"):
+        with pytest.raises(ValueError, match="needs a path, a label, a category"):
             tape.where()
