@@ -17,7 +17,7 @@ def _format_version(parts: tuple[str, ...]) -> str:
     )
 
 
-__version_info__ = ("1", "0", "0", "a15")
+__version_info__ = ("1", "0", "0", "a16")
 __version__ = _format_version(__version_info__)
 
 from wrapt import MISSING, register_post_import_hook, when_imported
