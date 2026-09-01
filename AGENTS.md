@@ -115,3 +115,11 @@ the underlying commands yourself; run `just --list` to see everything.
   review and its own instruction to commit. Uncommitted changes are how the
   review happens: once work is committed it can no longer be reviewed as
   the pending diff, so committing early makes review harder, not easier.
+
+- When merging a feature branch back to develop and pushing to the remote,
+  do not treat the work as landed until the CI workflow on GitHub has run
+  against the pushed merge and passed. Check the run (for example with
+  `gh run list --branch develop` and `gh run watch`), and only once it is
+  green report that the changes are on the remote and clean up the feature
+  branch. If CI fails, leave the feature branch in place, report the
+  failure, and wait for instructions rather than deleting anything.
