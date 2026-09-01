@@ -14,6 +14,7 @@ from wrapt import MISSING
 from wrapture import (
     annotate,
     binding,
+    capture_query,
     current_event,
     redact,
     timeline,
@@ -313,3 +314,44 @@ def test_summarize_bounds_work_and_never_raises() -> None:
     assert summarize({"k": "v"}) == "<dict {'k': 'v'}>"
     assert summarize(42) == 42
     assert summarize(Unreprable()) == "<unreprable Unreprable: RuntimeError>"
+
+
+# ---------------------------------------------------------------------------
+# capture_query: the recorded form of a query string
+# ---------------------------------------------------------------------------
+
+
+def test_capture_query_redacts_the_sensitive_names_by_default() -> None:
+    recorded = capture_query(
+        "limit=5&access_token=sekrit&ApiKey=k1&PHPSESSID=abc&X-Amz-Signature=s1"
+    )
+
+    assert recorded == (
+        "limit=5&access_token=<redacted>&ApiKey=<redacted>"
+        "&PHPSESSID=<redacted>&X-Amz-Signature=<redacted>"
+    )
+
+
+def test_capture_query_takes_redact_names_on_top_of_the_built_in_set() -> None:
+    recorded = capture_query("signature=abc&limit=5&voucher=SAVE10", redact("voucher"))
+
+    assert recorded == "signature=<redacted>&limit=5&voucher=<redacted>"
+
+
+def test_capture_query_records_the_decoded_display_form() -> None:
+    assert capture_query("q=hello+world&name=p%C3%A4t") == "q=hello world&name=pät"
+    assert capture_query("flag&empty=") == "flag=&empty="
+
+
+def test_capture_query_applies_the_level_to_what_is_not_redacted() -> None:
+    # "types" reduces every value to its type name; the sensitive set
+    # still wins over it.
+
+    assert capture_query("limit=5&token=t", "types") == "limit=<str>&token=<redacted>"
+
+
+def test_capture_query_records_the_marker_wholesale_when_it_cannot_process() -> None:
+    def broken(name: str | None, value: Any) -> Any:
+        raise RuntimeError("no")
+
+    assert capture_query("a=1&b=2", broken) == "<redacted>"

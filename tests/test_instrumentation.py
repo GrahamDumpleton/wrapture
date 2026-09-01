@@ -13,6 +13,7 @@ through importlib.metadata itself rather than a fake.
 from __future__ import annotations
 
 import importlib
+import platform
 import sys
 import textwrap
 import threading
@@ -1303,6 +1304,58 @@ def test_target_version_comes_from_the_distribution_behind_the_import_name(
 
     assert Versioned().target_version == "2.5.1"
     assert Shop().target_version is None
+
+
+def test_a_standard_library_target_has_the_interpreters_version() -> None:
+    # The standard library carries no distribution metadata; its
+    # version is the interpreter's, so supports gates on Python.
+
+    class Json(Instrumentation):
+        target = "json"
+
+        @instrumentation_hook("json")
+        def json(self, name: str, module: Any) -> None:
+            pass
+
+    assert Json().target_version == platform.python_version()
+
+
+def test_supports_on_a_standard_library_target_gates_on_python() -> None:
+    class Modern(Instrumentation):
+        target = "json"
+        supports = ">=3.12"
+        removable = True
+        fired = False
+
+        @instrumentation_hook("json")
+        def json(self, name: str, module: Any) -> None:
+            Modern.fired = True
+
+    class Ancient(Instrumentation):
+        target = "json"
+        supports = "<3"
+        removable = True
+        fired = False
+
+        @instrumentation_hook("json")
+        def json(self, name: str, module: Any) -> None:
+            Ancient.fired = True
+
+    applied = Config(instrument=[InstrumentEntry(Modern)]).apply()
+    try:
+        assert Modern.fired
+        assert (
+            f"target json (standard library, python {platform.python_version()})"
+            in (applied.report())
+        )
+    finally:
+        applied.revert()
+
+    with pytest.warns(ConfigWarning, match="outside supports '<3'"):
+        applied = Config(instrument=[InstrumentEntry(Ancient)]).apply()
+    applied.revert()
+
+    assert not Ancient.fired
 
 
 def test_supports_outside_the_installed_version_registers_nothing(

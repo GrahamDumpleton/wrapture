@@ -9,6 +9,7 @@ sees exactly what importlib.metadata sees.
 
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
 import textwrap
@@ -518,3 +519,40 @@ def test_the_module_is_runnable() -> None:
 
     assert completed.returncode == 0
     assert completed.stdout.startswith("#")
+
+
+def test_verbose_names_the_interpreter_as_a_standard_library_targets_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "cfgt_pkg_jsonish.py").write_text(
+        textwrap.dedent(
+            """
+            import wrapture
+
+            class JsonishInstrumentation(wrapture.Instrumentation):
+                target = "json"
+                supports = ">=3.12"
+
+                @wrapture.instrumentation_hook("json")
+                def json(self, name, module):
+                    pass
+            """
+        )
+    )
+    _install(
+        site,
+        distribution="wrapture-instrumentation-jsonish",
+        version="0.1",
+        entries={"jsonish": "cfgt_pkg_jsonish:JsonishInstrumentation"},
+    )
+    monkeypatch.syspath_prepend(str(site))
+
+    out = _run("--verbose", capsys=capsys)
+
+    assert (
+        f"  target: json (standard library, python {platform.python_version()}),"
+        " supported (>=3.12)\n"
+    ) in out
+    assert "  would register: json\n" in out

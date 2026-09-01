@@ -235,8 +235,9 @@ inside the operation (a leaf's body annotates the leaf, since
 nothing beneath it is in flight) or with `data=` where a value is
 fixed for the target, the driver's `system` say. A `status` may be
 an integer or a status line; a `url` should carry no query string,
-which goes under `query` after the same by-name redaction the
-request middleware applies. Keys outside the category's contract,
+which goes under `query` as `wrapture.capture_query()` records it,
+the same by-name redaction the request middlewares apply. Keys
+outside the category's contract,
 and contract keys of some other category, export as ordinary
 `wrapture.data.<key>`. The leaf categories describe the client or
 producing side only: consuming a message or running a queued task

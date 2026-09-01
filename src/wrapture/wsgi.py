@@ -28,12 +28,18 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote_plus
 
 from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
-from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
+from .capture import (
+    NONE,
+    CapturePolicy,
+    _capture_value,
+    _level_of,
+    _resolve_policy,
+    capture_query,
+)
 from .events import Event, _check_category
 from .filters import RequestFilter, _environ_fields, _predicate_for
 from .sinks import (
@@ -66,38 +72,6 @@ if TYPE_CHECKING:
 
 StartResponse = Callable[..., Any]
 WSGIApplication = Callable[[dict[str, Any], StartResponse], Iterable[bytes]]
-
-# Query parameters whose values never leave the process, whatever the
-# capture policy says. Matched case-insensitively against the decoded
-# parameter name; names given to redact() add to this set rather than
-# replace it.
-
-_SENSITIVE_QUERY = frozenset(
-    {
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "api_key",
-        "apikey",
-        "client_secret",
-        "session",
-        "session_id",
-        "sessionid",
-        "sessid",
-        "jsessionid",
-        "phpsessid",
-        "sig",
-        "signature",
-        "x-amz-signature",
-        "x-goog-signature",
-    }
-)
-
-_REDACTED = "<redacted>"
 
 
 def _describe(app: Any) -> str:
@@ -214,41 +188,10 @@ class _SilencedIterator:
             _suppressed.reset(token)
 
 
-def _captured_query(query: str, policy: CapturePolicy) -> str:
-    """The recorded form of a query string.
-
-    Each parameter's decoded value passes through the capture policy
-    under the parameter's name, so redact() covers query parameters
-    with the same vocabulary it uses for call arguments; the built-in
-    sensitive set is then enforced on top. The result is recorded in
-    decoded display form. A query string that cannot be processed is
-    recorded as the marker wholesale, never raw.
-    """
-
-    try:
-        pairs: list[str] = []
-
-        for part in query.split("&"):
-            name_raw, _, value_raw = part.partition("=")
-            name = unquote_plus(name_raw)
-            value = unquote_plus(value_raw)
-
-            if name.casefold() in _SENSITIVE_QUERY:
-                captured: Any = _REDACTED
-            else:
-                captured = _capture_value(policy, name, value)
-
-            pairs.append(f"{name}={captured}")
-
-        return "&".join(pairs)
-    except Exception:
-        return _REDACTED
-
-
 def _request_data(environ: Mapping[str, Any], policy: CapturePolicy) -> dict[str, Any]:
     # The environ subset recorded on the event. Values are captured at
     # the policy's level but under no name: by-name redaction pertains
-    # to query string parameters only, matched inside _captured_query,
+    # to query string parameters only, matched inside capture_query(),
     # never to these fields. The path comes from SCRIPT_NAME and
     # PATH_INFO, never REQUEST_URI, which would smuggle the unredacted
     # query string back in.
@@ -261,7 +204,7 @@ def _request_data(environ: Mapping[str, Any], policy: CapturePolicy) -> dict[str
 
     query = environ.get("QUERY_STRING", "")
     if query:
-        data["query"] = _captured_query(query, policy)
+        data["query"] = capture_query(query, policy)
 
     return data
 

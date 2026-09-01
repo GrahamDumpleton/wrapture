@@ -43,6 +43,7 @@ from .bindings import (
     discover,
 )
 from .capture import (
+    capture_query,
     redact,
 )
 from .collectors import (
@@ -266,6 +267,7 @@ __all__ = [
     "bindings_of",
     "block",
     "bound",
+    "capture_query",
     "canonical",
     "capture_logs",
     "chrome_trace",

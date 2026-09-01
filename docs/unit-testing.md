@@ -1043,6 +1043,17 @@ named is captured at `level=` (`"reference"` unless given). Results
 have no parameter name, so pair it with `capture_result="none"` when
 the secret comes back out.
 
+The same vocabulary reaches URL query strings through
+`capture_query(query, policy="reference")`, which returns the form the
+request middlewares record under `query`: each parameter decoded and
+captured under its own name through the policy, with the built-in set
+of sensitive names (passwords, tokens, keys, session ids, signatures)
+redacted whatever the policy says, and the marker alone if the string
+cannot be processed. It is there for code recording the outbound side
+of a request, an HTTP client's instrumentation say, so that a `url`
+can be recorded without its query and the query beside it with the
+same protection the inbound side has.
+
 One bookkeeping note for custom callables: the level recorded on
 `event.capture` is read from an optional `.level` attribute on the
 callable, defaulting to the reference level; `redact()` sets it for

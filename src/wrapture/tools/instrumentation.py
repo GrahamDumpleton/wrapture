@@ -36,6 +36,7 @@ from ..instrumentations import (
     _resolve_point,
     _Resolved,
     _satisfies,
+    _target_text,
     _target_version,
     _trigger_specifiers,
 )
@@ -281,7 +282,8 @@ def _from_config(path: str, installed: list[_Listed]) -> list[_Listed]:
 
 def _target_line(resolved: _Resolved) -> str:
     # "flask 3.1.0, supported (>=2.0,<4)", "flask 1.0, outside >=2.0,<4",
-    # "flask, not installed", or just "flask 3.1.0".
+    # "flask, not installed", or just "flask 3.1.0"; a standard library
+    # target reads "urllib (standard library, python 3.14.7)".
 
     cls = resolved.cls
     version = _target_version(cls.target)
@@ -292,7 +294,7 @@ def _target_line(resolved: _Resolved) -> str:
             text += f" (supports {cls.supports})"
         return text
 
-    text = f"{cls.target} {version}"
+    text = _target_text(cls.target, version) or cls.target
     if cls.supports:
         verdict = _satisfies(cls.supports, version)
         if verdict:
