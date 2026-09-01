@@ -2,6 +2,7 @@
 find_bindings(), binding_of(), bindings_of() and Tape.where()."""
 
 import functools
+import gc
 import os
 import sys
 import types
@@ -241,6 +242,12 @@ def test_a_dropped_observed_proxy_is_forgotten() -> None:
         observed(application, label="transient")
 
     make()
+
+    # The proxy and its wrapper function reference each other, so it is
+    # freed by the cyclic collector rather than by refcount. Ask for a
+    # collection rather than relying on one having happened.
+
+    gc.collect()
 
     assert find_bindings(label="transient") == []
 

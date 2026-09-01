@@ -392,6 +392,8 @@ def _exported(*bindings_: Any, run: Any) -> list[Any]:
 
 
 def test_the_export_sets_the_span_kind_by_category() -> None:
+    pytest.importorskip("opentelemetry")
+
     from opentelemetry.trace import SpanKind
 
     charge = binding(Gateway, "charge", category="external")
@@ -415,6 +417,8 @@ def test_the_export_sets_the_span_kind_by_category() -> None:
 
 
 def test_the_export_maps_the_categorys_contract_keys() -> None:
+    pytest.importorskip("opentelemetry")
+
     from opentelemetry.trace import StatusCode
 
     charge = binding(Gateway, "charge", category="external")
@@ -451,6 +455,8 @@ def test_the_export_maps_the_categorys_contract_keys() -> None:
 
 
 def test_an_external_failure_status_marks_the_span_in_error() -> None:
+    pytest.importorskip("opentelemetry")
+
     from opentelemetry.trace import StatusCode
 
     class Client:

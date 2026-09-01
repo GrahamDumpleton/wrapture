@@ -205,8 +205,11 @@ class ObservedCallable(
         self._self_gap_warned = False
 
         # Register for find_bindings(): a proxy has no apply(), so its
-        # creation is when it comes into effect, and the registry is
-        # weak so it holds nothing the caller has let go of.
+        # creation is when it comes into effect. The registry holds no
+        # strong reference, so a proxy the caller has dropped disappears
+        # from it once collected. That is by the cyclic collector rather
+        # than by refcount: the proxy holds its wrapper function, and the
+        # wrapper closes over the proxy.
 
         self._self_sequence = next(_sequence)
         _observed_callables.add(self)
