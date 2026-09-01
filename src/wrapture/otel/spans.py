@@ -31,7 +31,13 @@ from wrapture import Event
 
 from ..sinks import _exception_level
 from ..trace import TraceSlot
-from .common import _PRIMITIVES, _SEMCONV_DATA, _exception_attributes, _status_code
+from .common import (
+    _CATEGORY_SEMCONV,
+    _PRIMITIVES,
+    _SEMCONV_DATA,
+    _exception_attributes,
+    _status_code,
+)
 
 _SAMPLED = TraceFlags(TraceFlags.SAMPLED)
 _NOT_SAMPLED = TraceFlags(TraceFlags.DEFAULT)
@@ -156,6 +162,7 @@ class OpenTelemetrySink(wrapture.Sink):
         self._key_items = f"{attribute_prefix}.items"
         self._key_body_duration = f"{attribute_prefix}.body_duration"
         self._key_abandoned = f"{attribute_prefix}.abandoned"
+        self._key_category = f"{attribute_prefix}.category"
         self._arg_prefix = f"{attribute_prefix}.arg."
         self._data_prefix = f"{attribute_prefix}.data."
 
@@ -535,7 +542,19 @@ class OpenTelemetrySink(wrapture.Sink):
         return self._to_epoch_ns(event.started + event.duration)
 
     def _kind(self, event: Event) -> SpanKind:
-        return SpanKind.SERVER if event.kind == "request" else SpanKind.INTERNAL
+        # A request is the server side of an exchange; a categorised
+        # event is the client side of one (or the producing side, for
+        # a message or a queued task); everything else is internal.
+
+        if event.kind == "request":
+            return SpanKind.SERVER
+
+        if event.category in ("external", "database", "datastore"):
+            return SpanKind.CLIENT
+        if event.category in ("messaging", "task"):
+            return SpanKind.PRODUCER
+
+        return SpanKind.INTERNAL
 
     def _name(self, event: Event) -> str:
         # Requests read access-log style, the way HTTP spans usually
@@ -567,6 +586,13 @@ class OpenTelemetrySink(wrapture.Sink):
             self._key_thread: event.thread_name,
         }
         status = _UNSET
+
+        # A categorised event carries its category verbatim, whatever
+        # its kind, so a backend that does not read the semantic
+        # conventions can still select on it.
+
+        if event.category is not None:
+            attributes[self._key_category] = event.category
 
         # A request's descriptive fields live in event.data; map the
         # reserved ones onto their semantic-convention names. Its
@@ -603,8 +629,28 @@ class OpenTelemetrySink(wrapture.Sink):
             if event.result is not wrapture.MISSING:
                 attributes[self._key_result] = self._coerce(event.result)
 
+            # The data keys of the category's contract map onto their
+            # semantic-convention names; an external call's status of
+            # 400 or above marks the span in error, as the HTTP client
+            # conventions say. Everything else in data flattens as
+            # usual.
+
+            semconv = _CATEGORY_SEMCONV.get(event.category or "", {})
+
             for name, value in event.data.items():
-                attributes[self._data_prefix + name] = self._coerce(value)
+                attribute = semconv.get(name)
+                if attribute is None:
+                    attributes[self._data_prefix + name] = self._coerce(value)
+                elif attribute == "http.response.status_code":
+                    code = _status_code(value) if isinstance(value, str) else value
+                    if isinstance(code, int) and not isinstance(code, bool):
+                        attributes[attribute] = code
+                        if code >= 400:
+                            status = _ERROR
+                    else:
+                        attributes[attribute] = self._coerce(value)
+                else:
+                    attributes[attribute] = self._coerce(value)
 
         # A streamed body carries two extra numbers worth keeping: how
         # many items it produced and the time spent producing them.

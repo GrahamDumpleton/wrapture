@@ -47,7 +47,7 @@ from wrapt import MISSING, CallableObjectProxy
 
 from . import trace as _trace
 from .capture import NONE, CapturePolicy, _capture_value, _level_of, _resolve_policy
-from .events import Event
+from .events import Event, _check_category
 from .filters import _scope_fields
 from .sinks import (
     _active_sinks,
@@ -57,9 +57,13 @@ from .sinks import (
 )
 from .stacks import _capture as _capture_stack
 from .timeline import (
+    _SILENCE_ALL,
+    _SILENCE_SPANS,
+    _check_leaf,
     _check_tree,
     _pop,
     _push,
+    _silence,
     _suppressed,
     _timelines_active,
     seed_data,
@@ -240,6 +244,10 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
       descriptive data, the query string foremost, where redact()
       masks parameters by name; `capture_result` the policy for the
       status-line result.
+
+    - `leaf` and `category` declare what the application is, as on a
+      binding: a leaf request records its own event and silences the
+      spans beneath it, and a category names the kind of operation.
     """
 
     def __init__(
@@ -250,6 +258,8 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         label: str | None = None,
         when: Any = None,
         tree: bool = False,
+        leaf: bool = False,
+        category: str | None = None,
         capture_args: CapturePolicy | str | None = None,
         capture_result: CapturePolicy | str | None = None,
         data: Mapping[str, Any] | None = None,
@@ -274,6 +284,10 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
         self._self_when = _request_predicate(when, "asgi")
         self._self_tree = _check_tree(tree, self._self_when)
+        self._self_leaf = _check_leaf(leaf) or (binding._leaf if binding else False)
+        self._self_category = _check_category(category)
+        if self._self_category is None and binding is not None:
+            self._self_category = binding._category
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
         self._self_data = seed_data(data) or (binding._data if binding else {})
@@ -327,7 +341,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         silenced = when is False and tree and bool(active)
 
         if recording and _suppressed.get():
-            if binding is not None:
+            if binding is not None and _suppressed.get() >= _SILENCE_ALL:
                 binding._filtered_calls += 1
             recording = False
         elif recording and callable(when):
@@ -351,7 +365,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
         if not recording and not hooks.configured():
             if silenced:
-                silence = _suppressed.set(True)
+                silence = _silence(_SILENCE_ALL)
                 try:
                     return await application(scope, receive, send)
                 finally:
@@ -379,6 +393,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                     "request",
                     self._self_path,
                     label=self._self_label,
+                    category=self._self_category,
                     binding=binding,
                     capture=_level_of(args_policy),
                     injected=(
@@ -560,7 +575,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
         if event is None:
             if silenced:
-                silence = _suppressed.set(True)
+                silence = _silence(_SILENCE_ALL)
                 try:
                     return await produce()
                 finally:
@@ -594,6 +609,11 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
             last = state["last_body_at"]
             return (last - response_at) if last is not None else 0.0
 
+        # A leaf request silences the spans beneath it; the application
+        # does all its work inside this await.
+
+        leaf_silence = _silence(_SILENCE_SPANS) if self._self_leaf else None
+
         try:
             outcome = await produce()
         except BaseException as exc:
@@ -610,6 +630,8 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
             )
             raise
         finally:
+            if leaf_silence is not None:
+                _suppressed.reset(leaf_silence)
             _pop(token)
 
         # The coroutine returning means the response is over; a

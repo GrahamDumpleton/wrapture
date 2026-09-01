@@ -268,6 +268,36 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 wrapture guarantees `routes` is a list before `configure()` runs; the
 class guarantees the rest.
 
+## Declaring what a target is
+
+An instrumentation knows two structural things about its target
+that a config author cannot be asked to work out: whether the
+target's operations are worth subdividing, and what kind of
+operations they are. Both are declared on the binding (or on the
+`observed()` callable or `block()` the package substitutes), never
+decided per call:
+
+```python
+client = wrapture.binding(module.Client, "request", leaf=True, category="external")
+```
+
+`leaf=True` makes the entry point a terminal node: its event records
+and covers everything the call did, and nothing that would make a
+span records beneath it, so a client's internal HTTP requests,
+connection handling and retries stay out of the tree while its log
+lines still attach to the leaf. `category=` names the kind of
+operation, one of the categories this package layout is organised
+by (`external`, `database`, `datastore`, `messaging`, `task`,
+`template`), so that a `database_` target's events say `database`
+with no translation. The [ad-hoc tracing
+guide](ad-hoc-tracing.md#terminal-nodes-leaf-and-category) covers
+both, and the [OTel page](otel-export.md#the-category-data-key-contracts)
+lists the data keys each category is expected to carry; the
+instrumentation fills those with `annotate()` from inside the
+operation, which lands on the leaf, or with `data=` for a value
+fixed for the target. Offer a per-target setting (`leaf`, default
+true) so a user debugging the client itself can see its internals.
+
 ## Registering the class
 
 The entry point group is `wrapture.instrumentation`, one entry per

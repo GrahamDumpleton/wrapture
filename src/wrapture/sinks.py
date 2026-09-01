@@ -939,6 +939,8 @@ def _event_record(event: Event, *, exceptions: str = "full") -> dict[str, Any]:
 
     if event.label is not None:
         record["label"] = event.label
+    if event.category is not None:
+        record["category"] = event.category
 
     if event.started is not None:
         record["started"] = event.started

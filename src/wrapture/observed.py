@@ -67,7 +67,13 @@ from .capture import (
     _resolve_policy,
 )
 from .eventlogs import EventLog
-from .events import Event, SignatureInfo, cached_signature_info, normalized_arguments
+from .events import (
+    Event,
+    SignatureInfo,
+    _check_category,
+    cached_signature_info,
+    normalized_arguments,
+)
 from .exceptions import RecordingGapWarning
 from .filters import RequestFilter
 from .sinks import (
@@ -81,11 +87,15 @@ from .sinks import (
 from .stacks import _capture as _capture_stack
 from .stacks import _resolve_depth
 from .timeline import (
+    _SILENCE_ALL,
+    _SILENCE_SPANS,
     _capture_result,
+    _check_leaf,
     _check_tree,
     _current_tape,
     _pop,
     _push,
+    _silence,
     _stack,
     _suppressed,
     _timelines_active,
@@ -153,6 +163,8 @@ class ObservedCallable(
         stack: int | None,
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
         tree: bool = False,
+        leaf: bool = False,
+        category: str | None = None,
         signature: Any = None,
         convention: str | None = None,
         precheck: Callable[
@@ -182,6 +194,8 @@ class ObservedCallable(
         self._self_stack_depth = stack
         self._self_when = when
         self._self_tree = _check_tree(tree, when)
+        self._self_leaf = _check_leaf(leaf)
+        self._self_category = _check_category(category)
         self._self_signatures: dict[type, SignatureInfo] = {}
 
         self._self_suspended = False
@@ -207,6 +221,19 @@ class ObservedCallable(
         """The derived module:qualname location of the wrapped callable."""
 
         return self._self_path
+
+    @property
+    def category(self) -> str | None:
+        """The category declared for this observation's events, or None."""
+
+        return self._self_category
+
+    @property
+    def leaf(self) -> bool:
+        """Whether this observation is a leaf: its events record, nothing
+        that would make a span records beneath them."""
+
+        return self._self_leaf
 
     @property
     def label(self) -> str | None:
@@ -313,6 +340,7 @@ class ObservedCallable(
             "call",
             self._self_path,
             label=self._self_label,
+            category=self._self_category,
             instance=instance,
             binding=self,
             capture=level,
@@ -384,11 +412,14 @@ class ObservedCallable(
                 self._note_missed_call()
             return target(*args, **kwargs)
 
-        # Beneath an operation a tree=True binding declined nothing
-        # records, the predicate included.
+        # Beneath a leaf, or an operation a tree=True binding declined,
+        # nothing records, the predicate included; only a tree decline's
+        # silence is counted, a leaf's being visible on the tape itself.
 
-        if _suppressed.get():
-            self._self_filtered_calls += 1
+        silenced = _suppressed.get()
+        if silenced:
+            if silenced >= _SILENCE_ALL:
+                self._self_filtered_calls += 1
             return target(*args, **kwargs)
 
         when = self._self_when
@@ -420,6 +451,10 @@ class ObservedCallable(
         started = time.perf_counter()
         event.started = started
 
+        # A leaf silences the spans beneath it for the call.
+
+        silence = _silence(_SILENCE_SPANS) if self._self_leaf else None
+
         try:
             outcome = target(*args, **kwargs)
         except BaseException as exc:
@@ -428,6 +463,8 @@ class ObservedCallable(
             _notify_error(event, active)
             raise
         finally:
+            if silence is not None:
+                _suppressed.reset(silence)
             _pop(token)
 
         result_policy = self._self_capture_result
@@ -435,19 +472,27 @@ class ObservedCallable(
             result_policy = _required_policy(active, "capture_result")
 
         kind = _outcome_kind(outcome)
+        leaf = self._self_leaf
 
         if kind == "generator":
-            return _record_generator(outcome, event, base, result_policy, active)
+            return _record_generator(
+                outcome, event, base, result_policy, active, silenced=leaf
+            )
 
         if kind == "asyncgen":
             return _named_after(
-                _record_async_generator(outcome, event, base, result_policy, active),
+                _record_async_generator(
+                    outcome, event, base, result_policy, active, silenced=leaf
+                ),
                 outcome,
             )
 
         if kind == "awaitable":
             return _named_after(
-                _record_awaited(outcome, event, base, result_policy, active), outcome
+                _record_awaited(
+                    outcome, event, base, result_policy, active, silenced=leaf
+                ),
+                outcome,
             )
 
         event.duration = time.perf_counter() - started
@@ -467,6 +512,8 @@ def observed(
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
+    leaf: bool = False,
+    category: str | None = None,
 ) -> ObservedCallable: ...
 
 
@@ -481,6 +528,8 @@ def observed(
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
+    leaf: bool = False,
+    category: str | None = None,
 ) -> Callable[[Callable[..., Any]], ObservedCallable]: ...
 
 
@@ -494,6 +543,8 @@ def observed(
     stack: int | str | None = None,
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
+    leaf: bool = False,
+    category: str | None = None,
 ) -> ObservedCallable | Callable[[Callable[..., Any]], ObservedCallable]:
     """Wrap a bare callable so its calls record, wherever it ends up.
 
@@ -521,7 +572,12 @@ def observed(
     instance being None for a free-standing callable and the bound
     object when the proxy sits on a class, and accepts a boolean in
     place of the predicate as binding() does; `tree=True` extends a
-    decline to everything beneath the call, as on a binding.
+    decline to everything beneath the call, as on a binding. `leaf=`
+    and `category=` declare what the callable is, as on a binding: a
+    leaf records its own event and silences the spans beneath it,
+    and a category names the kind of operation; for an
+    instrumentation package they are often the convenient place to
+    say so, on the callable it substitutes at registration.
 
     The assigned label, or the derived module:qualname path when no
     label is given, identifies the observation, and that is what
@@ -564,6 +620,8 @@ def observed(
                 stack=stack,
                 when=when,
                 tree=tree,
+                leaf=leaf,
+                category=category,
             )
 
         return apply
@@ -628,4 +686,6 @@ def observed(
         stack=depth,
         when=when,
         tree=tree,
+        leaf=leaf,
+        category=category,
     )

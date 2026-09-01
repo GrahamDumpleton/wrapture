@@ -28,6 +28,37 @@ from .trace import TraceContext
 
 EventKind = Literal["call", "get", "set", "delete", "request", "log", "block"]
 
+# The category vocabulary: what kind of operation a categorised event
+# is, declared on the binding (or observed() or block()) and carried
+# on every event it records. A small fixed set, aligned with the
+# target categories instrumentation packages are organised by, so a
+# package's events are labelled by the word its own name uses;
+# extended when a target needs a word that is not here. Requests have
+# no category: kind="request" already says what they are.
+
+CATEGORIES: tuple[str, ...] = (
+    "external",
+    "database",
+    "datastore",
+    "messaging",
+    "task",
+    "template",
+)
+
+
+def _check_category(category: Any) -> str | None:
+    """Validate a category= option: None, or one of CATEGORIES."""
+
+    if category is None:
+        return None
+
+    if not isinstance(category, str) or category not in CATEGORIES:
+        raise ValueError(
+            f"category must be one of {', '.join(CATEGORIES)}, got {category!r}"
+        )
+
+    return category
+
 
 @dataclass(frozen=True)
 class EventLink:
@@ -100,6 +131,13 @@ class Event:
 
     path: str
     label: str | None = None
+
+    # What kind of operation this is, when the binding declared one:
+    # one of CATEGORIES, or None for an ordinary event. A structural
+    # fact fixed at declaration, never set after the event is built;
+    # what sinks, tape queries and the OTel export select on.
+
+    category: str | None = None
     instance: Any = None
 
     # The Binding that recorded this event. Typed loosely because the
