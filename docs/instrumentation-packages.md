@@ -41,13 +41,23 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 
 Reading down:
 
-- `target` is the one top-level import name the class covers. Every
-  trigger module a hook declares must live under it; wrapture refuses
-  a class that claims a module outside its target the moment the
-  class is defined. A standard library module (`urllib`, `sqlite3`)
-  is a target like any other: its version is the interpreter's own,
-  so `supports` on such a class is a Python version range, and the
-  listing says where the version came from.
+- `target` is the import path of the module tree the class covers:
+  a top-level name (`flask`) in the common case, or a dotted path
+  when the unit of instrumentation is a submodule (`http.client`,
+  `azure.storage.blob`). Every trigger module a hook declares must
+  live at or under it; wrapture refuses a class that claims a module
+  outside its target the moment the class is defined. Two enabled
+  entries whose targets overlap, the same path or one inside the
+  other, are a `ConfigError`, so an `http.client` class and an
+  `http.server` class coexist while nothing is ever patched twice.
+  A standard library module (`urllib.request`, `sqlite3`) is a
+  target like any other: its version is the interpreter's own, so
+  `supports` on such a class is a Python version range, and the
+  listing says where the version came from. For anything else the
+  version is the distribution that owns the path, resolved longest
+  prefix first (`azure.storage.blob` is `azure-storage-blob`'s), so
+  a namespace package's sibling distributions never stand in for
+  each other.
 - `supports` is a PEP 440 specifier against the target's installed
   version, read from package metadata. Outside the range, nothing
   registers and the user sees a `ConfigWarning`, never an error: the
