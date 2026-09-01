@@ -157,10 +157,12 @@ def _prepare_script_path(script: str) -> None:
     have, so that entry is removed rather than left behind the script's
     own directory, where it would let the script import from, or be
     shadowed by, the directory the runner was launched from. In its
-    place goes what python puts there: the script's directory, after
-    following symlinks, for a file; nothing for a directory or zip
-    target, which run_path adds itself. Under -P or PYTHONSAFEPATH
-    python adds nothing at all, and neither does the runner.
+    place goes what python puts there: the script's directory for a
+    file, with symlinks resolved where python resolves them (POSIX,
+    where it takes the real path; on Windows it only makes the path
+    absolute); nothing for a directory or zip target, which run_path
+    adds itself. Under -P or PYTHONSAFEPATH python adds nothing at
+    all, and neither does the runner.
 
     This runs before the config loads, so any pythonpath entries the
     config prepends land in front of the script's directory, the same
@@ -173,7 +175,7 @@ def _prepare_script_path(script: str) -> None:
     if sys.path and sys.path[0] == os.getcwd():
         del sys.path[0]
 
-    target = os.path.realpath(script)
+    target = os.path.abspath(script) if os.name == "nt" else os.path.realpath(script)
 
     if not (os.path.isdir(target) or zipfile.is_zipfile(target)):
         sys.path.insert(0, os.path.dirname(target))

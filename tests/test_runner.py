@@ -290,9 +290,11 @@ def test_safe_path_mode_adds_nothing_for_a_script(tmp_path: Path) -> None:
 def test_a_symlinked_script_resolves_to_its_real_directory(
     tmp_path: Path,
 ) -> None:
-    # python follows symlinks when placing a script's directory on
-    # sys.path, so a link in the working directory to sub/main.py runs
-    # with sub/ at the front, not the directory holding the link.
+    # On POSIX python follows symlinks when placing a script's
+    # directory on sys.path, so a link in the working directory to
+    # sub/main.py runs with sub/ at the front, not the directory
+    # holding the link. On Windows python resolves nothing, and the
+    # runner has to match whichever python does.
 
     _script_in_subdirectory(tmp_path)
 
@@ -304,7 +306,9 @@ def test_a_symlinked_script_resolves_to_its_real_directory(
     native = _sys_path_seen(tmp_path, "link.py")
     wrapped = _sys_path_seen(tmp_path, "-m", "wrapture", "link.py")
 
-    assert native[0] == os.path.realpath(tmp_path / "sub")
+    if os.name != "nt":
+        assert native[0] == os.path.realpath(tmp_path / "sub")
+
     assert wrapped == native
 
 
