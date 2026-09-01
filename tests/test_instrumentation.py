@@ -81,10 +81,12 @@ def _install(
     summary: str = "",
     top_level: tuple[str, ...] = (),
     url: str | None = None,
+    files: tuple[str, ...] = (),
 ) -> None:
-    # A minimal installed distribution: METADATA, the entry points, and
+    # A minimal installed distribution: METADATA, the entry points,
     # optionally top_level.txt so packages_distributions() can map a
-    # target import name back to it.
+    # target import name back to it, and optionally a RECORD naming
+    # the module files it ships.
 
     info = site / f"{distribution.replace('-', '_')}-{version}.dist-info"
     info.mkdir(parents=True)
@@ -105,6 +107,17 @@ def _install(
 
     if top_level:
         (info / "top_level.txt").write_text("\n".join(top_level) + "\n")
+
+    # RECORD entries only count when the files exist: importlib.metadata
+    # drops missing paths from Distribution.files, as a real install
+    # never misses its own files.
+
+    if files:
+        (info / "RECORD").write_text("".join(f"{name},,\n" for name in files))
+        for name in files:
+            path = site / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
 
 
 class Gateway:
@@ -170,11 +183,34 @@ def test_a_subclass_must_declare_a_target() -> None:
                 pass
 
 
-def test_a_target_is_one_top_level_name() -> None:
-    with pytest.raises(ConfigError, match="no dots"):
+def test_a_target_may_be_a_dotted_module_path() -> None:
+    class Wire(Instrumentation):
+        target = "http.client"
 
-        class Dotted(Instrumentation):
-            target = "flask.app"
+        @instrumentation_hook("http.client")
+        def client(self, name: str, module: Any) -> None:
+            pass
+
+    assert Wire().target_version == platform.python_version()
+
+
+def test_a_malformed_target_is_refused() -> None:
+    for bad in ("http:client", "http..client", "http.client.", "http client"):
+        with pytest.raises(ConfigError, match="module path"):
+
+            class Malformed(Instrumentation):
+                target = bad
+
+
+def test_every_trigger_must_live_under_a_dotted_target() -> None:
+    with pytest.raises(ConfigError, match="must live under"):
+
+        class Astray(Instrumentation):
+            target = "http.client"
+
+            @instrumentation_hook("http.server")
+            def server(self, name: str, module: Any) -> None:
+                pass
 
 
 def test_every_trigger_must_live_under_the_target() -> None:
@@ -909,6 +945,60 @@ def test_two_enabled_entries_for_one_target_conflict_at_build() -> None:
     )
 
 
+def test_sibling_dotted_targets_do_not_conflict() -> None:
+    class Client(Instrumentation):
+        target = "cfgi_web.client"
+
+        @instrumentation_hook("cfgi_web.client")
+        def client(self, name: str, module: Any) -> None:
+            pass
+
+    class Server(Instrumentation):
+        target = "cfgi_web.server"
+
+        @instrumentation_hook("cfgi_web.server")
+        def server(self, name: str, module: Any) -> None:
+            pass
+
+    class Lookalike(Instrumentation):
+        target = "cfgi_webby"
+
+        @instrumentation_hook("cfgi_webby")
+        def webby(self, name: str, module: Any) -> None:
+            pass
+
+    # Sibling paths never collide, and a longer name that is not a
+    # module-path prefix (cfgi_webby against cfgi_web.client) is a
+    # different tree entirely.
+
+    Config(
+        instrument=[
+            InstrumentEntry(Client),
+            InstrumentEntry(Server),
+            InstrumentEntry(Lookalike),
+        ]
+    )
+
+
+def test_nested_targets_conflict_at_build() -> None:
+    class Whole(Instrumentation):
+        target = "cfgi_web"
+
+        @instrumentation_hook("cfgi_web")
+        def whole(self, name: str, module: Any) -> None:
+            pass
+
+    class Client(Instrumentation):
+        target = "cfgi_web.client"
+
+        @instrumentation_hook("cfgi_web.client")
+        def client(self, name: str, module: Any) -> None:
+            pass
+
+    with pytest.raises(ConfigError, match="overlapping targets"):
+        Config(instrument=[InstrumentEntry(Whole), InstrumentEntry(Client)])
+
+
 def test_the_target_check_is_also_the_trigger_check() -> None:
     # Every trigger lives under its target, so two classes can only
     # claim one trigger module by sharing a target, and the target
@@ -1356,6 +1446,73 @@ def test_supports_on_a_standard_library_target_gates_on_python() -> None:
     applied.revert()
 
     assert not Ancient.fired
+
+
+def test_a_namespace_targets_version_is_its_own_distributions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two distributions share the cfgi_ns namespace root; a dotted
+    # target resolves to its own distribution by the dots-to-dashes
+    # naming convention, longest prefix first, never to a sibling.
+
+    _install(
+        tmp_path,
+        distribution="cfgi-ns-core",
+        version="1.5",
+        entries={},
+        top_level=("cfgi_ns",),
+    )
+    _install(
+        tmp_path,
+        distribution="cfgi-ns-blob",
+        version="2.7",
+        entries={},
+        top_level=("cfgi_ns",),
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    class Blob(Instrumentation):
+        target = "cfgi_ns.blob"
+
+        @instrumentation_hook("cfgi_ns.blob")
+        def blob(self, name: str, module: Any) -> None:
+            pass
+
+    assert Blob().target_version == "2.7"
+
+
+def test_a_namespace_owner_named_by_no_convention_is_found_by_its_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No distribution matches any prefix of the path by name, so the
+    # owner is the distribution behind the root whose RECORD ships the
+    # target module's files.
+
+    _install(
+        tmp_path,
+        distribution="cfgi-ns2-core",
+        version="1.0",
+        entries={},
+        top_level=("cfgi_ns2",),
+    )
+    _install(
+        tmp_path,
+        distribution="cfgi-vault-client",
+        version="3.3",
+        entries={},
+        top_level=("cfgi_ns2",),
+        files=("cfgi_ns2/vault/__init__.py",),
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    class Vault(Instrumentation):
+        target = "cfgi_ns2.vault"
+
+        @instrumentation_hook("cfgi_ns2.vault")
+        def vault(self, name: str, module: Any) -> None:
+            pass
+
+    assert Vault().target_version == "3.3"
 
 
 def test_supports_outside_the_installed_version_registers_nothing(

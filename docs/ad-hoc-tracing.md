@@ -1026,13 +1026,15 @@ class OrdersInstrumentation(wrapture.Instrumentation):
 
 The pieces, in the order they matter:
 
-- `target` is exactly one top-level import name and every trigger
-  module a hook declares must live under it; a class claiming a
-  module outside its target is refused the moment it is defined. The
-  target is what the conflict check works on: two enabled entries for
-  one target are a `ConfigError` when the config is built, and since
-  every trigger lives under its target, that is also what stops one
-  module being patched twice.
+- `target` is the import path of the module tree the class covers,
+  a top-level name or a dotted path (`http.client`), and every
+  trigger module a hook declares must live at or under it; a class
+  claiming a module outside its target is refused the moment it is
+  defined. The target is what the conflict check works on: two
+  enabled entries whose targets overlap, the same path or one
+  inside the other, are a `ConfigError` when the config is built,
+  and since every trigger lives under its target, that is also what
+  stops one module being patched twice.
 - `settings` declares every key the entry may carry, each a
   `Setting(default, description)`. Declaration is what makes the
   file validated rather than passed through blind: an unknown key is

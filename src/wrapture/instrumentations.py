@@ -254,8 +254,10 @@ class Instrumentation:
     description: str = ""
     version: str = ""
 
-    # Coverage. target is exactly one top-level import name and every
-    # declared trigger module must live under it; supports is a PEP 440
+    # Coverage. target is the import path of the module tree the class
+    # covers, a top-level name (flask) or a dotted path (http.client),
+    # and every declared trigger module must live at or under it;
+    # supports is a PEP 440
     # specifier against the target's installed version (per-trigger
     # ranges ride on the instrumentation_hook decorator); requires
     # names other targets that must have an active instrumentation in
@@ -619,13 +621,13 @@ def _check_class(cls: type[Instrumentation]) -> None:
     target = cls.target
     if not isinstance(target, str) or not target:
         raise ConfigError(
-            f"{where}: target must name the one top-level import name the"
-            f" instrumentation covers, got {target!r}"
+            f"{where}: target must name the import path of the module tree"
+            f" the instrumentation covers, got {target!r}"
         )
-    if "." in target or ":" in target:
+    if not all(part.isidentifier() for part in target.split(".")):
         raise ConfigError(
-            f"{where}: target must be a top-level import name with no dots,"
-            f" got {target!r}; the modules under it go in modules"
+            f"{where}: target must be a module path like 'flask' or"
+            f" 'http.client', got {target!r}"
         )
 
     if not isinstance(cls.removable, bool):
@@ -1124,16 +1126,17 @@ def _target_text(target: str, version: str | None) -> str | None:
 
 
 def _is_stdlib(target: str) -> bool:
-    """Whether a top-level import name is a standard library module."""
+    """Whether a target module path lives in the standard library,
+    decided by its top-level segment."""
 
-    return target in sys.stdlib_module_names
+    return target.partition(".")[0] in sys.stdlib_module_names
 
 
 def _target_version(target: str) -> str | None:
-    """The installed version of the target behind a top-level import
-    name: the interpreter's own version for a standard library module,
-    otherwise the version of the distribution behind the name from
-    metadata alone, or None when no distribution stands behind it."""
+    """The installed version of the target behind a module path: the
+    interpreter's own version for a standard library module, otherwise
+    the version of the distribution that owns the path, resolved from
+    metadata alone; None when no distribution stands behind it."""
 
     if not target:
         return None
@@ -1144,14 +1147,54 @@ def _target_version(target: str) -> str | None:
     if _is_stdlib(target):
         return platform.python_version()
 
-    candidates = list(_packages_distributions().get(target, ()))
-    candidates.append(target)
+    if "." not in target:
+        candidates = list(_packages_distributions().get(target, ()))
+        candidates.append(target)
 
-    for candidate in candidates:
+        for candidate in candidates:
+            try:
+                return metadata.version(candidate)
+            except metadata.PackageNotFoundError:
+                continue
+
+        return None
+
+    return _dotted_target_version(target)
+
+
+def _dotted_target_version(target: str) -> str | None:
+    # The owner of a dotted path, longest prefix first. The naming
+    # convention namespace distributions follow maps the module path
+    # to the distribution name dots-to-dashes (azure.storage.blob is
+    # azure-storage-blob's), so each prefix is tried from the whole
+    # path down to the top-level name; a plain package's submodule
+    # falls through to the package's own distribution the same way
+    # (sqlalchemy.orm to sqlalchemy).
+
+    parts = target.split(".")
+
+    for length in range(len(parts), 0, -1):
         try:
-            return metadata.version(candidate)
+            return metadata.version("-".join(parts[:length]))
         except metadata.PackageNotFoundError:
             continue
+
+    # A distribution named by no convention: of the distributions
+    # behind the top-level name, the owner is the one that ships the
+    # target module's files.
+
+    relative = "/".join(parts)
+    wanted = {f"{relative}/__init__.py", f"{relative}.py"}
+
+    for name in _packages_distributions().get(parts[0], ()):
+        try:
+            distribution = metadata.distribution(name)
+        except metadata.PackageNotFoundError:
+            continue
+
+        for file in distribution.files or ():
+            if file.as_posix() in wanted:
+                return distribution.version
 
     return None
 
@@ -1347,12 +1390,25 @@ def _plan_entries(entries: Sequence[InstrumentEntry]) -> tuple[_Planned, ...]:
     return tuple(planned)
 
 
+def _overlapping(first: str, second: str) -> bool:
+    """Whether two targets claim overlapping module trees: the same
+    path, or one a module-path prefix of the other."""
+
+    if first == second:
+        return True
+
+    shorter, longer = sorted((first, second), key=len)
+
+    return longer.startswith(f"{shorter}.")
+
+
 def _check_between(planned: Sequence[_Planned]) -> None:
-    # The conflict check (two for one target) and the requires check,
+    # The conflict check (overlapping targets) and the requires check,
     # among the enabled entries of one config. Because every trigger
-    # lives under its class's target, two classes can only claim one
-    # trigger module by sharing a target, so the target check is also
-    # the double-patch check.
+    # lives at or under its class's target, two classes can only claim
+    # one trigger module through overlapping targets, so the overlap
+    # check is also the double-patch check; sibling paths (http.client
+    # and http.server) never collide.
 
     by_target: dict[str, _Planned] = {}
 
@@ -1361,11 +1417,21 @@ def _check_between(planned: Sequence[_Planned]) -> None:
             continue
 
         cls = item.resolved.cls
-        other = by_target.get(cls.target)
-        if other is not None:
+        for seen, other in by_target.items():
+            if not _overlapping(cls.target, seen):
+                continue
+
+            if cls.target == seen:
+                raise ConfigError(
+                    f"instrument entries {other.entry.label!r} and"
+                    f" {item.entry.label!r} both instrument target"
+                    f" {cls.target!r}; enable one, or disable one with"
+                    f" enabled = false"
+                )
             raise ConfigError(
                 f"instrument entries {other.entry.label!r} and"
-                f" {item.entry.label!r} both instrument target {cls.target!r};"
+                f" {item.entry.label!r} instrument overlapping targets"
+                f" {seen!r} and {cls.target!r}, one inside the other;"
                 f" enable one, or disable one with enabled = false"
             )
         by_target[cls.target] = item
