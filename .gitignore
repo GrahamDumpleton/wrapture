@@ -21,3 +21,7 @@ examples/trace-propagation/client.jsonl
 examples/trace-propagation/server.jsonl
 examples/trace-propagation/client-otel.jsonl
 examples/trace-propagation/server-otel.jsonl
+examples/trace-propagation/client.out
+examples/trace-propagation/server.out
+examples/trace-propagation/client-otel.out
+examples/trace-propagation/server-otel.out
