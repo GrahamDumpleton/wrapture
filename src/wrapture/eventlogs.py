@@ -87,8 +87,8 @@ class EventLog:
 
     def of_category(self, *categories: str) -> EventLog:
         """Events whose binding declared one of the given categories:
-        "external", "database", "datastore", "messaging", "task" or
-        "template"."""
+        "external", "database", "datastore", "messaging", "task",
+        "server", "consumer" or "template"."""
 
         wanted = set(categories)
         return self._narrow(

@@ -1450,7 +1450,8 @@ def block(
     `category=` and `leaf=` declare what the block is, as they do on
     a binding: `category` names the kind of operation the body
     performs ("external", "database", "datastore", "messaging",
-    "task" or "template"), carried on the event for sinks, tape
+    "task", "server", "consumer" or "template"), carried on the
+    event for sinks, tape
     queries and the OTel export to select on, and `leaf=True` makes
     the block a terminal node, recording its own event while nothing
     that would make a span records beneath it (log captures still

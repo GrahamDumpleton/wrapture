@@ -301,8 +301,8 @@ connection handling and retries stay out of the tree while its log
 lines still attach to the leaf. `category=` names the kind of
 operation, one of the categories this package layout is organised
 by (`external`, `database`, `datastore`, `messaging`, `task`,
-`template`), so that a `database_` target's events say `database`
-with no translation. The [ad-hoc tracing
+`server`, `consumer`, `template`), so that a `database_` target's
+events say `database` with no translation. The [ad-hoc tracing
 guide](ad-hoc-tracing.md#terminal-nodes-leaf-and-category) covers
 both, and the [OTel page](otel-export.md#the-category-data-key-contracts)
 lists the data keys each category is expected to carry; the
