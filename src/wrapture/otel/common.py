@@ -36,6 +36,9 @@ _CATEGORY_SEMCONV: dict[str, dict[str, str]] = {
         "path": "url.path",
         "query": "url.query",
         "status": "http.response.status_code",
+        "system": "rpc.system",
+        "service": "rpc.service",
+        "operation": "rpc.method",
     },
     "database": {
         "system": "db.system.name",

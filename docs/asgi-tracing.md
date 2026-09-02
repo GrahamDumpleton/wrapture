@@ -225,6 +225,18 @@ The [WSGI page](wsgi-tracing.md#ignoring-whole-requests) has the
 full rules; they are the same on both sides, the fields being valued
 as the ASGI event records them.
 
+## One boundary per request
+
+The middleware is idempotent per request: when a request that an
+enclosing copy of the middleware is already recording reaches
+another copy, the inner one records nothing and passes straight
+through, so a framework's own instrumentation and a server-side
+wrapping can both be present without a request inside a request.
+The outermost recording boundary wins, and marks the scope with
+a `wrapture.request` key the application can also see. A genuine
+sub-request, one served with a fresh scope inside the outer
+request, is a real boundary and records as usual.
+
 ## Asserting on requests in tests
 
 The status is the result, so the existing assertion vocabulary needs

@@ -1224,6 +1224,7 @@ class Block:
         data: dict[str, Any],
         links: tuple[EventLink, ...] = (),
         *,
+        joined: Any = None,
         category: str | None = None,
         leaf: bool = False,
     ) -> None:
@@ -1233,6 +1234,7 @@ class Block:
         self._name = name
         self._data = data
         self._links = links
+        self._joined = joined
         self._category = _check_category(category)
         self._leaf = _check_leaf(leaf)
 
@@ -1274,6 +1276,14 @@ class Block:
         )
         if self._data:
             event.data.update(self._data)
+
+        # A joined identity rides on the event before it is pushed, so
+        # the recording path treats it exactly as a request boundary
+        # that parsed incoming headers: a root joins the caller's
+        # trace, a nested block shades its subtree.
+
+        if self._joined is not None:
+            event.trace = self._joined
 
         # Links belong to a root: a block nested inside an in-flight
         # operation is that operation's child, and the same-thread
@@ -1393,6 +1403,7 @@ def block(
     *,
     data: Mapping[str, Any] | None = None,
     links: Iterable[EventLink | Mapping[str, str]] | None = None,
+    joins: Mapping[str, str] | None = None,
     category: str | None = None,
     leaf: bool = False,
 ) -> Block:
@@ -1410,6 +1421,19 @@ def block(
     call site as module:qualname of the function the with statement
     sits in. A block entered with nothing in flight above it roots
     its own tree and mints a trace identity like any operation root.
+
+    `joins=` names the headers a synchronous ingress arrived with,
+    for a server-side boundary the request middlewares do not speak
+    for: a mapping carrying a `traceparent` makes the block's tree
+    part of that distributed trace, the way the WSGI and ASGI
+    middlewares join at their boundary, rather than minting its own.
+    On a nested block the identity starts a fresh scope for its
+    subtree, the middleware rule again. A mapping with no valid
+    `traceparent` contributes nothing, so the headers of an untraced
+    request are safe to pass, and with the trace mechanism disabled
+    nothing is parsed at all. Where `links=` records a hand-off from
+    another operation, `joins=` makes this block part of the same
+    one trace.
 
     `links=` names the operations this block was handed off from,
     for a root block on the consuming side of a queue: each entry is
@@ -1442,7 +1466,33 @@ def block(
     """
 
     return Block(
-        name, seed_data(data), _link_entries(links), category=category, leaf=leaf
+        name,
+        seed_data(data),
+        _link_entries(links),
+        joined=_join_context(joins),
+        category=category,
+        leaf=leaf,
+    )
+
+
+def _join_context(joins: Mapping[str, str] | None) -> _trace.TraceContext | None:
+    # Normalise block()'s joins= argument: a header mapping is parsed
+    # as W3C trace context for the block's event to carry, exactly as
+    # the request middlewares parse at their boundary. No mapping,
+    # nothing valid in it, or the mechanism disabled means None, and
+    # the block mints or inherits as usual.
+
+    if joins is None:
+        return None
+
+    if not isinstance(joins, Mapping):
+        raise TypeError(f"block() joins is a mapping of headers, got {joins!r}")
+
+    if not _trace._active():
+        return None
+
+    return _trace.from_headers(
+        {str(key).casefold(): value for key, value in joins.items()}
     )
 
 

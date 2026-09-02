@@ -1385,6 +1385,16 @@ boundary inside an already-traced tree keeps the enclosing identity
 unless it receives headers of its own, which start a fresh scope for
 its subtree.
 
+The same join is available to any boundary the middlewares do not
+speak for. `block(name, joins=headers)` parses the identity a
+synchronous ingress arrived with, an XML-RPC dispatcher or a raw
+socket server say, and the block's tree becomes part of that
+distributed trace by exactly the middleware rules: joining at a
+root, shading a subtree when nested, minting as usual when the
+mapping carries nothing valid. Where `links=` records a hand-off
+from another operation (the consuming side of a queue), `joins=`
+says the caller is still waiting: same trace, not a related one.
+
 Processes with no HTTP ingress get their trace root from a block: a
 cron job, CLI command or queue worker wraps its operation in
 `with wrapture.block("process-batch"):` and the root block mints,
@@ -1541,6 +1551,10 @@ headers of an untraced message are safe to pass. Links belong to
 roots: `links=` on a block nested inside an in-flight operation is
 dropped with a `ConfigWarning`, because a nested block is that
 operation's child and the same-thread rule is not for overriding.
+And links are for hand-offs, where the producer has moved on; a
+server answering a waiting caller joins the caller's trace instead,
+with `block(joins=headers)`, described under [trace identity and
+propagation](#trace-identity-and-propagation).
 
 Every renderer carries the relationship. JSONLines lines have a
 `links` list with the origin's ids, its `seq` when it ran in this
