@@ -567,6 +567,18 @@ class OpenTelemetrySink(wrapture.Sink):
             route = event.data.get("route")
             return f"{self._method(event)} {route or event.data.get('path', '')}"
 
+        # An RPC-shaped external call (system and operation both
+        # declared) reads the way OTel's RPC spans do, named by the
+        # low-cardinality operation, service-qualified when a service
+        # is declared; the patched location stays on wrapture.path.
+
+        if event.category == "external":
+            system = event.data.get("system")
+            operation = event.data.get("operation")
+            if system and operation:
+                service = event.data.get("service")
+                return f"{service}/{operation}" if service else str(operation)
+
         return event.label or event.path
 
     def _method(self, event: Event) -> str:

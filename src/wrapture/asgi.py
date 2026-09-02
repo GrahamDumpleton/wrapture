@@ -329,10 +329,25 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
             tree = binding._tree
 
         active = _active_sinks()
-        recording = when is not False and bool(active) and not _in_recorder.get()
+
+        # A boundary inside a boundary is the same request seen twice:
+        # an enclosing middleware marked the scope, so this copy
+        # records nothing of its own and the outermost wins. Behaviour
+        # still applies. A genuine sub-request arrives with a fresh
+        # scope and records as usual.
+
+        duplicate = bool(scope.get("wrapture.request"))
+
+        recording = (
+            when is not False
+            and bool(active)
+            and not _in_recorder.get()
+            and not duplicate
+        )
 
         if (
             when is not False
+            and not duplicate
             and not recording
             and not _in_recorder.get()
             and _timelines_active()
@@ -439,6 +454,13 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                     event.trace = _trace.from_headers(_trace_scope(scope))
             finally:
                 _in_recorder.reset(guard)
+
+        # Mark the request as recorded, so a nested copy of the
+        # middleware handed this same scope passes it through
+        # rather than recording it twice.
+
+        if event is not None:
+            scope["wrapture.request"] = True
 
         # Response progress shared between the channel wrappers and
         # the close below: the status once http.response.start has

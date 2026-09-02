@@ -362,6 +362,71 @@ def test_wsgi_ingress_is_silent_when_disabled(trace_disabled: None) -> None:
     assert tape.roots()[0].trace is None
 
 
+def test_a_root_block_joins_the_incoming_trace() -> None:
+    with timeline() as tape:
+        with wrapture.block("serve", joins={"Traceparent": TRACEPARENT}):
+            pass
+
+    (event,) = tape.all
+    assert event.trace is not None
+    slot = event.trace.slots["w3c"]
+    assert slot.trace_id == "0af7651916cd43dd8448eb211c80319c"
+    assert not slot.claimed
+    assert event.links == ()
+
+
+def test_a_joined_block_propagates_the_joined_identity() -> None:
+    # An unclaimed slot that arrived in headers forwards verbatim, so
+    # what the block sends onward is exactly what came in.
+
+    captured: dict[str, str] = {}
+
+    with timeline():
+        with wrapture.block("serve", joins={"traceparent": TRACEPARENT}):
+            captured.update(wrapture.trace_headers())
+
+    assert captured["traceparent"] == TRACEPARENT
+
+
+def test_a_nested_joined_block_shades_its_subtree() -> None:
+    @observed
+    def handle() -> None:
+        with wrapture.block("serve", joins={"traceparent": TRACEPARENT}):
+            pass
+
+    with timeline() as tape:
+        handle()
+
+    root, joined = tape.all
+    assert root.trace is not None
+    assert joined.trace is not None
+    assert joined.trace is not root.trace
+    assert joined.trace.slots["w3c"].trace_id == "0af7651916cd43dd8448eb211c80319c"
+
+
+def test_joins_without_a_valid_traceparent_mints_as_usual() -> None:
+    with timeline() as tape:
+        with wrapture.block("serve", joins={"x-request-id": "abc"}):
+            pass
+
+    (event,) = tape.all
+    assert event.trace is not None
+    assert event.trace.slots["w3c"].headers == {}
+
+
+def test_joins_is_inert_when_the_mechanism_is_disabled(trace_disabled: None) -> None:
+    with timeline() as tape:
+        with wrapture.block("serve", joins={"traceparent": TRACEPARENT}):
+            pass
+
+    assert tape.all[0].trace is None
+
+
+def test_joins_of_the_wrong_type_is_refused() -> None:
+    with pytest.raises(TypeError, match="joins"):
+        wrapture.block("serve", joins=[("traceparent", TRACEPARENT)])  # type: ignore[arg-type]
+
+
 def test_a_nested_boundary_with_headers_shades_its_subtree() -> None:
     inner_calls: list[Any] = []
 

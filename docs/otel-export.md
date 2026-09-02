@@ -220,6 +220,7 @@ attributes follow the category:
 | | | `host`, `port` | `server.address`, `server.port` |
 | | | `path`, `query` | `url.path`, `url.query` |
 | | | `status` | `http.response.status_code`; 400 and above sets the error status, as the HTTP client conventions say |
+| | | `system`, `service`, `operation` | `rpc.system`, `rpc.service`, `rpc.method`, for an RPC-shaped external call (an XML-RPC or gRPC client); when `system` and `operation` are both present the span is also named `service/operation` (or `operation` alone), the RPC conventions' low-cardinality naming, with the patched location still on `wrapture.path` |
 | `database` | CLIENT | `system` | `db.system.name` |
 | | | `operation` | `db.operation.name` |
 | | | `collection` | `db.collection.name` |
@@ -229,6 +230,11 @@ attributes follow the category:
 | | | `destination` | `messaging.destination.name` |
 | | | `operation` | `messaging.operation.type` |
 | `template` | INTERNAL | | `wrapture.category` only |
+
+The RPC trio follows OTel's RPC conventions, younger than the HTTP
+ones but with these three names stable across their drafts; an
+instrumentation that sets `operation` should set `system` beside it,
+the RPC span's marker attribute.
 
 Instrumentation fills the contract keys with `annotate()` from
 inside the operation (a leaf's body annotates the leaf, since

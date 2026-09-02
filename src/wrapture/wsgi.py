@@ -508,10 +508,25 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
             tree = binding._tree
 
         active = _active_sinks()
-        recording = when is not False and bool(active) and not _in_recorder.get()
+
+        # A boundary inside a boundary is the same request seen twice:
+        # an enclosing middleware marked the environ, so this copy
+        # records nothing of its own and the outermost wins. Behaviour
+        # still applies. A genuine sub-request arrives with a fresh
+        # environ and records as usual.
+
+        duplicate = bool(environ.get("wrapture.request"))
+
+        recording = (
+            when is not False
+            and bool(active)
+            and not _in_recorder.get()
+            and not duplicate
+        )
 
         if (
             when is not False
+            and not duplicate
             and not recording
             and not _in_recorder.get()
             and _timelines_active()
@@ -614,6 +629,13 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                     event.trace = _trace.from_headers(_trace_environ(environ))
             finally:
                 _in_recorder.reset(guard)
+
+        # Mark the request as recorded, so a nested copy of the
+        # middleware handed this same environ passes it through
+        # rather than recording it twice.
+
+        if event is not None:
+            environ["wrapture.request"] = True
 
         # Every start_response invocation, exc_info replacements
         # included, runs the response stages and refreshes what is

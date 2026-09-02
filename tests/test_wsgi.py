@@ -823,3 +823,24 @@ def test_the_standalone_middleware_takes_seed_data() -> None:
         body.close()
 
     assert tape.all[0].data["team"] == "shop"
+
+
+# ---------------------------------------------------------------------------
+# one boundary per request
+# ---------------------------------------------------------------------------
+
+
+def test_a_doubly_wrapped_application_records_one_request() -> None:
+    # Interposition can wrap an app a framework's instrumentation
+    # already wrapped; the same request must not record twice. The
+    # outer middleware marks the environ and the inner passes through.
+
+    wrapped = WSGIMiddleware(WSGIMiddleware(application))
+    server = _Server()
+
+    with timeline() as tape:
+        server.consume(wrapped(_environ(), server.start_response))
+
+    requests = [event for event in tape.all if event.kind == "request"]
+    assert len(requests) == 1
+    assert seen_environ[-1]["wrapture.request"] is True

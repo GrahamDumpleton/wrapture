@@ -815,3 +815,25 @@ def test_seed_data_starts_the_request_event_and_never_its_own_fields() -> None:
     request = tape.all[0]
     assert request.data["team"] == "shop"
     assert request.data["method"] == "GET"
+
+
+# ---------------------------------------------------------------------------
+# one boundary per request
+# ---------------------------------------------------------------------------
+
+
+def test_a_doubly_wrapped_application_records_one_request() -> None:
+    # Interposition can wrap an app a framework's instrumentation
+    # already wrapped; the same request must not record twice. The
+    # outer middleware marks the scope and the inner passes through.
+
+    wrapped = ASGIMiddleware(ASGIMiddleware(application))
+    server = _Server()
+    scope = _scope()
+
+    with timeline() as tape:
+        asyncio.run(wrapped(scope, server.receive, server.send))
+
+    requests = [event for event in tape.all if event.kind == "request"]
+    assert len(requests) == 1
+    assert scope["wrapture.request"] is True

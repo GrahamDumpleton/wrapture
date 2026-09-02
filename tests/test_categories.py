@@ -471,6 +471,80 @@ def test_an_external_failure_status_marks_the_span_in_error() -> None:
     assert span.status.status_code is StatusCode.ERROR
 
 
+def test_an_rpc_shaped_external_maps_the_rpc_keys_and_names_by_operation() -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Registry:
+        def call(self) -> str:
+            return "ok"
+
+    remote = binding(
+        Registry,
+        "call",
+        category="external",
+        data={"system": "xmlrpc", "operation": "inventory.count"},
+    )
+
+    def run() -> None:
+        Registry().call()
+
+    (span,) = _exported(remote, run=run)
+
+    # The trio maps onto the RPC conventions, and the span takes the
+    # operation as its low-cardinality name; the patched location
+    # stays on wrapture.path.
+
+    assert span.name == "inventory.count"
+    assert span.attributes["rpc.system"] == "xmlrpc"
+    assert span.attributes["rpc.method"] == "inventory.count"
+    assert "wrapture.data.operation" not in span.attributes
+    assert span.attributes["wrapture.path"] == remote.path
+
+
+def test_a_declared_service_qualifies_the_rpc_span_name() -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Registry:
+        def call(self) -> str:
+            return "ok"
+
+    remote = binding(
+        Registry,
+        "call",
+        category="external",
+        data={"system": "grpc", "service": "inventory.Counter", "operation": "Count"},
+    )
+
+    def run() -> None:
+        Registry().call()
+
+    (span,) = _exported(remote, run=run)
+
+    assert span.name == "inventory.Counter/Count"
+    assert span.attributes["rpc.service"] == "inventory.Counter"
+
+
+def test_an_external_without_a_system_keeps_the_location_name() -> None:
+    pytest.importorskip("opentelemetry")
+
+    # operation alone (or neither) is not RPC-shaped: the span keeps
+    # the binding's name, as every uncategorised or plain-HTTP
+    # external does.
+
+    class Registry:
+        def call(self) -> str:
+            return "ok"
+
+    remote = binding(Registry, "call", category="external")
+
+    def run() -> None:
+        Registry().call()
+
+    (span,) = _exported(remote, run=run)
+
+    assert span.name == remote.path
+
+
 def test_an_uncategorised_span_carries_no_category_attribute() -> None:
     place = binding(Service, "place")
 
