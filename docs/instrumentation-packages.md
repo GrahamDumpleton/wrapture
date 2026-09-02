@@ -301,8 +301,17 @@ connection handling and retries stay out of the tree while its log
 lines still attach to the leaf. `category=` names the kind of
 operation, one of the categories this package layout is organised
 by (`external`, `database`, `datastore`, `messaging`, `task`,
-`server`, `consumer`, `template`), so that a `database_` target's
-events say `database` with no translation. The [ad-hoc tracing
+`server`, `consumer`, `template`), so that a `database` target's
+events say `database` with no translation. The category is also the
+layout convention inside a package: a package instrumenting a single
+target names its subpackage `<category>_<target>` with the target's
+module dots as underscores (`external_requests`,
+`external_urllib_request`), and a collection covering many targets
+groups them in role directories instead, `<category>/<target>`
+(`framework/flask`, `external/urllib_request`,
+`server/xmlrpc_server`), the same words with the role as a
+directory. Either way the layout is internal; the entry point name
+is always the bare target. The [ad-hoc tracing
 guide](ad-hoc-tracing.md#terminal-nodes-leaf-and-category) covers
 both, and the [OTel page](otel-export.md#the-category-data-key-contracts)
 lists the data keys each category is expected to carry; the
@@ -345,9 +354,9 @@ each named for its target:
 
 ```toml
 [project.entry-points."wrapture.instrumentation"]
-flask = "wrapture_instrumentation.framework_flask:FlaskInstrumentation"
-werkzeug = "wrapture_instrumentation.framework_werkzeug:WerkzeugInstrumentation"
-requests = "wrapture_instrumentation.external_requests:RequestsInstrumentation"
+flask = "wrapture_instrumentation.framework.flask:FlaskInstrumentation"
+werkzeug = "wrapture_instrumentation.framework.werkzeug:WerkzeugInstrumentation"
+requests = "wrapture_instrumentation.external.requests:RequestsInstrumentation"
 ```
 
 One distribution can therefore ship instrumentation for many common
