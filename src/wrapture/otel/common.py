@@ -61,6 +61,25 @@ _CATEGORY_SEMCONV: dict[str, dict[str, str]] = {
         "destination": "messaging.destination.name",
         "operation": "messaging.operation.type",
     },
+    "server": {
+        "method": "http.request.method",
+        "url": "url.full",
+        "host": "server.address",
+        "port": "server.port",
+        "path": "url.path",
+        "query": "url.query",
+        "route": "http.route",
+        "client": "client.address",
+        "status": "http.response.status_code",
+        "system": "rpc.system",
+        "service": "rpc.service",
+        "operation": "rpc.method",
+    },
+    "consumer": {
+        "system": "messaging.system",
+        "destination": "messaging.destination.name",
+        "operation": "messaging.operation.type",
+    },
 }
 
 

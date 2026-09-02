@@ -204,8 +204,8 @@ class ObserveEntry:
     `leaf = true` makes the entry's bindings leaves, recording their
     own events and silencing the spans beneath them, and `category`
     names what kind of operation they are ("external", "database",
-    "datastore", "messaging", "task" or "template"), the
-    `binding(leaf=, category=)` options as TOML.
+    "datastore", "messaging", "task", "server", "consumer" or
+    "template"), the `binding(leaf=, category=)` options as TOML.
     """
 
     target: str

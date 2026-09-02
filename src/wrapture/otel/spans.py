@@ -542,17 +542,21 @@ class OpenTelemetrySink(wrapture.Sink):
         return self._to_epoch_ns(event.started + event.duration)
 
     def _kind(self, event: Event) -> SpanKind:
-        # A request is the server side of an exchange; a categorised
-        # event is the client side of one (or the producing side, for
-        # a message or a queued task); everything else is internal.
+        # A request is the server side of an exchange, and so is a
+        # "server" categorised event, the boundary the middlewares do
+        # not speak for; the other categories are the client side of
+        # one (or the producing and consuming sides, for a message or
+        # a queued task); everything else is internal.
 
-        if event.kind == "request":
+        if event.kind == "request" or event.category == "server":
             return SpanKind.SERVER
 
         if event.category in ("external", "database", "datastore"):
             return SpanKind.CLIENT
         if event.category in ("messaging", "task"):
             return SpanKind.PRODUCER
+        if event.category == "consumer":
+            return SpanKind.CONSUMER
 
         return SpanKind.INTERNAL
 
@@ -567,17 +571,25 @@ class OpenTelemetrySink(wrapture.Sink):
             route = event.data.get("route")
             return f"{self._method(event)} {route or event.data.get('path', '')}"
 
-        # An RPC-shaped external call (system and operation both
-        # declared) reads the way OTel's RPC spans do, named by the
-        # low-cardinality operation, service-qualified when a service
-        # is declared; the patched location stays on wrapture.path.
+        # An RPC-shaped external call or server boundary (system and
+        # operation both declared) reads the way OTel's RPC spans do,
+        # named by the low-cardinality operation, service-qualified
+        # when a service is declared; the patched location stays on
+        # wrapture.path.
 
-        if event.category == "external":
+        if event.category in ("external", "server"):
             system = event.data.get("system")
             operation = event.data.get("operation")
             if system and operation:
                 service = event.data.get("service")
                 return f"{service}/{operation}" if service else str(operation)
+
+        # A server boundary that is not RPC-shaped reads access-log
+        # style like a request, when it declared a method.
+
+        if event.category == "server" and event.data.get("method"):
+            route = event.data.get("route")
+            return f"{self._method(event)} {route or event.data.get('path', '')}"
 
         return event.label or event.path
 
@@ -657,7 +669,13 @@ class OpenTelemetrySink(wrapture.Sink):
                     code = _status_code(value) if isinstance(value, str) else value
                     if isinstance(code, int) and not isinstance(code, bool):
                         attributes[attribute] = code
-                        if code >= 400:
+
+                        # A client span is in error from 400, the
+                        # HTTP client conventions; a server one only
+                        # from 500, since a 4xx is the caller's fault.
+
+                        threshold = 500 if event.category == "server" else 400
+                        if code >= threshold:
                             status = _ERROR
                     else:
                         attributes[attribute] = self._coerce(value)

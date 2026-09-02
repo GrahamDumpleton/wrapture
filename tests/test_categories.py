@@ -59,6 +59,17 @@ class Bus:
         wrapture.annotate(system="rabbitmq", destination=topic)
 
 
+class Dispatcher:
+    def handle(self) -> str:
+        wrapture.annotate(method="POST", path="/RPC2", client="10.0.0.9", status=200)
+        return "ok"
+
+
+class Worker:
+    def consume(self) -> None:
+        wrapture.annotate(system="rabbitmq", destination="orders", operation="process")
+
+
 class Service:
     def __init__(self) -> None:
         self.gateway = Gateway()
@@ -112,6 +123,8 @@ def test_the_vocabulary_is_fixed_and_validated() -> None:
         "datastore",
         "messaging",
         "task",
+        "server",
+        "consumer",
         "template",
     )
 
@@ -399,21 +412,29 @@ def test_the_export_sets_the_span_kind_by_category() -> None:
     charge = binding(Gateway, "charge", category="external")
     query = binding(Store, "query", category="database")
     publish = binding(Bus, "publish", category="messaging")
+    consume = binding(Worker, "consume", category="consumer")
     place = binding(Service, "place")
+
+    handle = binding(Dispatcher, "handle", category="server")
 
     def run() -> None:
         Service().place(5)
         Store().query("select 1")
         Bus().publish("orders")
+        Worker().consume()
+        Dispatcher().handle()
 
     spans = {
-        span.name: span for span in _exported(charge, query, publish, place, run=run)
+        span.name: span
+        for span in _exported(charge, query, publish, consume, handle, place, run=run)
     }
 
     assert spans[charge.path].kind is SpanKind.CLIENT
     assert spans[query.path].kind is SpanKind.CLIENT
     assert spans[publish.path].kind is SpanKind.PRODUCER
+    assert spans[consume.path].kind is SpanKind.CONSUMER
     assert spans[place.path].kind is SpanKind.INTERNAL
+    assert spans["POST /RPC2"].kind is SpanKind.SERVER
 
 
 def test_the_export_maps_the_categorys_contract_keys() -> None:
@@ -551,3 +572,141 @@ def test_an_uncategorised_span_carries_no_category_attribute() -> None:
     (span,) = _exported(place, run=lambda: Service().place(5))
 
     assert "wrapture.category" not in span.attributes
+
+
+def test_the_server_contract_maps_and_a_4xx_is_not_an_error() -> None:
+    pytest.importorskip("opentelemetry")
+
+    from opentelemetry.trace import SpanKind, StatusCode
+
+    class NotFound:
+        def handle(self) -> None:
+            wrapture.annotate(
+                method="POST", path="/nope", client="10.0.0.9", status=404
+            )
+
+    handle = binding(NotFound, "handle", category="server")
+
+    (span,) = _exported(handle, run=lambda: NotFound().handle())
+
+    # On the server side a 4xx is the caller's fault: the attributes
+    # map, the client address included, and the status stays unset.
+
+    assert span.kind is SpanKind.SERVER
+    assert span.attributes["wrapture.category"] == "server"
+    assert span.attributes["http.request.method"] == "POST"
+    assert span.attributes["url.path"] == "/nope"
+    assert span.attributes["client.address"] == "10.0.0.9"
+    assert span.attributes["http.response.status_code"] == 404
+    assert span.status.status_code is StatusCode.UNSET
+
+
+def test_a_server_5xx_marks_the_span_in_error() -> None:
+    pytest.importorskip("opentelemetry")
+
+    from opentelemetry.trace import StatusCode
+
+    class Broken:
+        def handle(self) -> None:
+            wrapture.annotate(method="POST", path="/RPC2", status=500)
+
+    handle = binding(Broken, "handle", category="server")
+
+    (span,) = _exported(handle, run=lambda: Broken().handle())
+
+    assert span.attributes["http.response.status_code"] == 500
+    assert span.status.status_code is StatusCode.ERROR
+
+
+def test_a_server_span_with_a_method_is_named_access_log_style() -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Routed:
+        def handle(self) -> None:
+            wrapture.annotate(
+                method="GET", path="/rpc/inventory/7", route="/rpc/<name>"
+            )
+
+    handle = binding(Routed, "handle", category="server")
+
+    (span,) = _exported(handle, run=lambda: Routed().handle())
+
+    # The matched route wins over the path, exactly as a request span
+    # is named.
+
+    assert span.name == "GET /rpc/<name>"
+    assert span.attributes["http.route"] == "/rpc/<name>"
+
+
+def test_an_rpc_shaped_server_span_is_named_by_the_operation() -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Endpoint:
+        def handle(self) -> None:
+            wrapture.annotate(method="POST", path="/RPC2", operation="inventory.count")
+
+    handle = binding(Endpoint, "handle", category="server", data={"system": "xmlrpc"})
+
+    (span,) = _exported(handle, run=lambda: Endpoint().handle())
+
+    # The RPC naming outranks the access-log form, mirroring the
+    # external side; the trio maps onto the RPC conventions.
+
+    assert span.name == "inventory.count"
+    assert span.attributes["rpc.system"] == "xmlrpc"
+    assert span.attributes["rpc.method"] == "inventory.count"
+    assert span.attributes["url.path"] == "/RPC2"
+
+
+def test_a_server_span_without_method_or_trio_keeps_its_own_name() -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Bare:
+        def handle(self) -> None:
+            return None
+
+    handle = binding(Bare, "handle", category="server")
+
+    (span,) = _exported(handle, run=lambda: Bare().handle())
+
+    assert span.name == handle.path
+
+
+def test_the_consumer_contract_maps_the_messaging_keys() -> None:
+    pytest.importorskip("opentelemetry")
+
+    from opentelemetry.trace import SpanKind
+
+    consume = binding(Worker, "consume", category="consumer")
+
+    (span,) = _exported(consume, run=lambda: Worker().consume())
+
+    assert span.kind is SpanKind.CONSUMER
+    assert span.attributes["wrapture.category"] == "consumer"
+    assert span.attributes["messaging.system"] == "rabbitmq"
+    assert span.attributes["messaging.destination.name"] == "orders"
+    assert span.attributes["messaging.operation.type"] == "process"
+
+
+def test_a_server_block_boundary_exports_as_a_server_span() -> None:
+    pytest.importorskip("opentelemetry")
+
+    from opentelemetry.trace import SpanKind
+
+    def run() -> None:
+        with wrapture.block(
+            "xmlrpc.server",
+            category="server",
+            data={"method": "POST", "path": "/RPC2"},
+        ):
+            wrapture.annotate(status=200)
+
+    (span,) = _exported(run=run)
+
+    # The convenient spelling for a hand-written boundary: the block
+    # carries the category, and the export reads it as it would a
+    # bound handler, whether or not the block joined anything.
+
+    assert span.kind is SpanKind.SERVER
+    assert span.name == "POST /RPC2"
+    assert span.attributes["http.response.status_code"] == 200

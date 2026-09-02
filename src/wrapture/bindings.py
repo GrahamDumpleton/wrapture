@@ -2809,7 +2809,8 @@ def binding(
 
     `category=` names what kind of operation the binding's events
     are, one of "external", "database", "datastore", "messaging",
-    "task" or "template", carried on every event for sinks (a
+    "task", "server", "consumer" or "template", carried on every
+    event for sinks (a
     `Filter` or a config's `filter` table), tape queries
     (`of_category()`, `where(category=)`, `current_event(category=)`)
     and the OpenTelemetry export (the span kind and, with the

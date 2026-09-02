@@ -33,8 +33,12 @@ EventKind = Literal["call", "get", "set", "delete", "request", "log", "block"]
 # on every event it records. A small fixed set, aligned with the
 # target categories instrumentation packages are organised by, so a
 # package's events are labelled by the word its own name uses;
-# extended when a target needs a word that is not here. Requests have
-# no category: kind="request" already says what they are.
+# extended when a target needs a word that is not here. The first
+# five are the client or producing side of an exchange; "server" and
+# "consumer" are the receiving mirrors, for a boundary the request
+# middlewares do not speak for (an RPC dispatcher, a queue worker's
+# handling of one message). Requests have no category:
+# kind="request" already says what they are.
 
 CATEGORIES: tuple[str, ...] = (
     "external",
@@ -42,6 +46,8 @@ CATEGORIES: tuple[str, ...] = (
     "datastore",
     "messaging",
     "task",
+    "server",
+    "consumer",
     "template",
 )
 

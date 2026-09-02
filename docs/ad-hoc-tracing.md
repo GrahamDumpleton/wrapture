@@ -456,8 +456,14 @@ mapping binding refuses it with the other recording options.
 `category=` is the other half of declaring what a target is: the
 kind of operation its events are, one of `"external"` (a call to
 another service), `"database"`, `"datastore"`, `"messaging"`,
-`"task"` or `"template"`, aligned with the categories instrumentation
-packages are organised by. It is carried on every event the binding
+`"task"`, `"server"` (the handling of an inbound request at a
+boundary the request middlewares do not speak for, the receiving
+mirror of `"external"`), `"consumer"` (the receiving mirror of
+`"messaging"` and `"task"`: handling one message, running one queued
+job) or `"template"`, aligned with the categories instrumentation
+packages are organised by. The category declares the operation's
+role; where its trace identity comes from is a separate declaration
+(`joins=` or `links=` on a block), and neither implies the other. It is carried on every event the binding
 records as a field of its own, `event.category`, never as a data
 key, and never changed afterwards: like a leaf it is a structural
 fact fixed at declaration, not something decided during a call, so
@@ -785,8 +791,9 @@ accepts a single string or a list:
   tracing pages cover them.
 - `leaf = true` makes the entry's bindings leaves, and `category`
   names what kind of operation their events are (`"external"`,
-  `"database"`, `"datastore"`, `"messaging"`, `"task"` or
-  `"template"`): the `binding(leaf=, category=)` options as TOML, see
+  `"database"`, `"datastore"`, `"messaging"`, `"task"`, `"server"`,
+  `"consumer"` or `"template"`): the `binding(leaf=, category=)`
+  options as TOML, see
   [Terminal nodes](#terminal-nodes-leaf-and-category).
 - `data` is a table of static tags every event from the entry's
   bindings starts with: string keys to scalars or flat lists of

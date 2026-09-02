@@ -205,7 +205,9 @@ uncategorised `"call"` or `"block"` event is never interpreted.
 A binding declared with `category=` (see the [ad-hoc tracing
 guide](ad-hoc-tracing.md#terminal-nodes-leaf-and-category)) records
 events that carry the category as a field, and the export treats
-them as the client side of an exchange. OTel has no category
+them as the side of an exchange the category declares: the client
+or producing side for the outbound categories, the serving or
+consuming side for their receiving mirrors. OTel has no category
 attribute of its own: a span's kind is structural and its category
 is implied by which semantic-convention attributes it carries, so
 the export translates rather than passes through. Every categorised
@@ -229,6 +231,16 @@ attributes follow the category:
 | `messaging`, `task` | PRODUCER | `system` | `messaging.system` |
 | | | `destination` | `messaging.destination.name` |
 | | | `operation` | `messaging.operation.type` |
+| `server` | SERVER | `method` | `http.request.method` |
+| | | `url` | `url.full` |
+| | | `host`, `port` | `server.address`, `server.port`, the address the server itself answers on |
+| | | `path`, `query`, `route` | `url.path`, `url.query`, `http.route` |
+| | | `client` | `client.address` |
+| | | `status` | `http.response.status_code`; 500 and above sets the error status, since on the server side a 4xx is the caller's fault, as the HTTP server conventions say |
+| | | `system`, `service`, `operation` | `rpc.system`, `rpc.service`, `rpc.method`, for an RPC-shaped boundary (an XML-RPC or gRPC dispatcher); when `system` and `operation` are both present the span is also named `service/operation` (or `operation` alone), and a non-RPC boundary that declared a `method` is named `method route-or-path`, access-log style like a request |
+| `consumer` | CONSUMER | `system` | `messaging.system` |
+| | | `destination` | `messaging.destination.name` |
+| | | `operation` | `messaging.operation.type` |
 | `template` | INTERNAL | | `wrapture.category` only |
 
 The RPC trio follows OTel's RPC conventions, younger than the HTTP
@@ -245,10 +257,15 @@ which goes under `query` as `wrapture.capture_query()` records it,
 the same by-name redaction the request middlewares apply. Keys
 outside the category's contract,
 and contract keys of some other category, export as ordinary
-`wrapture.data.<key>`. The leaf categories describe the client or
-producing side only: consuming a message or running a queued task
-roots a tree of its own, structurally a request, and is a root event
-kind question for when such a target is instrumented.
+`wrapture.data.<key>`.
+
+The receiving mirrors pair with the identity declarations rather
+than depending on them: a `server` boundary is typically a
+`block(joins=headers)` that also declares `category="server"`, and a
+`consumer` root block typically declares `links=` beside
+`category="consumer"`, but the category alone decides the span kind
+and contract, so a boundary that joined nothing (or has joining
+switched off) still exports as the server span it is.
 
 ### One trace id everywhere
 
