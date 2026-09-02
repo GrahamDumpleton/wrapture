@@ -254,6 +254,125 @@ alternative is the derived `module:qualname` path; and a test that
 finds the binding gets the real one, so anything it reconfigures on
 it stays reconfigured until the instrumentation removes it.
 
+## When the target is a C extension
+
+A binding needs an attribute it can replace, and a type implemented
+in C has none: assignment onto `sqlite3.Connection` or
+`sqlite3.Cursor` raises the `TypeError` that
+[known limitations](known-limitations.md#builtin-and-extension-types-cannot-be-patched)
+describes. What such a library does have is a Python-reachable
+factory: some function hands the C objects out, and that function is
+bindable. The pattern is to bind the factory, wrap what it returns
+in a proxy class of your own, and bind the proxy's methods, which
+are plain Python methods you own. Everything the library's users do
+with the object flows through your class, so the whole binding
+vocabulary applies to a type that could never be patched directly:
+
+```python
+# wrapture_instrumentation_sqlite3/dbapi2.py
+import wrapt
+
+import wrapture
+
+
+class Cursor(wrapt.BaseObjectProxy):
+    """A recording proxy around sqlite3.Cursor: the methods worth
+    recording are overridden for binding, everything else delegates."""
+
+    def execute(self, sql, parameters=(), /):
+        outcome = self.__wrapped__.execute(sql, parameters)
+
+        return self if outcome is self.__wrapped__ else outcome
+
+    # A sqlite3 cursor is its own iterator. Special methods are
+    # looked up on the type, and BaseObjectProxy leaves them to the
+    # subclass, so both halves are written out explicitly.
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.__wrapped__.__next__()
+
+
+class Connection(wrapt.BaseObjectProxy):
+    """A recording proxy around sqlite3.Connection."""
+
+    def cursor(self, *args, **kwargs):
+        return Cursor(self.__wrapped__.cursor(*args, **kwargs))
+
+
+def instrument(name, module, instrumentation):
+    def opens(wrapped, instance, args, kwargs):
+        return Connection(wrapped(*args, **kwargs))
+
+    connect = wrapture.binding(
+        module, "connect", leaf=True, category="database"
+    )
+    connect.on_call.decorates(opens)
+
+    execute = wrapture.binding(
+        Cursor,
+        "execute",
+        label="sqlite3:Cursor.execute",
+        leaf=True,
+        category="database",
+    )
+
+    group = wrapture.bindings(connect=connect, execute=execute)
+    group.apply()
+
+    instrumentation.on_cleanup(group.remove)
+```
+
+The factory binding does two jobs at once: it records the
+construction as an event of its own, and its decorator substitutes
+the proxy, so every connection the application obtains after apply
+is a recording one, cursors included. The `execute` binding then
+lands on the proxy class, where `when=`, capture policies, `leaf=`
+and `category=` all behave exactly as they would on a patchable
+target.
+
+Three rules keep the proxy honest:
+
+- Derive from `wrapt.BaseObjectProxy` and write the special methods
+  you need explicitly. Dunder methods are looked up on the type, not
+  the instance, and the base proxy deliberately does not forward
+  them, so each one is an opt-in. That explicitness is the point: a
+  base class that forwarded `__iter__` wholesale would make wrapped
+  objects appear iterable whether or not the real one was.
+
+- Preserve the library's identity conventions. Where the wrapped
+  method returns the wrapped object, return the proxy instead, so a
+  chained `cursor.execute(...).execute(...)` stays on the recording
+  class; a context manager whose `__enter__` returns the raw object
+  substitutes `self` for the same reason.
+
+- Label the bindings with the names they stand in for. The derived
+  path of the `execute` binding is your proxy's `module:qualname`,
+  which is true but not what a reader of the trace wants; the label
+  `sqlite3:Cursor.execute` carries the name the method notionally
+  wraps, exactly the job labels exist for.
+
+Removal is unchanged, and answers the question the limitation would
+otherwise leave open. The bindings are on your classes, so
+`group.remove()` restores them cleanly, and the factory binding's
+removal stops new connections being wrapped. A connection created
+while the instrumentation was applied keeps its proxy for its own
+lifetime, but a proxy whose bindings are gone is pure passthrough
+and records nothing.
+
+This is also the one place an instrumentation package imports wrapt
+directly. wrapture deliberately does not re-export the proxy types:
+the `import wrapt` is a visible marker that the code has stepped
+below wrapture's binding vocabulary, and since wrapt is a dependency
+of wrapture it is always present. The
+[sqlite3 target](https://github.com/GrahamDumpleton/wrapture-instrumentation/blob/develop/src/wrapture_instrumentation/database/sqlite3/README.md)
+in wrapture-instrumentation is the full-scale form of this example:
+the whole execute family on both classes, the commit-or-rollback
+context manager, and the capture policy decisions that go with
+recording SQL.
+
 ## Shaped settings
 
 The outer-type check on settings is deliberately shallow: it catches

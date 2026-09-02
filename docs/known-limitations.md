@@ -217,4 +217,8 @@ Attributes of types implemented in C (`list`, `dict`, `str`, and
 extension types generally) cannot be replaced, so bindings on them fail
 at `apply()` with the `TypeError` CPython raises for the assignment.
 This is a CPython restriction, not a wrapture one. Wrap the Python-level
-call sites that use such types instead.
+call sites that use such types instead; or, where a factory function
+hands the C objects out, bind the factory and record through a proxy
+class of your own, the pattern
+[When the target is a C extension](instrumentation-packages.md#when-the-target-is-a-c-extension)
+describes.
