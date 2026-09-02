@@ -342,7 +342,11 @@ With that config, `python -m wrapture manage.py runserver`, or the
 autowrapt injection path, gives request-tied tracing of an inherited
 application with no code changes: the observe entry defers like any
 other, the middleware lands when the application module is imported,
-and every request appears in the trace as one tree.
+and every request appears in the trace as one tree. A server whose
+startup cannot be wrapped from outside (mod_wsgi embedding the
+interpreter, gunicorn managing its own workers) applies the same
+config with a few lines of its own instead;
+[Manual setup](manual-setup.md) has the recipes.
 
 ## Framework instrumentation under the covers
 

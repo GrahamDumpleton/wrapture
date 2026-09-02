@@ -730,7 +730,10 @@ if source is not None:
 `WRAPTURE_CONFIG` environment variable, then `wrapture.toml` in the
 current directory, then a `[tool.wrapture]` table in
 `pyproject.toml`. The first source found wins outright; sources are
-never merged.
+never merged. Applying in code like this is a deployment posture of
+its own, with ordering and shutdown considerations under hosts such
+as mod_wsgi and gunicorn; [Manual setup](manual-setup.md) covers it
+in full.
 
 A complete file:
 

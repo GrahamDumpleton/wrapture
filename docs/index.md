@@ -144,6 +144,7 @@ asgi-tracing
 scheduled-tracing
 otel-export
 instrumentation-packages
+manual-setup
 ```
 
 ```{toctree}
