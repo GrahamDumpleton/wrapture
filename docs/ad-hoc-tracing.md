@@ -715,8 +715,8 @@ The dev-server example above still edits the application's entry
 point. A config file moves the same setup out of the code entirely:
 observe rules, the sink, capture and sampling, written as TOML and
 applied as one unit. This is the format the `python -m wrapture`
-runner below consumes, the autowrapt injection path (arriving with
-the injection layer) will consume, and code can apply directly:
+runner below consumes, the autowrapt injection path consumes, and
+code can apply directly:
 
 ```python
 import wrapture
