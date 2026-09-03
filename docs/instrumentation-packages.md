@@ -589,10 +589,16 @@ well where they will be read.
 Everything above is the contract for writing an instrumentation
 package; [wrapture-instrumentation](https://github.com/GrahamDumpleton/wrapture-instrumentation)
 is the package built on it, maintained alongside wrapture itself. It
-currently provides instrumentation for Flask (requests, views,
-lifecycle callbacks, error handling and template rendering as one
-tree per request) and Jinja2 (renders in all their forms, with the
-loading pipeline beneath them), with more targets to come.
+provides instrumentation for a growing range of targets across the
+categories an application is built from: web frameworks (Django,
+Flask, FastAPI, Starlette, each recording requests, views and
+failures as one tree per request), the servers that carry them
+(uvicorn, aiohttp.web, the werkzeug and wsgiref development servers,
+xmlrpc.server), outbound HTTP and RPC clients (requests, httpx,
+urllib3, aiohttp's client, gRPC and the standard library's own,
+propagating trace identity hop by hop), databases (SQLAlchemy and
+sqlite3, queries and transaction boundaries with parameters never
+recorded) and template engines (Jinja2).
 
 ```console
 $ pip install wrapture-instrumentation

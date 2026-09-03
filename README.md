@@ -137,17 +137,20 @@ Pointing at your own methods is the core of wrapture, but for common
 third-party packages the pointing has already been done. The companion
 [wrapture-instrumentation](https://github.com/GrahamDumpleton/wrapture-instrumentation)
 package provides ready-made instrumentation for popular Python packages
-such as web frameworks and template engines (currently Flask and Jinja2,
-with more targets to come), each recording a request or render as one
-structured tree:
+across the categories an application is built from: web frameworks
+(Django, Flask, FastAPI, Starlette), the servers that carry them
+(uvicorn, aiohttp), outbound HTTP clients (requests, httpx, urllib3 and
+the standard library's own), databases (SQLAlchemy, sqlite3), template
+engines (Jinja2) and RPC (gRPC, xmlrpc), each recording requests,
+queries and renders as structured trees that compose into one trace:
 
 ```console
 $ pip install wrapture-instrumentation
 ```
 
 Enabling a target is an `[[instrument]]` entry in `wrapture.toml`, or
-`wrapture.instrumentation("flask", "jinja2")` in code, and it composes
-with your own bindings in the same trace. The
+`wrapture.instrumentation("django", "requests")` in code, and it
+composes with your own bindings in the same trace. The
 [instrumentation packages](https://wrapture.readthedocs.io/en/latest/instrumentation-packages.html)
 page describes how these packages work and how to write one for a
 package not yet covered.
