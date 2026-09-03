@@ -438,9 +438,17 @@ flight, so beneath a leaf it records attached to the leaf, which is
 the detail a terminal node can still usefully carry. Two properties
 follow from nothing beneath the leaf being pushed: `annotate()` from
 inside the body lands on the leaf, since it is the innermost event
-in flight, and `trace_headers()` still propagates the tree's
-identity outward from it, so an internal HTTP call carries the trace
-on even though its own event is not recorded.
+in flight, and `trace_headers()` called from the leaf's own code
+still yields the tree's identity, so a probe of your own inside the
+leaf can propagate it deliberately. Packaged client instrumentation
+follows a stricter contract, though: propagation belongs to the
+level that records, so an instrumented HTTP client silenced beneath
+your leaf injects nothing, and a leaf that does not propagate at its
+own level sends no trace identity downstream (deliberately: the
+service beneath an opaque leaf is often one that would not
+understand the headers). The
+[instrumentation packages page](instrumentation-packages.md) states
+the contract.
 
 Unlike a `tree=True` decline, a leaf counts nothing on the bindings
 beneath it. The silence is structural, declared with the binding,

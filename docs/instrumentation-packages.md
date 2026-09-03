@@ -443,6 +443,28 @@ redacted and any `redact()` names the instrumentation's own setting
 adds on top. Offer a per-target setting (`leaf`, default true) so a
 user debugging the client itself can see its internals.
 
+One contract follows from leaves and clients composing: propagation
+belongs to the level that records. A client instrumentation that
+injects `wrapture.trace_headers()` into what it sends, and one that
+annotates its own event's keys, must gate both on its own binding
+having recorded, which is one check away:
+
+```python
+if wrapture.current_event(binding=client):
+    ...  # inject the trace identity, annotate the contract keys
+```
+
+Beneath another target's leaf the binding is silenced, behaviour
+still running but no event recorded, and the check comes back empty:
+nothing is injected, because the leaf either propagates at its own
+level (as every packaged client does for itself) or has chosen, by
+not injecting, that the service beneath it is not part of the trace,
+a third-party API that would not understand the headers and should
+not be handed the tree's identity. The annotate() half matters
+equally: without the gate a silenced client's keys would land on the
+leaf's event, since that is the innermost event in flight, replacing
+the leaf's own story with the client's.
+
 ## Registering the class
 
 The entry point group is `wrapture.instrumentation`, one entry per
