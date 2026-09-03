@@ -194,6 +194,25 @@ to every binding kind: the [ad-hoc tracing
 guide](ad-hoc-tracing.md#declining-a-whole-tree-tree) covers it on
 calls.
 
+The filter also serves a boundary the request modes do not speak
+for, a `block()` opened at a server's own seam: evaluate it
+explicitly with `matches()`, passing the fields valued as the event
+records them, and hand the bool to `block(when=..., tree=True)`,
+the same glob semantics with no middleware in sight:
+
+```python
+recording = wrapture.filter_requests(ignore={"path": ["/health", "/static/*"]})
+
+def handle(request):
+    fields = {"method": request.method, "path": request.path}
+
+    with wrapture.block(
+        "handle", category="server", data=fields,
+        when=recording.matches(fields), tree=True,
+    ):
+        ...
+```
+
 ## The on_request namespace
 
 Requests get their own behaviour namespace, named for the event kind

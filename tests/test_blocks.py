@@ -599,3 +599,112 @@ def test_block_takes_no_keyword_arguments_but_data() -> None:
 
     with pytest.raises(TypeError):
         wrapture.block("render", customer=42)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# when=, tree= and stack=
+# ---------------------------------------------------------------------------
+
+
+def test_when_false_records_nothing() -> None:
+    with timeline() as tape:
+        ran = False
+
+        with wrapture.block("declined", when=False):
+            ran = True
+            assert not wrapture.current_event()
+
+    assert ran
+    assert tape.all == []
+
+
+def test_when_false_without_tree_leaves_inner_roots() -> None:
+    with timeline() as tape:
+        with wrapture.block("declined", when=False):
+            leaf()
+
+    (call,) = tape.all
+    assert call.kind == "call"
+    assert call.depth == 0
+
+
+def test_when_false_with_tree_silences_the_body() -> None:
+    with timeline() as tape:
+        with wrapture.block("declined", when=False, tree=True):
+            leaf()
+
+            with wrapture.block("inner"):
+                pass
+
+    assert tape.all == []
+
+
+def test_after_a_tree_declined_block_recording_resumes() -> None:
+    with timeline() as tape:
+        with wrapture.block("declined", when=False, tree=True):
+            leaf()
+
+        leaf()
+
+    (call,) = tape.all
+    assert call.kind == "call"
+
+
+def test_a_filter_evaluated_by_hand_drives_when() -> None:
+    recording = wrapture.filter_requests(ignore={"path": ["/health", "/static/*"]})
+
+    def handle(method: str, path: str) -> None:
+        fields = {"method": method, "path": path}
+
+        with wrapture.block(
+            "request", data=fields, when=recording.matches(fields), tree=True
+        ):
+            leaf()
+
+    with timeline() as tape:
+        handle("GET", "/orders")
+        handle("GET", "/health")
+
+    request, call = tape.all
+    assert request.data["path"] == "/orders"
+    assert call.kind == "call"
+
+
+def test_when_refuses_anything_but_a_bool() -> None:
+    with pytest.raises(TypeError, match="matches"):
+        wrapture.block("guarded", when=lambda: True)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="plain bool"):
+        wrapture.block(
+            "guarded",
+            when=wrapture.filter_requests(ignore={"path": "/health"}),  # type: ignore[arg-type]
+        )
+
+
+def test_tree_refuses_anything_but_a_bool() -> None:
+    with pytest.raises(TypeError, match="tree"):
+        wrapture.block("guarded", tree="yes")  # type: ignore[arg-type]
+
+
+def test_stack_captures_how_control_reached_the_block() -> None:
+    def process() -> None:
+        with wrapture.block("staged", stack="caller"):
+            pass
+
+    with timeline() as tape:
+        process()
+
+    (event,) = tape.all
+    assert event.stack is not None
+
+    (frame,) = wrapture.stack_frames(event.stack)
+    assert frame.function.endswith("process")
+
+
+def test_stack_defaults_to_capturing_nothing() -> None:
+    with timeline() as tape:
+        with wrapture.block("plain"):
+            pass
+
+    (event,) = tape.all
+    assert event.stack is None

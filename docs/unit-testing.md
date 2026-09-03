@@ -1523,6 +1523,19 @@ nests under it. Like a log statement, the marker is embedded by the
 author and inert when nothing listens: with no sinks active, nothing
 is built at all, so it can stay in production code permanently.
 
+Three options carried over from `binding()` complete the surface.
+`when=` takes a plain bool deciding whether this entry records, the
+body running either way; unlike a binding, declared once and
+consulted per call, a block is entered where the decision can be
+made, so the bool is computed beforehand (a `filter_requests()`
+filter is evaluated by hand with its `matches()` method).
+`tree=True` extends a declined entry to everything beneath it for
+the body's whole extent, so an ignored request's inner operations
+vanish with it rather than surfacing as parentless roots. And
+`stack=` captures how control reached the block, priced exactly as
+[on a binding](#capturing-the-call-stack): `"caller"`, a frame
+count, or `"full"`, resolved with `stack_frames()`.
+
 Two distinct uses matter in tests. The first is assertable phases in
 application code: once the code declares "this is the render phase",
 a test asserts on the phase instead of reverse-engineering it from

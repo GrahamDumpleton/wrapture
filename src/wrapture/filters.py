@@ -68,6 +68,14 @@ class RequestFilter:
     `matches()` with the fields of each request, and every other
     binding kind refuses it, since the fields it names exist only on
     a request.
+
+    `matches()` is equally the supported door for evaluating the
+    filter explicitly. A hand-written boundary the request modes do
+    not speak for, a block() opened at a server's own seam say,
+    computes the field values as its event records them, asks
+    `matches()` for the decision, and hands the resulting bool to
+    `block(when=..., tree=True)`, keeping the glob semantics
+    identical to every when= that takes the filter directly.
     """
 
     __slots__ = ("_accept", "_ignore")
@@ -226,6 +234,12 @@ def filter_requests(
     other binding kind refuses it, since the fields it names exist
     only on a request. An observe entry's `requests` table is this
     call spelt as TOML, with `tree=True` implied.
+
+    Where the boundary is not a request mode at all, a hand-written
+    block() at a server's own seam, evaluate the filter explicitly
+    with `matches()`, passing the fields valued as the event records
+    them, and hand the bool to `block(when=..., tree=True)`; see
+    RequestFilter.
     """
 
     if accept is None and ignore is None:

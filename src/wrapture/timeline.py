@@ -53,6 +53,8 @@ from .sinks import (
     _record_event,
     _scoped_sinks,
 )
+from .stacks import _capture as _capture_stack
+from .stacks import _resolve_depth
 
 
 @runtime_checkable
@@ -1227,6 +1229,9 @@ class Block:
         joined: Any = None,
         category: str | None = None,
         leaf: bool = False,
+        when: bool = True,
+        tree: bool = False,
+        stack: int | None = None,
     ) -> None:
         if not isinstance(name, str) or not name:
             raise TypeError(f"block() needs a non-empty name string, got {name!r}")
@@ -1237,6 +1242,9 @@ class Block:
         self._joined = joined
         self._category = _check_category(category)
         self._leaf = _check_leaf(leaf)
+        self._when = when
+        self._tree = tree
+        self._stack_depth = stack
 
         self._event: Event | None = None
         self._token: contextvars.Token[tuple[Event, ...]] | None = None
@@ -1254,11 +1262,20 @@ class Block:
         if not active or _in_recorder.get() or _suppressed.get():
             return None
 
-        if self._event is not None:
+        if self._event is not None or self._silence is not None:
             raise RuntimeError(
                 "this block is already active; each with statement needs"
                 " its own block()"
             )
+
+        # A declined entry records nothing; with tree=True nothing that
+        # runs inside the body records either, where by default the
+        # decline skips this event only, as when= does on a binding.
+
+        if not self._when:
+            if self._tree:
+                self._silence = _silence(_SILENCE_ALL)
+            return None
 
         # Synthesise the path from the caller's frame, so the event
         # locates its call site the way a bound call would.
@@ -1276,6 +1293,9 @@ class Block:
         )
         if self._data:
             event.data.update(self._data)
+
+        if self._stack_depth is not None:
+            event.stack = _capture_stack(self._stack_depth)
 
         # A joined identity rides on the event before it is pushed, so
         # the recording path treats it exactly as a request boundary
@@ -1331,6 +1351,12 @@ class Block:
     ) -> None:
         event = self._event
         if event is None:
+            # A declined tree=True entry set only the silence; lift it.
+
+            silence = self._silence
+            self._silence = None
+            if silence is not None:
+                _suppressed.reset(silence)
             return
 
         # Close with duration and outcome, then restore the enclosing
@@ -1406,6 +1432,9 @@ def block(
     joins: Mapping[str, str] | None = None,
     category: str | None = None,
     leaf: bool = False,
+    when: bool = True,
+    tree: bool = False,
+    stack: int | str | None = None,
 ) -> Block:
     """Declare the enclosed stretch of code as one recorded event.
 
@@ -1459,6 +1488,36 @@ def block(
     a hand-written call to another service whose entry point is not
     a bindable attribute.
 
+    `when=` decides whether this entry records: a plain bool, since
+    the block is entered where the decision can be made, unlike a
+    binding declared once and consulted per call. False records
+    nothing, no event and no header parsing, while the body still
+    runs exactly as it would otherwise. Compute the decision before
+    the block; a filter_requests() filter is evaluated by hand with
+    its matches() method, over the same field values the block's
+    data= seeds:
+
+        wanted = recording.matches({"method": method, "path": path})
+
+        with block("handle", data=fields, when=wanted, tree=True):
+            ...
+
+    `tree=` extends a declined entry to everything beneath it: by
+    default a decline skips this block's event only, and whatever
+    records inside the body becomes a root of its own, where with
+    tree=True nothing records for the body's whole extent, the form
+    an ignored request wants so its inner operations vanish along
+    with it. It acts only when when= is False, and unlike on a
+    binding it is accepted alongside the always-record default,
+    since a computed when= passes both answers through the one call
+    site.
+
+    `stack=` captures how control reached the block, priced exactly
+    as on a binding: "caller" for just the calling frame, a frame
+    count, or "full" for the whole stack, resolved from event.stack
+    with stack_frames(). The default None captures nothing and costs
+    nothing.
+
     Like a log statement, a marker left permanently in code is inert
     when nothing is listening: with no sinks active, nothing is built
     at all. The context manager yields None; code inside the block
@@ -1466,13 +1525,26 @@ def block(
     current_event().
     """
 
+    if not isinstance(when, bool):
+        raise TypeError(
+            f"block() when= takes a plain bool, got {when!r}; compute the"
+            f" decision before entering the block, evaluating a"
+            f" filter_requests() filter with its matches() method"
+        )
+
+    if not isinstance(tree, bool):
+        raise TypeError(f"block() tree= takes a bool, got {tree!r}")
+
     return Block(
         name,
         seed_data(data),
         _link_entries(links),
-        joined=_join_context(joins),
+        joined=_join_context(joins) if when else None,
         category=category,
         leaf=leaf,
+        when=when,
+        tree=tree,
+        stack=_resolve_depth(stack),
     )
 
 

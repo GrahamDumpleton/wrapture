@@ -673,7 +673,11 @@ surface, four pieces that read as one:
   `"block"` event, children nesting under it, the body's wall time as
   its duration, an escaping exception recorded and still propagated.
   Like a log statement, it is inert when nothing listens, so the
-  marker stays in production code permanently.
+  marker stays in production code permanently. `when=` (a plain
+  bool, computed before entry), `tree=` (a declined entry silences
+  the whole body) and `stack=` mirror their `binding()`
+  counterparts, so a hand-written boundary filters and explains
+  itself like a bound one.
 - **`wrapture.annotate(**data)`** attaches what the code knows and no
   generic capture can infer (a row count, a cache hit) to the
   in-flight event, and is unconditionally safe to call. The number an
