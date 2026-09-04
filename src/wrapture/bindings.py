@@ -57,8 +57,12 @@ from .capture import (
 from .eventlogs import EventLog
 from .events import (
     Event,
+    Resolver,
     SignatureInfo,
-    _check_category,
+    _check_category_option,
+    _check_label_option,
+    _resolve_category,
+    _resolve_label,
     cached_signature_info,
     normalized_arguments,
 )
@@ -87,18 +91,19 @@ from .timeline import (
     _SILENCE_ALL,
     _SILENCE_SPANS,
     _capture_result,
+    _check_data_option,
     _check_leaf,
     _check_tree,
     _current_tape,
     _pop,
     _push,
+    _resolve_data,
     _resume,
     _silence,
     _stack,
     _suppressed,
     _suspend,
     _timelines_active,
-    seed_data,
 )
 from .values import (
     check_mapping,
@@ -765,7 +770,7 @@ class Binding:
         self,
         target: Any,
         *attrs: str,
-        label: str | None = None,
+        label: str | Resolver | None = None,
         mode: str | None = None,
         missing_ok: bool = False,
         capture: CapturePolicy | str | None = None,
@@ -778,8 +783,8 @@ class Binding:
         | None = None,
         tree: bool = False,
         leaf: bool = False,
-        category: str | None = None,
-        data: Mapping[str, Any] | None = None,
+        category: str | Resolver | None = None,
+        data: Mapping[str, Any] | Resolver | None = None,
         strict: bool = True,
         attr: str | None = None,
         item: Any = MISSING,
@@ -911,20 +916,36 @@ class Binding:
         else:
             self._path = _derive_path(target, name)
 
+        # A request middleware takes its name, kind and tags from the
+        # binding once, at construction, and its when= sees a request
+        # rather than a call, so the per-operation resolvers have no
+        # call shape to be handed there.
+
+        if mode in ("wsgi", "asgi") and any(
+            callable(option) for option in (label, category, data)
+        ):
+            raise TypeError(
+                f"a {mode} binding takes a static label=, category= and"
+                f" data=; a callable form applies to call and attribute"
+                f" bindings only"
+            )
+
         # The label is only ever an assigned name; when none was given
         # the events carry label None and every consumer falls back to
         # the path, so a name with a colon in it is always the real
         # module:qualname location. The display string is what error
-        # messages call the binding either way.
+        # messages call the binding either way, and what identifies it
+        # to find_binding(): a resolver names events, not the binding,
+        # so a binding with one goes by its path.
 
-        self._label = label
-        self._display = label or self._path
+        self._label = _check_label_option(label)
+        self._display = label if isinstance(label, str) else self._path
 
         # Static data every event from this binding starts with, merged
         # in at enter ahead of anything annotate() adds inside the
         # scope, so dynamic annotation wins over a declared tag.
 
-        self._data = seed_data(data)
+        self._data = _check_data_option(data)
 
         # The mapping whose content a mapping binding substitutes: the
         # object at the location, or the entry an item= slot names.
@@ -962,7 +983,22 @@ class Binding:
         # category names the kind of operation for consumers.
 
         self._leaf = _check_leaf(leaf)
-        self._category = _check_category(category)
+        self._category = _check_category_option(category)
+
+        # Whether any of the label, category or data is a resolver
+        # consulted per operation; the static answer is settled here so
+        # a recorded operation on a static binding costs one attribute
+        # read, and it is also what a resolver stands for when it is
+        # not consulted.
+
+        self._dynamic = any(
+            callable(option) for option in (self._label, self._category, self._data)
+        )
+        self._static: tuple[str | None, str | None, dict[str, Any]] = (
+            self._label if isinstance(self._label, str) else None,
+            self._category if isinstance(self._category, str) else None,
+            self._data if isinstance(self._data, dict) else {},
+        )
 
         # Whether a call that behaviour answers without reaching the
         # real callable is still checked against its signature.
@@ -1114,8 +1150,9 @@ class Binding:
         return self._path
 
     @property
-    def category(self) -> str | None:
-        """The category declared for this binding's events, or None."""
+    def category(self) -> str | Resolver | None:
+        """The category declared for this binding's events, or None; a
+        resolver given in place of a name is returned as given."""
 
         return self._category
 
@@ -1127,12 +1164,13 @@ class Binding:
         return self._leaf
 
     @property
-    def label(self) -> str | None:
+    def label(self) -> str | Resolver | None:
         """The assigned display name, or None when none was given.
 
         Events carry this verbatim; consumers fall back to the path
         when it is None, so a derived module:qualname name is never
-        respelled into a label.
+        respelled into a label. A resolver given in place of a name is
+        returned as given: it names each event, not the binding.
         """
 
         return self._label
@@ -2136,11 +2174,17 @@ class Binding:
 
         level = _level_of(policy)
 
+        # The private event a watched phase sees on an unrecorded call
+        # has no listener, and the resolvers are consulted only for a
+        # recorded operation, so it carries the static declarations.
+
+        label, category, data = self._declared(instance, args, kwargs, bool(active))
+
         event = Event(
             "call",
             self._path,
-            label=self._label,
-            category=self._category,
+            label=label,
+            category=category,
             instance=instance,
             binding=self,
             capture=level,
@@ -2148,8 +2192,8 @@ class Binding:
             phase=self._phase_of(phase),
         )
 
-        if self._data:
-            event.data.update(self._data)
+        if data:
+            event.data.update(data)
 
         if self._stack_depth is not None:
             event.stack = _capture_stack(self._stack_depth)
@@ -2190,6 +2234,34 @@ class Binding:
                 }
 
         return event
+
+    def _declared(
+        self,
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        recording: bool,
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        """The label, category and seed data for one operation.
+
+        Static declarations come back as they are. A resolver is
+        consulted with the operation's call shape, the same
+        (instance, args, kwargs) the when= predicate sees, after when=
+        has accepted the operation and under the recorder guard, so
+        observed code it calls passes through; if it raises, the caller
+        sees the exception. For an operation that is not being
+        recorded (the private event a watched phase is shown) a
+        resolver is not consulted and stands for nothing.
+        """
+
+        if not self._dynamic or not recording:
+            return self._static
+
+        return (
+            _resolve_label(self._label, instance, args, kwargs),
+            _resolve_category(self._category, instance, args, kwargs),
+            _resolve_data(self._data, instance, args, kwargs),
+        )
 
     # -- behaviour phases -----------------------------------------------------
 
@@ -2676,7 +2748,7 @@ class BindingGroup:
 def binding(
     target: Any,
     *attrs: str,
-    label: str | None = None,
+    label: str | Resolver | None = None,
     mode: str | None = None,
     missing_ok: bool = False,
     capture: CapturePolicy | str | None = None,
@@ -2689,8 +2761,8 @@ def binding(
     | None = None,
     tree: bool = False,
     leaf: bool = False,
-    category: str | None = None,
-    data: Mapping[str, Any] | None = None,
+    category: str | Resolver | None = None,
+    data: Mapping[str, Any] | Resolver | None = None,
     strict: bool = True,
     attr: str | None = None,
     item: Any = MISSING,
@@ -2815,9 +2887,10 @@ def binding(
     (`of_category()`, `where(category=)`, `current_event(category=)`)
     and the OpenTelemetry export (the span kind and, with the
     category's data-key contract, its semantic-convention attributes)
-    to select on. Like `leaf=` it is a declaration about the target,
-    never changed afterwards; the two are usually declared together
-    on an outbound client, but neither implies the other.
+    to select on. It is a declaration about the target, decided
+    before the event exists and never changed afterwards; it and
+    `leaf=` are usually declared together on an outbound client, but
+    neither implies the other.
 
     `data=` seeds every event the binding records with static data, a
     mapping of string keys to scalars (str, int, float, bool) or flat
@@ -2830,6 +2903,31 @@ def binding(
     middleware's own request fields are written after the seed, so
     the request data-key contract's reserved keys cannot be
     overridden from a declaration.
+
+    `label=`, `category=` and `data=` each also accept, in place of
+    the value, a callable with the `when=` predicate's signature,
+    `fn(instance, args, kwargs)`, consulted per operation to decide
+    that value for the one event: a resolver. The three are consulted
+    together, after `when=` has accepted the operation and before its
+    event is built, so a declined operation consults none of them,
+    behaviour handlers see the resolved identity through
+    `current_event()`, and nothing runs while nothing listens. They
+    run under the recorder guard, so observed code they touch passes
+    through, and if one raises the caller sees the exception. A
+    label resolver returns the event's name or None for the path; a
+    category resolver returns the event's kind, expected to be one of
+    the categories above and always a low-cardinality, repeatable
+    word, or None; a data resolver returns a mapping in the shape
+    `data=` takes, or None. This is for one seam that fronts several
+    kinds of operation, an SDK client whose one method reaches
+    storage, queues and functions, where the honest declaration is a
+    rule rather than a value. A resolved label names the event, not
+    the binding, which `find_binding()` and error messages then know
+    by its path; keep it low-cardinality, the way a request's route
+    is, since it becomes the name every renderer and export shows,
+    and put identifiers in data. A wsgi or asgi binding takes the
+    static forms only.
+
 
     `strict=` (default True) checks each call that behaviour answers
     without reaching the real callable (a phase with a terminal:

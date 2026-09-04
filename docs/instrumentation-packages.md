@@ -406,8 +406,8 @@ An instrumentation knows two structural things about its target
 that a config author cannot be asked to work out: whether the
 target's operations are worth subdividing, and what kind of
 operations they are. Both are declared on the binding (or on the
-`observed()` callable or `block()` the package substitutes), never
-decided per call:
+`observed()` callable or `block()` the package substitutes), decided
+before any event exists rather than during the call:
 
 ```python
 client = wrapture.binding(module.Client, "request", leaf=True, category="external")
@@ -442,6 +442,22 @@ it the way the request middlewares do, the built-in sensitive names
 redacted and any `redact()` names the instrumentation's own setting
 adds on top. Offer a per-target setting (`leaf`, default true) so a
 user debugging the client itself can see its internals.
+
+One seam sometimes fronts several kinds of operation: an SDK
+client's single dispatch method reaches object storage, a queue and
+a function service depending on the client it was called on, and it
+can only be bound once. There the honest declaration is a rule, and
+`category=`, `label=` and `data=` each accept a callable with the
+`when=` signature in place of the value, consulted per operation
+after `when=` has accepted it and before the event is built, so the
+category, the low-cardinality name (`s3/GetObject`) and the tags the
+arguments already say are all decided from the call and a behaviour
+handler then only annotates what the outcome says. The [ad-hoc
+tracing guide](ad-hoc-tracing.md#deciding-the-name-kind-and-tags-per-operation-resolvers)
+has the contract. The category a resolver answers should still be
+one of the words above, and the label repeatable, never an
+identifier.
+
 
 One contract follows from leaves and clients composing: propagation
 belongs to the level that records. A client instrumentation that

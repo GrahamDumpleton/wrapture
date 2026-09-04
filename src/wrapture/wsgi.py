@@ -461,9 +461,15 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
     ) -> None:
         super().__init__(application)
 
+        # A mode binding is refused a resolver at construction, so its
+        # label, category and data are the static forms; the checks
+        # here say so to the type checker, and hold for a call binding
+        # handed over by a package building the middleware itself.
+
         if binding is not None:
             path = binding._path
-            label = label or binding._label
+            if label is None and isinstance(binding._label, str):
+                label = binding._label
         else:
             path = _describe(application)
 
@@ -481,11 +487,20 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         self._self_tree = _check_tree(tree, self._self_when)
         self._self_leaf = _check_leaf(leaf) or (binding._leaf if binding else False)
         self._self_category = _check_category(category)
-        if self._self_category is None and binding is not None:
+        if (
+            self._self_category is None
+            and binding is not None
+            and isinstance(binding._category, str)
+        ):
             self._self_category = binding._category
+
         self._self_capture_args = _resolve_policy(capture_args)
         self._self_capture_result = _resolve_policy(capture_result)
-        self._self_data = seed_data(data) or (binding._data if binding else {})
+        self._self_data = seed_data(data) or (
+            binding._data
+            if binding is not None and isinstance(binding._data, dict)
+            else {}
+        )
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Any:
         binding = self._self_wrapture_binding

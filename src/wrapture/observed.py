@@ -38,7 +38,7 @@ import inspect
 import time
 import warnings
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, cast, overload
 
 from wrapt import BoundFunctionWrapper, FunctionWrapper, wrapper_chain
@@ -69,8 +69,12 @@ from .capture import (
 from .eventlogs import EventLog
 from .events import (
     Event,
+    Resolver,
     SignatureInfo,
-    _check_category,
+    _check_category_option,
+    _check_label_option,
+    _resolve_category,
+    _resolve_label,
     cached_signature_info,
     normalized_arguments,
 )
@@ -90,11 +94,13 @@ from .timeline import (
     _SILENCE_ALL,
     _SILENCE_SPANS,
     _capture_result,
+    _check_data_option,
     _check_leaf,
     _check_tree,
     _current_tape,
     _pop,
     _push,
+    _resolve_data,
     _silence,
     _stack,
     _suppressed,
@@ -157,14 +163,15 @@ class ObservedCallable(
         wrapped: Callable[..., Any],
         *,
         path: str,
-        label: str | None,
+        label: str | Resolver | None,
         capture_args: CapturePolicy | None,
         capture_result: CapturePolicy | None,
         stack: int | None,
         when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None,
         tree: bool = False,
         leaf: bool = False,
-        category: str | None = None,
+        category: str | Resolver | None = None,
+        data: Mapping[str, Any] | Resolver | None = None,
         signature: Any = None,
         convention: str | None = None,
         precheck: Callable[
@@ -185,9 +192,14 @@ class ObservedCallable(
 
         super().__init__(wrapped, invoke, signature=signature, convention=convention)
 
+        # The display string is what error messages call the proxy and
+        # what identifies it to find_binding() and to a later observed()
+        # of the same callable: a resolver names events, not the proxy,
+        # so a proxy with one goes by its path.
+
         self._self_path = path
-        self._self_label = label
-        self._self_display = label or path
+        self._self_label = _check_label_option(label)
+        self._self_display = label if isinstance(label, str) else path
         self._self_precheck = precheck
         self._self_capture_args = capture_args
         self._self_capture_result = capture_result
@@ -195,8 +207,23 @@ class ObservedCallable(
         self._self_when = when
         self._self_tree = _check_tree(tree, when)
         self._self_leaf = _check_leaf(leaf)
-        self._self_category = _check_category(category)
+        self._self_category = _check_category_option(category)
+        self._self_data = _check_data_option(data)
         self._self_signatures: dict[type, SignatureInfo] = {}
+
+        # Whether any of the label, category or data is a resolver
+        # consulted per call; the static answer is settled here so a
+        # recorded call on a static proxy costs one attribute read.
+
+        self._self_dynamic = any(
+            callable(option)
+            for option in (self._self_label, self._self_category, self._self_data)
+        )
+        self._self_static: tuple[str | None, str | None, dict[str, Any]] = (
+            self._self_label if isinstance(self._self_label, str) else None,
+            self._self_category if isinstance(self._self_category, str) else None,
+            self._self_data if isinstance(self._self_data, dict) else {},
+        )
 
         self._self_suspended = False
         self._self_suspended_calls = 0
@@ -226,8 +253,9 @@ class ObservedCallable(
         return self._self_path
 
     @property
-    def category(self) -> str | None:
-        """The category declared for this observation's events, or None."""
+    def category(self) -> str | Resolver | None:
+        """The category declared for this observation's events, or
+        None; a resolver given in place of a name is returned as given."""
 
         return self._self_category
 
@@ -239,11 +267,30 @@ class ObservedCallable(
         return self._self_leaf
 
     @property
-    def label(self) -> str | None:
+    def label(self) -> str | Resolver | None:
         """The assigned display name, or None when none was given, in
-        which case events fall back to the path."""
+        which case events fall back to the path. A resolver given in
+        place of a name is returned as given: it names each event, not
+        the proxy."""
 
         return self._self_label
+
+    def _declared(
+        self, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        """The label, category and seed data for one call: the static
+        declarations, or what each resolver answers for the call shape
+        the when= predicate sees, consulted after when= has accepted
+        the call and under the recorder guard."""
+
+        if not self._self_dynamic:
+            return self._self_static
+
+        return (
+            _resolve_label(self._self_label, instance, args, kwargs),
+            _resolve_category(self._self_category, instance, args, kwargs),
+            _resolve_data(self._self_data, instance, args, kwargs),
+        )
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -339,15 +386,20 @@ class ObservedCallable(
             policy = _required_policy(active, "capture_args")
         level = _level_of(policy)
 
+        label, category, data = self._declared(instance, args, kwargs)
+
         event = Event(
             "call",
             self._self_path,
-            label=self._self_label,
-            category=self._self_category,
+            label=label,
+            category=category,
             instance=instance,
             binding=self,
             capture=level,
         )
+
+        if data:
+            event.data.update(data)
 
         if self._self_stack_depth is not None:
             event.stack = _capture_stack(self._self_stack_depth)
@@ -508,7 +560,7 @@ class ObservedCallable(
 def observed(
     fn: Callable[..., Any],
     *,
-    label: str | None = None,
+    label: str | Resolver | None = None,
     capture: CapturePolicy | str | None = None,
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
@@ -516,7 +568,8 @@ def observed(
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
     leaf: bool = False,
-    category: str | None = None,
+    category: str | Resolver | None = None,
+    data: Mapping[str, Any] | Resolver | None = None,
 ) -> ObservedCallable: ...
 
 
@@ -524,7 +577,7 @@ def observed(
 def observed(
     fn: None = None,
     *,
-    label: str | None = None,
+    label: str | Resolver | None = None,
     capture: CapturePolicy | str | None = None,
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
@@ -532,14 +585,15 @@ def observed(
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
     leaf: bool = False,
-    category: str | None = None,
+    category: str | Resolver | None = None,
+    data: Mapping[str, Any] | Resolver | None = None,
 ) -> Callable[[Callable[..., Any]], ObservedCallable]: ...
 
 
 def observed(
     fn: Callable[..., Any] | None = None,
     *,
-    label: str | None = None,
+    label: str | Resolver | None = None,
     capture: CapturePolicy | str | None = None,
     capture_args: CapturePolicy | str | None = None,
     capture_result: CapturePolicy | str | None = None,
@@ -547,7 +601,8 @@ def observed(
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
     leaf: bool = False,
-    category: str | None = None,
+    category: str | Resolver | None = None,
+    data: Mapping[str, Any] | Resolver | None = None,
 ) -> ObservedCallable | Callable[[Callable[..., Any]], ObservedCallable]:
     """Wrap a bare callable so its calls record, wherever it ends up.
 
@@ -580,7 +635,13 @@ def observed(
     leaf records its own event and silences the spans beneath it,
     and a category names the kind of operation; for an
     instrumentation package they are often the convenient place to
-    say so, on the callable it substitutes at registration.
+    say so, on the callable it substitutes at registration. `data=`
+    seeds every event with the same mapping shape `binding(data=)`
+    takes. `label=`, `category=` and `data=` each also accept a
+    resolver, a callable with `when=`'s signature consulted per call
+    after `when=` has accepted it, exactly as on a binding; a proxy
+    with a label resolver is identified by its path.
+
 
     The assigned label, or the derived module:qualname path when no
     label is given, identifies the observation, and that is what
@@ -625,6 +686,7 @@ def observed(
                 tree=tree,
                 leaf=leaf,
                 category=category,
+                data=data,
             )
 
         return apply
@@ -668,18 +730,17 @@ def observed(
     # __class__ transparency, since only a layer whose real type is
     # ObservedCallable matches.
 
-    identity = label or path
+    identity = label if isinstance(label, str) else path
 
     for layer in wrapper_chain(fn):
-        if isinstance(layer, ObservedCallable) and (layer.label or layer.path) == (
-            identity
-        ):
+        if isinstance(layer, ObservedCallable) and layer._self_display == identity:
             return cast(ObservedCallable, fn)
 
     return ObservedCallable(
         fn,
         path=path,
         label=label,
+        data=data,
         capture_args=_resolve_policy(
             capture_args if capture_args is not None else capture
         ),

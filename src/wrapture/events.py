@@ -19,7 +19,7 @@ import inspect
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 from wrapt import MISSING
 
@@ -64,6 +64,87 @@ def _check_category(category: Any) -> str | None:
         )
 
     return category
+
+
+# A declaration decided per operation: label=, category= and data=
+# each accept, in place of their static value, a callable with the
+# when= predicate's signature, consulted for each recorded operation
+# after when= has accepted it and before the event is built.
+
+Resolver = Callable[[Any, tuple[Any, ...], dict[str, Any]], Any]
+
+
+def _check_label_option(label: Any) -> str | Resolver | None:
+    """Validate a label= option: None, a non-empty string, or a
+    resolver called per operation."""
+
+    if label is None:
+        return None
+
+    if callable(label):
+        return cast(Resolver, label)
+
+    if not isinstance(label, str) or not label:
+        raise TypeError(
+            f"label must be a non-empty string or a callable taking"
+            f" (instance, args, kwargs), got {label!r}"
+        )
+
+    return label
+
+
+def _check_category_option(category: Any) -> str | Resolver | None:
+    """Validate a category= option on a binding or observed callable:
+    None, one of CATEGORIES, or a resolver called per operation."""
+
+    if callable(category):
+        return cast(Resolver, category)
+
+    return _check_category(category)
+
+
+def _resolve_label(label: str | Resolver | None, *call: Any) -> str | None:
+    """The label for one operation: the static value, or what the
+    resolver answers for the call, None meaning no label (the event
+    shows its path) and anything but a string refused."""
+
+    if label is None or isinstance(label, str):
+        return label
+
+    answer = label(*call)
+
+    if answer is None:
+        return None
+
+    if not isinstance(answer, str) or not answer:
+        raise TypeError(
+            f"a label resolver must return a non-empty string or None, got {answer!r}"
+        )
+
+    return answer
+
+
+def _resolve_category(category: str | Resolver | None, *call: Any) -> str | None:
+    """The category for one operation: the static value, or what the
+    resolver answers for the call. A resolver's answer is any string,
+    the fixed vocabulary being what consumers understand rather than
+    what is enforced here; None means no category."""
+
+    if category is None or isinstance(category, str):
+        return category
+
+    answer = category(*call)
+
+    if answer is None:
+        return None
+
+    if not isinstance(answer, str) or not answer:
+        raise TypeError(
+            f"a category resolver must return a non-empty string or None,"
+            f" got {answer!r}"
+        )
+
+    return answer
 
 
 @dataclass(frozen=True)
@@ -139,9 +220,10 @@ class Event:
     label: str | None = None
 
     # What kind of operation this is, when the binding declared one:
-    # one of CATEGORIES, or None for an ordinary event. A structural
-    # fact fixed at declaration, never set after the event is built;
-    # what sinks, tape queries and the OTel export select on.
+    # one of CATEGORIES, or None for an ordinary event. Decided at the
+    # declaration, or by its resolver before the event is built, and
+    # never set afterwards; what sinks, tape queries and the OTel
+    # export select on.
 
     category: str | None = None
     instance: Any = None
