@@ -1763,7 +1763,9 @@ Most of the mapping writes itself, because the two models are close:
 - `"request"` events become SERVER spans named access-log style
   (`GET /quote/widget`), carrying the method, path and status code
   under their semantic-convention attribute names; `"call"` events
-  become INTERNAL spans named by the binding, and `"block"` events
+  become INTERNAL spans named by the binding, or, for a categorised
+  call, by its contract keys (`SELECT orders`, `send notifications`,
+  `inventory.Counter/Count`), and `"block"` events
   become INTERNAL spans named by the block, which is how an embedded
   `with wrapture.block("render-invoice"):` shows up as a span with
   no OTel API in the code. Attribute events are skipped as too
