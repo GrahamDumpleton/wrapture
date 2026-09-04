@@ -355,3 +355,27 @@ def test_capture_query_records_the_marker_wholesale_when_it_cannot_process() -> 
         raise RuntimeError("no")
 
     assert capture_query("a=1&b=2", broken) == "<redacted>"
+
+
+def test_a_call_through_the_class_normalises_its_arguments_like_an_instance_call() -> (
+    None
+):
+    # Gateway.charge(gateway, 5) and gateway.charge(5) bind the same
+    # way: the wrapt partial the class-call path hands over reports a
+    # signature without self (wrapt 2.4.1), so self is never mistaken
+    # for the first parameter.
+
+    class Gateway:
+        def charge(self, amount: int, currency: str = "USD") -> str:
+            return f"ch_{amount}"
+
+    charge = binding(Gateway, "charge")
+    gateway = Gateway()
+
+    with timeline(charge) as tape:
+        gateway.charge(5)
+        Gateway.charge(gateway, 5)
+
+    direct, through_class = tape.all
+    assert direct.arguments == {"amount": 5, "currency": "USD"}
+    assert through_class.arguments == direct.arguments

@@ -4,7 +4,7 @@
 
 wrapture is a Python library for attaching bindings to arbitrary Python call
 sites, without modifying the code being observed, for use in monkey patching,
-testing and tracing. It builds on wrapt (2.4.0+). See README.md
+testing and tracing. It builds on wrapt (2.4.1rc1+). See README.md
 for the project goals.
 
 The package uses a src layout: the code lives in src/wrapture/.

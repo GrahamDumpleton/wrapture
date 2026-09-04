@@ -123,6 +123,37 @@ def test_a_var_args_target_accepts_anything() -> None:
         assert make().anything(1, 2, x=3) == "stub"
 
 
+def test_a_call_through_the_class_is_checked_against_the_bound_signature() -> None:
+    # Calling Gateway.charge(gateway, 1) rather than gateway.charge(1)
+    # hands the wrapper a wrapt partial with the instance bound, whose
+    # signature (from wrapt 2.4.1) no longer lists self, so the check
+    # fits the call as the instance-call path does and still rejects
+    # what does not fit.
+
+    seen: list[tuple[Any, Any]] = []
+
+    def handler(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> str:
+        seen.append((args, kwargs))
+        return "fabricated"
+
+    charge = binding(Gateway, "charge")
+    charge.on_call.decorates(handler)
+
+    with charge:
+        gateway = Gateway()
+        through_class: Any = Gateway.charge
+        assert through_class(gateway, 1) == "fabricated"
+        assert through_class(gateway, 1, currency="EUR") == "fabricated"
+
+        with pytest.raises(TypeError, match=r"Gateway.charge \(stubbed\): .*bogus"):
+            through_class(gateway, 1, bogus=4)
+
+        with pytest.raises(TypeError, match="stubbed"):
+            through_class(gateway)
+
+    assert seen == [((1,), {}), ((1,), {"currency": "EUR"})]
+
+
 def test_a_target_with_no_signature_is_not_checked() -> None:
     import types
 
