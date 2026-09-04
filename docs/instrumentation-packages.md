@@ -461,13 +461,13 @@ identifier.
 
 One contract follows from leaves and clients composing: propagation
 belongs to the level that records. A client instrumentation that
-injects `wrapture.trace_headers()` into what it sends, and one that
-annotates its own event's keys, must gate both on its own binding
-having recorded, which is one check away:
+injects `wrapture.trace_headers()` into what it sends must gate the
+injection on its own binding having recorded, which is one check
+away:
 
 ```python
 if wrapture.current_event(binding=client):
-    ...  # inject the trace identity, annotate the contract keys
+    ...  # inject the trace identity
 ```
 
 Beneath another target's leaf the binding is silenced, behaviour
@@ -476,10 +476,10 @@ nothing is injected, because the leaf either propagates at its own
 level (as every packaged client does for itself) or has chosen, by
 not injecting, that the service beneath it is not part of the trace,
 a third-party API that would not understand the headers and should
-not be handed the tree's identity. The annotate() half matters
-equally: without the gate a silenced client's keys would land on the
-leaf's event, since that is the innermost event in flight, replacing
-the leaf's own story with the client's.
+not be handed the tree's identity. The `annotate()` half needs no
+gate: inside a silenced call an unaimed `annotate()` lands nowhere,
+never on the leaf's event, so the leaf's own story stands whatever
+the client beneath it says about itself.
 
 ## Registering the class
 

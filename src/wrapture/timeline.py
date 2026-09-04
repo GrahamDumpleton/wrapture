@@ -700,6 +700,44 @@ def _silence(level: int) -> contextvars.Token[int]:
     return _suppressed.set(max(level, _suppressed.get()))
 
 
+# The depth of the in-progress stack beneath which the innermost
+# operation runs unrecorded: a call, access, block or request that
+# would have been a span, silenced beneath a leaf or declined per
+# call by when=. Zero when nothing is hidden. Raised for the extent
+# of such an operation by each producer's unrecorded path (a
+# generator's iteration and a coroutine's await included) and read
+# by current_event() alone: an unaimed annotate() or note_exception()
+# from inside it has no event to land on, since the span that would
+# have been innermost does not exist, while aimed lookups still reach
+# the enclosing events. A depth rather than a flag so that an event
+# recorded beneath a declined call (a when= decline without tree=)
+# is the innermost again for its own extent. A leaf's own body is
+# not hidden, its handler and the code it runs directly annotate the
+# leaf; nor is a when=False binding's, which never records by
+# declaration and is transparent.
+
+_hidden: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "wrapture_hidden", default=0
+)
+
+
+def _hide() -> contextvars.Token[int] | None:
+    """Mark the innermost operation as unrecorded for the caller's
+    extent; None when nothing is in flight to hide or it is hidden
+    already. Undo with _unhide()."""
+
+    depth = len(_stack.get())
+    if not depth or _hidden.get() == depth:
+        return None
+
+    return _hidden.set(depth)
+
+
+def _unhide(token: contextvars.Token[int] | None) -> None:
+    if token is not None:
+        _hidden.reset(token)
+
+
 def _resume(
     stack: tuple[Event, ...], event: Event, silenced: bool
 ) -> tuple[contextvars.Token[tuple[Event, ...]], contextvars.Token[int] | None]:
@@ -869,10 +907,12 @@ class EventHandle:
     the handle is how code inside an operation speaks about the
     operation, not a way to edit history.
 
-    A handle is empty when current_event() matched nothing. An empty
-    handle is falsy, its verbs silently do nothing, and reading a
-    field from it raises AttributeError naming the filters that
-    failed to match. Truthiness is the test for inspection code:
+    A handle is empty when current_event() matched nothing, or when
+    the innermost operation runs unrecorded (silenced beneath a leaf,
+    or declined by when=), so that the event an unaimed lookup would
+    name does not exist. An empty handle is falsy, its verbs silently
+    do nothing, and reading a field from it raises AttributeError
+    saying which. Truthiness is the test for inspection code:
 
         if current_event(kind="request"):
             ...
@@ -882,7 +922,7 @@ class EventHandle:
     unconditionally.
     """
 
-    __slots__ = ("_event", "_kind", "_of", "_category")
+    __slots__ = ("_event", "_kind", "_of", "_category", "_hidden")
 
     def __init__(
         self,
@@ -890,11 +930,13 @@ class EventHandle:
         kind: str | None,
         of: Any,
         category: str | None = None,
+        hidden: bool = False,
     ) -> None:
         object.__setattr__(self, "_event", event)
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_of", of)
         object.__setattr__(self, "_category", category)
+        object.__setattr__(self, "_hidden", hidden)
 
     def _describe(self) -> str:
         # The current_event() call this handle came from, for messages.
@@ -912,6 +954,15 @@ class EventHandle:
     def __getattr__(self, name: str) -> Any:
         event = self._event
         if event is None:
+            if self._hidden:
+                raise AttributeError(
+                    f"the innermost operation runs unrecorded (silenced"
+                    f" beneath a leaf, or declined by when=), so"
+                    f" {self._describe()} is empty and has no {name!r};"
+                    f" aim at an enclosing event with the filters, or test"
+                    f" the handle's truthiness before reading fields"
+                )
+
             raise AttributeError(
                 f"no in-flight event matched {self._describe()}, so the"
                 f" handle is empty and has no {name!r}; test the handle's"
@@ -947,6 +998,9 @@ class EventHandle:
 
     def __repr__(self) -> str:
         if self._event is None:
+            if self._hidden:
+                return "<EventHandle empty: the innermost operation is unrecorded>"
+
             return f"<EventHandle empty: {self._describe()} matched nothing>"
 
         return f"<EventHandle {self._event!s}>"
@@ -1046,14 +1100,30 @@ def current_event(
     The result is always an EventHandle, never None: empty and falsy
     when no event matched, with verbs that then do nothing, so aimed
     annotate() and note_exception() calls need no guard.
+
+    The unfiltered lookup is also empty from inside an operation that
+    runs unrecorded: a call, access, block or request silenced
+    beneath a leaf, or declined per call by `when=`. The span it
+    would have been does not exist, so there is no innermost event
+    for it to name, and an unaimed annotate() from a silenced inner
+    layer lands nowhere rather than on the enclosing event, whose
+    own story stands. The filters are unaffected: they name an
+    enclosing event by its identity, and still reach it. A leaf's own
+    code is not inside such an operation, so it names the leaf, as
+    does a `when=False` binding's handler, which never records by
+    declaration and is transparent.
     """
 
     stack = _stack.get()
 
     found: Event | None = None
+    hidden = False
 
     if kind is None and binding is None and category is None:
-        found = stack[-1] if stack else None
+        if stack and _hidden.get() == len(stack):
+            hidden = True
+        elif stack:
+            found = stack[-1]
     else:
         resolved = getattr(binding, "_binding", binding)
 
@@ -1067,7 +1137,7 @@ def current_event(
             found = event
             break
 
-    return EventHandle(found, kind, binding, category)
+    return EventHandle(found, kind, binding, category, hidden)
 
 
 def current_trace() -> _trace.TraceContext | None:
@@ -1119,9 +1189,11 @@ def annotate(**data: Any) -> None:
     targeted capture, the caller attaching what it knows a generic
     policy cannot infer (a row count, a cache hit, an immutable copy
     of a value that will be mutated). A silent no-op when nothing is
-    being recorded, so observed code can call it unconditionally; to
-    aim at an enclosing event instead of the innermost one, go through
-    current_event() with its filters.
+    being recorded, or when the innermost operation runs unrecorded
+    (silenced beneath a leaf, or declined by `when=`), so observed
+    code can call it unconditionally; to aim at an enclosing event
+    instead of the innermost one, go through current_event() with its
+    filters.
     """
 
     current_event().annotate(**data)
@@ -1252,6 +1324,7 @@ class Block:
         self._event: Event | None = None
         self._token: contextvars.Token[tuple[Event, ...]] | None = None
         self._silence: contextvars.Token[int] | None = None
+        self._hidden: contextvars.Token[int] | None = None
         self._active: tuple[Sink, ...] = ()
         self._started = 0.0
 
@@ -1262,22 +1335,37 @@ class Block:
         # not even the frame inspection.
 
         active = _active_sinks()
-        if not active or _in_recorder.get() or _suppressed.get():
+        if not active or _in_recorder.get():
             return None
 
-        if self._event is not None or self._silence is not None:
+        if (
+            self._event is not None
+            or self._silence is not None
+            or self._hidden is not None
+        ):
             raise RuntimeError(
                 "this block is already active; each with statement needs"
                 " its own block()"
             )
 
-        # A declined entry records nothing; with tree=True nothing that
-        # runs inside the body records either, where by default the
-        # decline skips this event only, as when= does on a binding.
+        # Beneath a leaf, or an operation a tree=True binding declined,
+        # the block records nothing, and its body is hidden from
+        # current_event(): the span it would have been does not exist,
+        # so an unaimed annotate() inside it has no event to land on.
+
+        if _suppressed.get():
+            self._hidden = _hide()
+            return None
+
+        # A declined entry records nothing, and hides its body the same
+        # way; with tree=True nothing that runs inside the body records
+        # either, where by default the decline skips this event only,
+        # as when= does on a binding.
 
         if not self._when:
             if self._tree:
                 self._silence = _silence(_SILENCE_ALL)
+            self._hidden = _hide()
             return None
 
         # Synthesise the path from the caller's frame, so the event
@@ -1354,7 +1442,12 @@ class Block:
     ) -> None:
         event = self._event
         if event is None:
-            # A declined tree=True entry set only the silence; lift it.
+            # A declined or suppressed entry set only the markers; lift
+            # them.
+
+            hidden = self._hidden
+            self._hidden = None
+            _unhide(hidden)
 
             silence = self._silence
             self._silence = None

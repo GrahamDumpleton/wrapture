@@ -56,6 +56,7 @@ from .timeline import (
     _SILENCE_SPANS,
     _check_leaf,
     _check_tree,
+    _hide,
     _pop,
     _push,
     _resume,
@@ -64,6 +65,7 @@ from .timeline import (
     _suppressed,
     _suspend,
     _timelines_active,
+    _unhide,
     seed_data,
 )
 
@@ -557,10 +559,17 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
 
         silenced = when is False and tree and bool(active)
 
+        # A request that would have recorded but is silenced beneath a
+        # leaf, or declined per request, is hidden from current_event()
+        # for its extent, as a silenced or declined call is.
+
+        hidden_request = False
+
         if recording and _suppressed.get():
             if binding is not None and _suppressed.get() >= _SILENCE_ALL:
                 binding._filtered_calls += 1
             recording = False
+            hidden_request = True
         elif recording and callable(when):
             guard = _in_recorder.set(True)
             try:
@@ -573,6 +582,7 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                     binding._filtered_calls += 1
                 recording = False
                 silenced = tree
+                hidden_request = True
 
         # The untouched fast path: nothing recording and no behaviour
         # configured means the server sees exactly what the application
@@ -580,9 +590,15 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
         # with recording suppressed beneath it instead.
 
         if not recording and not hooks.configured():
-            if silenced:
-                return _silenced(environ, lambda: application(environ, start_response))
-            return application(environ, start_response)
+            hidden = _hide() if hidden_request else None
+            try:
+                if silenced:
+                    return _silenced(
+                        environ, lambda: application(environ, start_response)
+                    )
+                return application(environ, start_response)
+            finally:
+                _unhide(hidden)
 
         # Inbound stages see and may replace the environ before the
         # application (or a terminal) does.
@@ -702,9 +718,17 @@ class WSGIMiddleware(CallableObjectProxy[Any]):
                     iterable = stage(iterable)
                 return iterable
 
-            if silenced:
-                return _silenced(environ, unrecorded)
-            return unrecorded()
+            # The hiding covers the synchronous phase, where the
+            # application runs; the body's later pulls beneath a leaf
+            # run in the leaf's own extent.
+
+            hidden = _hide() if hidden_request else None
+            try:
+                if silenced:
+                    return _silenced(environ, unrecorded)
+                return unrecorded()
+            finally:
+                _unhide(hidden)
 
         # Position before delivery, then time from after the recording
         # bookkeeping, exactly as the call wrapper does. The scope here

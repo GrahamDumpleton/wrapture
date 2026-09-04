@@ -52,11 +52,13 @@ from .timeline import (
     _SILENCE_ALL,
     _SILENCE_SPANS,
     _capture_result,
+    _hide,
     _pop,
     _push,
     _silence,
     _suppressed,
     _timelines_active,
+    _unhide,
 )
 
 if TYPE_CHECKING:
@@ -304,7 +306,12 @@ def _record(
     if silenced:
         if silenced >= _SILENCE_ALL:
             binding._filtered_calls += 1
-        return _quiet(binding, kind, instance, attribute, operate, value, slot)
+
+        hidden = _hide()
+        try:
+            return _quiet(binding, kind, instance, attribute, operate, value, slot)
+        finally:
+            _unhide(hidden)
 
     # The per-access predicate, mapped onto call shape the same way
     # behaviour stages are: a set passes the written value as the one
@@ -323,12 +330,19 @@ def _record(
         if not wanted:
             binding._filtered_calls += 1
 
-            if binding._tree:
-                return _silenced(
-                    binding, kind, instance, attribute, operate, value, slot
-                )
+            # A per-access decline hides the access from current_event()
+            # for its extent, as a declined call is hidden.
 
-            return _quiet(binding, kind, instance, attribute, operate, value, slot)
+            hidden = _hide()
+            try:
+                if binding._tree:
+                    return _silenced(
+                        binding, kind, instance, attribute, operate, value, slot
+                    )
+
+                return _quiet(binding, kind, instance, attribute, operate, value, slot)
+            finally:
+                _unhide(hidden)
 
     # The written value and the prior value are inbound data, so they
     # capture on the arguments axis, under the attribute's name so a

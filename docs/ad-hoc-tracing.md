@@ -437,10 +437,15 @@ exception: a log record is an instantaneous event on whatever is in
 flight, so beneath a leaf it records attached to the leaf, which is
 the detail a terminal node can still usefully carry. Two properties
 follow from nothing beneath the leaf being pushed: `annotate()` from
-inside the body lands on the leaf, since it is the innermost event
-in flight, and `trace_headers()` called from the leaf's own code
-still yields the tree's identity, so a probe of your own inside the
-leaf can propagate it deliberately. Packaged client instrumentation
+the leaf's own code lands on the leaf, since it is the innermost
+event in flight (from inside a silenced call beneath it, one that
+would have been a span of its own, an unaimed `annotate()` lands
+nowhere rather than on the leaf, so a silenced inner layer cannot
+rewrite the leaf's story, while `current_event()` with its filters
+still reaches the leaf), and `trace_headers()` called from the
+leaf's own code, or from a silenced call beneath it, still yields
+the tree's identity, so a probe of your own inside the leaf can
+propagate it deliberately. Packaged client instrumentation
 follows a stricter contract, though: propagation belongs to the
 level that records, so an instrumented HTTP client silenced beneath
 your leaf injects nothing, and a leaf that does not propagate at its
