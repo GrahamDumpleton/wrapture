@@ -149,10 +149,13 @@ $ pip install wrapture-instrumentation
 ```
 
 Targets that need a real product behind them to test against come as
-separate companion packages under the same convention, starting with
+separate companion packages under the same convention:
 [wrapture-instrumentation-aws](https://github.com/GrahamDumpleton/wrapture-instrumentation-aws)
 for the AWS SDK (boto3 and botocore), which records every AWS API
-call categorised by the service it addresses.
+call categorised by the service it addresses, and
+[wrapture-instrumentation-postgresql](https://github.com/GrahamDumpleton/wrapture-instrumentation-postgresql)
+for the PostgreSQL client libraries (psycopg, psycopg2 and asyncpg),
+which records every query, connection and transaction boundary.
 
 Enabling a target is an `[[instrument]]` entry in `wrapture.toml`, or
 `wrapture.instrumentation("django", "requests")` in code, and it
