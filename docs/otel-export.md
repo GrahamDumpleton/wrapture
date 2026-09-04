@@ -98,7 +98,11 @@ carries it as `http.route`, so a backend groups by endpoint rather
 than seeing every URL as a distinct operation (the request data-key
 contract below says which keys get this treatment); `"call"` events become INTERNAL spans named by the binding's
 assigned label, or by its `module:qualname` path when unnamed, so a
-span name with a colon in it always pins the exact function; `"block"`
+span name with a colon in it always pins the exact function, except
+that a categorised call whose data carries its category's naming
+keys is named from those instead (`SELECT orders`,
+`inventory.Counter/Count`; the category contracts below say which),
+the low-cardinality form backends group by; `"block"`
 events become INTERNAL spans named by the block, which
 is how an embedded `with wrapture.block("render-invoice"):` shows up
 as a span with no OTel API in the code. Attribute events are skipped
@@ -224,13 +228,15 @@ attributes follow the category:
 | | | `status` | `http.response.status_code`; 400 and above sets the error status, as the HTTP client conventions say |
 | | | `system`, `service`, `operation` | `rpc.system`, `rpc.service`, `rpc.method`, for an RPC-shaped external call (an XML-RPC or gRPC client); when `system` and `operation` are both present the span is also named `service/operation` (or `operation` alone), the RPC conventions' low-cardinality naming, with the patched location still on `wrapture.path` |
 | `database` | CLIENT | `system` | `db.system.name` |
-| | | `operation` | `db.operation.name` |
+| | | `operation` | `db.operation.name`; also leads the span name: `operation collection` when the instrumentation supplied a `collection`, else `operation database`, else `operation` alone, the database conventions' low-cardinality naming, taking precedence over a label, with the patched location still on `wrapture.path` |
 | | | `collection` | `db.collection.name` |
+| | | `database` | `db.namespace` |
+| | | `host`, `port` | `server.address`, `server.port` |
 | | | `statement` | `db.query.text`; only ever present when the instrumentation chose to capture it |
-| `datastore` | CLIENT | `system`, `operation`, `collection` | as for `database` |
+| `datastore` | CLIENT | `system`, `operation`, `collection`, `database`, `host`, `port` | as for `database`, the naming included |
 | `messaging`, `task` | PRODUCER | `system` | `messaging.system` |
 | | | `destination` | `messaging.destination.name` |
-| | | `operation` | `messaging.operation.type` |
+| | | `operation` | `messaging.operation.type`; also leads the span name: `operation destination` (or `operation` alone), the messaging conventions' naming, taking precedence over a label |
 | `server` | SERVER | `method` | `http.request.method` |
 | | | `url` | `url.full` |
 | | | `host`, `port` | `server.address`, `server.port`, the address the server itself answers on |
@@ -240,7 +246,7 @@ attributes follow the category:
 | | | `system`, `service`, `operation` | `rpc.system`, `rpc.service`, `rpc.method`, for an RPC-shaped boundary (an XML-RPC or gRPC dispatcher); when `system` and `operation` are both present the span is also named `service/operation` (or `operation` alone), and a non-RPC boundary that declared a `method` is named `method route-or-path`, access-log style like a request |
 | `consumer` | CONSUMER | `system` | `messaging.system` |
 | | | `destination` | `messaging.destination.name` |
-| | | `operation` | `messaging.operation.type` |
+| | | `operation` | `messaging.operation.type`; names the span `operation destination` as for a producer |
 | `template` | INTERNAL | | `wrapture.category` only |
 
 The RPC trio follows OTel's RPC conventions, younger than the HTTP

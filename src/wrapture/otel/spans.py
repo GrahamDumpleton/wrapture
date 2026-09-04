@@ -591,6 +591,28 @@ class OpenTelemetrySink(wrapture.Sink):
             route = event.data.get("route")
             return f"{self._method(event)} {route or event.data.get('path', '')}"
 
+        # A database or datastore span reads the way the database
+        # conventions name a query: the low-cardinality operation,
+        # qualified by the collection it acts on when the
+        # instrumentation could supply one, else by the database. A
+        # messaging, task or consumer span likewise reads as its
+        # operation and destination. As for RPC, the contract name
+        # takes precedence over a label, the patched location stays on
+        # wrapture.path, and a span whose data names no operation
+        # keeps the binding's friendly name.
+
+        if event.category in ("database", "datastore"):
+            operation = event.data.get("operation")
+            if operation:
+                target = event.data.get("collection") or event.data.get("database")
+                return f"{operation} {target}" if target else str(operation)
+
+        if event.category in ("messaging", "task", "consumer"):
+            operation = event.data.get("operation")
+            if operation:
+                destination = event.data.get("destination")
+                return f"{operation} {destination}" if destination else str(operation)
+
         return event.label or event.path
 
     def _method(self, event: Event) -> str:

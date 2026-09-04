@@ -2886,8 +2886,8 @@ def binding(
     `Filter` or a config's `filter` table), tape queries
     (`of_category()`, `where(category=)`, `current_event(category=)`)
     and the OpenTelemetry export (the span kind and, with the
-    category's data-key contract, its semantic-convention attributes)
-    to select on. It is a declaration about the target, decided
+    category's data-key contract, its semantic-convention attributes
+    and its name) to select on. It is a declaration about the target, decided
     before the event exists and never changed afterwards; it and
     `leaf=` are usually declared together on an outbound client, but
     neither implies the other.

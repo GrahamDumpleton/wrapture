@@ -44,12 +44,18 @@ _CATEGORY_SEMCONV: dict[str, dict[str, str]] = {
         "system": "db.system.name",
         "operation": "db.operation.name",
         "collection": "db.collection.name",
+        "database": "db.namespace",
+        "host": "server.address",
+        "port": "server.port",
         "statement": "db.query.text",
     },
     "datastore": {
         "system": "db.system.name",
         "operation": "db.operation.name",
         "collection": "db.collection.name",
+        "database": "db.namespace",
+        "host": "server.address",
+        "port": "server.port",
     },
     "messaging": {
         "system": "messaging.system",

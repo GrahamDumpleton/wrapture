@@ -432,9 +432,9 @@ def test_the_export_sets_the_span_kind_by_category() -> None:
     }
 
     assert spans[charge.path].kind is SpanKind.CLIENT
-    assert spans[query.path].kind is SpanKind.CLIENT
+    assert spans["SELECT"].kind is SpanKind.CLIENT
     assert spans[publish.path].kind is SpanKind.PRODUCER
-    assert spans[consume.path].kind is SpanKind.CONSUMER
+    assert spans["process orders"].kind is SpanKind.CONSUMER
     assert spans[place.path].kind is SpanKind.INTERNAL
     assert spans["POST /RPC2"].kind is SpanKind.SERVER
 
@@ -466,7 +466,7 @@ def test_the_export_maps_the_categorys_contract_keys() -> None:
     # A key that belongs to another category's contract is ordinary
     # data on this one.
 
-    database = spans[query.path].attributes
+    database = spans["SELECT"].attributes
     assert database["wrapture.category"] == "database"
     assert database["db.system.name"] == "sqlite"
     assert database["db.operation.name"] == "SELECT"
@@ -475,6 +475,150 @@ def test_the_export_maps_the_categorys_contract_keys() -> None:
     messaging = spans[publish.path].attributes
     assert messaging["messaging.system"] == "rabbitmq"
     assert messaging["messaging.destination.name"] == "orders"
+
+
+class Driver:
+    def execute(self, sql: str, **data: Any) -> None:
+        wrapture.annotate(system="postgresql", **data)
+
+
+def test_the_database_contract_maps_the_server_keys() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="database")
+
+    def run() -> None:
+        Driver().execute(
+            "select 1",
+            operation="SELECT",
+            database="shop",
+            host="db.internal",
+            port=5432,
+        )
+
+    (span,) = _exported(execute, run=run)
+
+    assert span.attributes["db.namespace"] == "shop"
+    assert span.attributes["server.address"] == "db.internal"
+    assert span.attributes["server.port"] == 5432
+    assert "wrapture.data.database" not in span.attributes
+    assert "wrapture.data.host" not in span.attributes
+    assert "wrapture.data.port" not in span.attributes
+
+
+def test_a_datastore_maps_the_same_server_keys() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="datastore")
+
+    def run() -> None:
+        Driver().execute("get", database="cache", host="kv.internal", port=6379)
+
+    (span,) = _exported(execute, run=run)
+
+    assert span.attributes["db.namespace"] == "cache"
+    assert span.attributes["server.address"] == "kv.internal"
+    assert span.attributes["server.port"] == 6379
+
+
+def test_a_database_span_is_named_by_operation_and_collection() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="database")
+
+    def run() -> None:
+        Driver().execute(
+            "select 1", operation="SELECT", collection="orders", database="shop"
+        )
+
+    (span,) = _exported(execute, run=run)
+
+    # The collection wins over the database as the qualifier, and
+    # the patched location stays on wrapture.path.
+
+    assert span.name == "SELECT orders"
+    assert span.attributes["wrapture.path"] == execute.path
+
+
+def test_a_database_span_without_a_collection_is_named_by_database() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="database")
+
+    def run() -> None:
+        Driver().execute("select 1", operation="SELECT", database="shop")
+
+    (span,) = _exported(execute, run=run)
+
+    assert span.name == "SELECT shop"
+
+
+def test_a_database_span_with_only_an_operation_is_named_by_it() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="datastore")
+
+    (span,) = _exported(
+        execute, run=lambda: Driver().execute("begin", operation="BEGIN")
+    )
+
+    assert span.name == "BEGIN"
+
+
+def test_a_database_span_without_an_operation_keeps_its_own_name() -> None:
+    pytest.importorskip("opentelemetry")
+
+    execute = binding(Driver, "execute", category="database")
+
+    (span,) = _exported(
+        execute, run=lambda: Driver().execute("connect", database="shop")
+    )
+
+    assert span.name == execute.path
+
+
+def test_the_contract_name_takes_precedence_over_a_label() -> None:
+    pytest.importorskip("opentelemetry")
+
+    # As for RPC: a label is the tape's name for the call, and the
+    # conventions' name wins for the export when the data supports
+    # one; without an operation the label stands.
+
+    execute = binding(Driver, "execute", category="database", label="db.execute")
+
+    def run() -> None:
+        Driver().execute("select 1", operation="SELECT", database="shop")
+        Driver().execute("connect", database="shop")
+
+    named, labelled = _exported(execute, run=run)
+
+    assert named.name == "SELECT shop"
+    assert labelled.name == "db.execute"
+
+
+@pytest.mark.parametrize("category", ["messaging", "task", "consumer"])
+def test_a_messaging_span_is_named_by_operation_and_destination(
+    category: str,
+) -> None:
+    pytest.importorskip("opentelemetry")
+
+    class Queue:
+        def send(self, operation: str, destination: str | None) -> None:
+            wrapture.annotate(system="sqs", operation=operation)
+            if destination is not None:
+                wrapture.annotate(destination=destination)
+
+    send = binding(Queue, "send", category=category)
+
+    def run() -> None:
+        Queue().send("send", "notifications")
+        Queue().send("send", None)
+
+    with_destination, without = _exported(send, run=run)
+
+    assert with_destination.name == "send notifications"
+    assert without.name == "send"
+    assert with_destination.attributes["wrapture.path"] == send.path
 
 
 def test_an_external_failure_status_marks_the_span_in_error() -> None:
