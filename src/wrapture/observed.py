@@ -55,6 +55,7 @@ from .bindings import (
     _record_async_generator,
     _record_awaited,
     _record_generator,
+    _run_hidden,
     _run_silenced,
     _sequence,
 )
@@ -475,7 +476,7 @@ class ObservedCallable(
         if silenced:
             if silenced >= _SILENCE_ALL:
                 self._self_filtered_calls += 1
-            return target(*args, **kwargs)
+            return _run_hidden(lambda: target(*args, **kwargs))
 
         when = self._self_when
         if callable(when):
@@ -489,9 +490,9 @@ class ObservedCallable(
                 self._self_filtered_calls += 1
 
                 if self._self_tree:
-                    return _run_silenced(lambda: target(*args, **kwargs))
+                    return _run_silenced(lambda: target(*args, **kwargs), hidden=True)
 
-                return target(*args, **kwargs)
+                return _run_hidden(lambda: target(*args, **kwargs))
 
         guard = _in_recorder.set(True)
         try:

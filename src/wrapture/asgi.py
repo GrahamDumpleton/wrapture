@@ -69,11 +69,13 @@ from .timeline import (
     _SILENCE_SPANS,
     _check_leaf,
     _check_tree,
+    _hide,
     _pop,
     _push,
     _silence,
     _suppressed,
     _timelines_active,
+    _unhide,
     seed_data,
 )
 from .wsgi import _describe, _Hooks, _request_predicate
@@ -378,10 +380,17 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
 
         silenced = when is False and tree and bool(active)
 
+        # A request that would have recorded but is silenced beneath a
+        # leaf, or declined per request, is hidden from current_event()
+        # for its extent, as a silenced or declined call is.
+
+        hidden_request = False
+
         if recording and _suppressed.get():
             if binding is not None and _suppressed.get() >= _SILENCE_ALL:
                 binding._filtered_calls += 1
             recording = False
+            hidden_request = True
         elif recording and callable(when):
             guard = _in_recorder.set(True)
             try:
@@ -394,6 +403,7 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
                     binding._filtered_calls += 1
                 recording = False
                 silenced = tree
+                hidden_request = True
 
         # The untouched fast path: nothing recording and no behaviour
         # configured means the application sees the original channels.
@@ -402,13 +412,14 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # this await, streaming included.
 
         if not recording and not hooks.configured():
-            if silenced:
-                silence = _silence(_SILENCE_ALL)
-                try:
-                    return await application(scope, receive, send)
-                finally:
+            hidden = _hide() if hidden_request else None
+            silence = _silence(_SILENCE_ALL) if silenced else None
+            try:
+                return await application(scope, receive, send)
+            finally:
+                if silence is not None:
                     _suppressed.reset(silence)
-            return await application(scope, receive, send)
+                _unhide(hidden)
 
         # Inbound stages see and may replace the scope before the
         # application (or a terminal) does.
@@ -619,13 +630,14 @@ class ASGIMiddleware(CallableObjectProxy[Any]):
         # event anywhere.
 
         if event is None:
-            if silenced:
-                silence = _silence(_SILENCE_ALL)
-                try:
-                    return await produce()
-                finally:
+            hidden = _hide() if hidden_request else None
+            silence = _silence(_SILENCE_ALL) if silenced else None
+            try:
+                return await produce()
+            finally:
+                if silence is not None:
                     _suppressed.reset(silence)
-            return await produce()
+                _unhide(hidden)
 
         # Position before delivery, then time from after the recording
         # bookkeeping, exactly as the call wrapper does. The event

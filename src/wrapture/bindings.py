@@ -95,6 +95,7 @@ from .timeline import (
     _check_leaf,
     _check_tree,
     _current_tape,
+    _hide,
     _pop,
     _push,
     _resolve_data,
@@ -104,6 +105,7 @@ from .timeline import (
     _suppressed,
     _suspend,
     _timelines_active,
+    _unhide,
 )
 from .values import (
     check_mapping,
@@ -641,44 +643,87 @@ async def _record_async_generator(
             operation = ("throw", exc)
 
 
-def _run_silenced(fn: Callable[[], Any]) -> Any:
-    """Run fn with recording suppressed for its dynamic extent.
+def _mark(level: int | None, hidden: bool) -> tuple[Any, Any]:
+    # The markers an unrecorded extent carries: the suppression level
+    # producers read, when one is asked for, and the hidden depth
+    # current_event() reads, when the operation is one that would
+    # have been a span.
 
-    The suppression marker is set around the call itself, and an
-    outcome whose body has not run yet (a generator, an async
-    generator, a coroutine) is wrapped so the marker is set again
-    around each resumption or the await, exactly where the recording
-    path re-establishes the in-progress stack.
+    return (
+        _silence(level) if level is not None else None,
+        _hide() if hidden else None,
+    )
+
+
+def _unmark(tokens: tuple[Any, Any]) -> None:
+    silence, hide = tokens
+
+    _unhide(hide)
+    if silence is not None:
+        _suppressed.reset(silence)
+
+
+def _run_marked(fn: Callable[[], Any], level: int | None, hidden: bool) -> Any:
+    """Run fn with markers set for its dynamic extent: recording
+    suppressed at `level` (None for no suppression), and with `hidden`
+    the innermost operation hidden from current_event().
+
+    The markers are set around the call itself, and an outcome whose
+    body has not run yet (a generator, an async generator, a
+    coroutine) is wrapped so they are set again around each
+    resumption or the await, exactly where the recording path
+    re-establishes the in-progress stack.
     """
 
-    token = _silence(_SILENCE_ALL)
+    token = _mark(level, hidden)
     try:
         outcome = fn()
     finally:
-        _suppressed.reset(token)
+        _unmark(token)
+
+    # Nothing was marked (hidden with nothing in flight above it), so
+    # the outcome needs no wrapping either.
+
+    if level is None and token[1] is None:
+        return outcome
 
     kind = _outcome_kind(outcome)
 
     if kind == "generator":
-        return _silence_generator(outcome)
+        return _mark_generator(outcome, level, hidden)
     if kind == "asyncgen":
-        return _named_after(_silence_async_generator(outcome), outcome)
+        return _named_after(_mark_async_generator(outcome, level, hidden), outcome)
     if kind == "awaitable":
-        return _named_after(_silence_awaited(outcome), outcome)
+        return _named_after(_mark_awaited(outcome, level, hidden), outcome)
 
     return outcome
 
 
-def _silence_generator(
-    generator: Generator[Any, Any, Any],
+def _run_silenced(fn: Callable[[], Any], hidden: bool = False) -> Any:
+    """Run fn with recording suppressed for its dynamic extent, and
+    with `hidden` the operation hidden from current_event() as well: a
+    per-call decline hides, a when=False binding does not."""
+
+    return _run_marked(fn, _SILENCE_ALL, hidden)
+
+
+def _run_hidden(fn: Callable[[], Any]) -> Any:
+    """Run an unrecorded fn with the innermost operation hidden from
+    current_event() for its dynamic extent, resumptions included."""
+
+    return _run_marked(fn, None, True)
+
+
+def _mark_generator(
+    generator: Generator[Any, Any, Any], level: int | None, hidden: bool
 ) -> Generator[Any, Any, Any]:
-    """A generator around a generator, with recording suppressed during
+    """A generator around a generator, with the markers set during
     each resumption; the full generator protocol is preserved."""
 
     operation: tuple[str, Any] = ("send", None)
 
     while True:
-        token = _silence(_SILENCE_ALL)
+        token = _mark(level, hidden)
         try:
             if operation[0] == "send":
                 item = generator.send(operation[1])
@@ -687,30 +732,30 @@ def _silence_generator(
         except StopIteration as stop:
             return stop.value
         finally:
-            _suppressed.reset(token)
+            _unmark(token)
 
         try:
             operation = ("send", (yield item))
         except GeneratorExit:
-            token = _silence(_SILENCE_ALL)
+            token = _mark(level, hidden)
             try:
                 generator.close()
             finally:
-                _suppressed.reset(token)
+                _unmark(token)
             raise
         except BaseException as exc:
             operation = ("throw", exc)
 
 
-async def _silence_async_generator(
-    generator: AsyncGenerator[Any, Any],
+async def _mark_async_generator(
+    generator: AsyncGenerator[Any, Any], level: int | None, hidden: bool
 ) -> AsyncGenerator[Any, Any]:
-    """The async twin of _silence_generator."""
+    """The async twin of _mark_generator."""
 
     operation: tuple[str, Any] = ("send", None)
 
     while True:
-        token = _silence(_SILENCE_ALL)
+        token = _mark(level, hidden)
         try:
             if operation[0] == "send":
                 item = await generator.asend(operation[1])
@@ -719,29 +764,29 @@ async def _silence_async_generator(
         except StopAsyncIteration:
             return
         finally:
-            _suppressed.reset(token)
+            _unmark(token)
 
         try:
             operation = ("send", (yield item))
         except GeneratorExit:
-            token = _silence(_SILENCE_ALL)
+            token = _mark(level, hidden)
             try:
                 await generator.aclose()
             finally:
-                _suppressed.reset(token)
+                _unmark(token)
             raise
         except BaseException as exc:
             operation = ("throw", exc)
 
 
-async def _silence_awaited(awaitable: Any) -> Any:
-    """Await an outcome with recording suppressed for the await."""
+async def _mark_awaited(awaitable: Any, level: int | None, hidden: bool) -> Any:
+    """Await an outcome with the markers set for the await."""
 
-    token = _silence(_SILENCE_ALL)
+    token = _mark(level, hidden)
     try:
         return await awaitable
     finally:
-        _suppressed.reset(token)
+        _unmark(token)
 
 
 class Binding:
@@ -1997,7 +2042,9 @@ class Binding:
             if silenced:
                 if silenced >= _SILENCE_ALL:
                     bnd._filtered_calls += 1
-                return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
+                return _run_hidden(
+                    lambda: bnd._quiet("call", phase, wrapped, instance, args, kwargs)
+                )
 
             # The per-call predicate decides whether this operation is
             # recorded at all, before any event is constructed. It runs
@@ -2018,10 +2065,14 @@ class Binding:
 
                     if bnd._tree:
                         return bnd._silenced(
-                            "call", phase, wrapped, instance, args, kwargs
+                            "call", phase, wrapped, instance, args, kwargs, hidden=True
                         )
 
-                    return bnd._quiet("call", phase, wrapped, instance, args, kwargs)
+                    return _run_hidden(
+                        lambda: bnd._quiet(
+                            "call", phase, wrapped, instance, args, kwargs
+                        )
+                    )
 
             # Create the event under the recorder guard, so anything
             # the bookkeeping calls that is itself observed passes
@@ -2454,13 +2505,17 @@ class Binding:
         instance: Any,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        hidden: bool = False,
     ) -> Any:
         """Run an unrecorded call with recording suppressed beneath it
         for its whole extent, a generator's iteration or a coroutine's
-        await included, so nothing it triggers records either."""
+        await included, so nothing it triggers records either; with
+        `hidden`, a per-call decline, the call is hidden from
+        current_event() too."""
 
         return _run_silenced(
-            lambda: self._quiet(operation, phase, wrapped, instance, args, kwargs)
+            lambda: self._quiet(operation, phase, wrapped, instance, args, kwargs),
+            hidden=hidden,
         )
 
     def _quiet(
@@ -2876,8 +2931,14 @@ def binding(
     point that makes HTTP requests of its own, say. It is structural,
     declared with the binding, and counts nothing: the leaf on the
     tape is the explanation for its missing children. `annotate()`
-    from inside the body lands on the leaf, since it is the innermost
-    event in flight, and `trace_headers()` still propagates from it.
+    from the leaf's own code, its handler and the code it runs
+    directly, lands on the leaf, since it is the innermost event in
+    flight; from inside a silenced call beneath it, one that would
+    have been a span of its own, an unaimed `annotate()` lands
+    nowhere, since that span does not exist, so a silenced inner
+    layer cannot rewrite the leaf's story, while `current_event()`
+    with its filters still reaches the leaf and `trace_headers()`
+    still propagates from it.
 
     `category=` names what kind of operation the binding's events
     are, one of "external", "database", "datastore", "messaging",

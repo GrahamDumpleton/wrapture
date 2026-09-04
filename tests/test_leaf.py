@@ -187,9 +187,10 @@ def test_a_leaf_records_itself_and_nothing_beneath_it() -> None:
     assert charge.missed_calls == 0
 
 
-def test_annotations_from_beneath_a_leaf_land_on_the_leaf() -> None:
-    # Nothing beneath the leaf pushed, so the leaf is the innermost
-    # in-flight event and annotate() inside its body reaches it.
+def test_annotations_from_a_silenced_call_land_nowhere() -> None:
+    # Gateway.charge annotates from its own body. Silenced beneath the
+    # leaf it is a span that does not exist, so the annotation has no
+    # event to land on, rather than rewriting the leaf's story.
 
     place = binding(Service, "place", leaf=True)
     charge = binding(Gateway, "charge")
@@ -198,7 +199,254 @@ def test_annotations_from_beneath_a_leaf_land_on_the_leaf() -> None:
         Service().place(5)
 
     (event,) = tape.all
-    assert event.data["vendor"] == "acme"
+    assert "vendor" not in event.data
+
+
+# ---------------------------------------------------------------------------
+# what a silenced or declined operation can say
+# ---------------------------------------------------------------------------
+
+
+class Driver:
+    def copy(self, table: str) -> str:
+        self.query(f"SELECT * FROM {table}")
+        return "copied"
+
+    def query(self, sql: str) -> str:
+        wrapture.annotate(operation="SELECT")
+        return "rows"
+
+    async def acopy(self, table: str) -> str:
+        await self.aquery(f"SELECT * FROM {table}")
+        return "copied"
+
+    async def aquery(self, sql: str) -> str:
+        await asyncio.sleep(0)
+        wrapture.annotate(operation="SELECT")
+        return "rows"
+
+    def rows(self, table: str) -> Generator[str, None, None]:
+        wrapture.annotate(operation="SELECT")
+        yield "row"
+        wrapture.annotate(more=True)
+
+
+def _annotating(**data: Any) -> Any:
+    # A decorates() handler that annotates around the real call.
+
+    def handler(wrapped: Any, instance: Any, args: Any, kwargs: Any) -> Any:
+        wrapture.annotate(**data)
+        result = wrapped(*args, **kwargs)
+        wrapture.annotate(done=True)
+        return result
+
+    return handler
+
+
+def test_the_leafs_handler_annotates_it_and_a_silenced_handler_nothing() -> None:
+    # The leaf's decorates() handler runs inside the leaf's own
+    # recorded call, before and after wrapped, and reaches the leaf;
+    # the nested query's handler runs inside a call that was not
+    # recorded, and reaches nothing.
+
+    copy = binding(Driver, "copy", leaf=True).on_call.decorates(
+        _annotating(operation="COPY")
+    )
+    query = binding(Driver, "query").on_call.decorates(_annotating(operation="SELECT"))
+
+    with copy, query, timeline() as tape:
+        assert Driver().copy("users") == "copied"
+
+    (event,) = tape.all
+    assert event.data == {"operation": "COPY", "done": True}
+
+
+def test_a_silenced_coroutine_annotates_nothing_when_awaited() -> None:
+    # The nested query is a coroutine the leaf awaits later, after
+    # the silenced call has returned; the hiding rides along with it.
+
+    acopy = binding(Driver, "acopy", leaf=True).on_call.decorates(
+        _annotating(operation="COPY")
+    )
+    aquery = binding(Driver, "aquery")
+
+    with acopy, aquery, timeline() as tape:
+        assert asyncio.run(Driver().acopy("users")) == "copied"
+
+    (event,) = tape.all
+    assert event.data == {"operation": "COPY", "done": True}
+
+
+def test_a_silenced_generator_annotates_nothing_when_iterated() -> None:
+    def work() -> None:
+        wrapture.annotate(operation="COPY")
+        list(Driver().rows("users"))
+
+    silenced = observed(work, leaf=True)
+    rows = binding(Driver, "rows")
+
+    with rows, timeline() as tape:
+        silenced()
+
+    (event,) = tape.all
+    assert event.data == {"operation": "COPY"}
+
+
+def test_code_the_leaf_runs_directly_annotates_the_leaf() -> None:
+    # Only an operation that would have been a span hides; plain code
+    # in the leaf's body is the leaf's own extent.
+
+    def work() -> None:
+        wrapture.annotate(operation="COPY")
+        helper()
+        wrapture.annotate(done=True)
+
+    def helper() -> None:
+        wrapture.annotate(helped=True)
+
+    silenced = observed(work, leaf=True)
+
+    with timeline() as tape:
+        silenced()
+
+    (event,) = tape.all
+    assert event.data == {"operation": "COPY", "helped": True, "done": True}
+
+
+def test_a_block_beneath_a_leaf_hides_its_body() -> None:
+    # A block would have been a span of its own, so beneath a leaf it
+    # records nothing and its body is hidden, exactly as a silenced
+    # call is; the leaf's code resumes annotating the leaf after it.
+
+    def work() -> None:
+        wrapture.annotate(operation="COPY")
+        with wrapture.block("render"):
+            wrapture.annotate(inside_block=True)
+        wrapture.annotate(done=True)
+
+    silenced = observed(work, leaf=True)
+
+    with timeline() as tape:
+        silenced()
+
+    (event,) = tape.all
+    assert event.data == {"operation": "COPY", "done": True}
+
+
+def test_a_declined_call_hides_but_its_recorded_child_annotates_itself() -> None:
+    # A when= decline without tree= hides the declined call, but an
+    # event recorded beneath it is the innermost again for its own
+    # extent, so the depth of the hiding matters, not a flag.
+
+    copy = binding(Driver, "copy", when=lambda instance, args, kwargs: False)
+    query = binding(Driver, "query")
+
+    def work() -> None:
+        wrapture.annotate(outer=True)
+        Driver().copy("users")
+
+    outer = observed(work)
+
+    with copy, query, timeline() as tape:
+        outer()
+
+    outer_event, query_event = tape.all
+    assert outer_event.data == {"outer": True}
+    assert query_event.data == {"operation": "SELECT"}
+
+
+def test_a_tree_decline_hides_its_whole_extent() -> None:
+    copy = binding(Driver, "copy", when=lambda instance, args, kwargs: False, tree=True)
+    query = binding(Driver, "query")
+
+    def work() -> None:
+        wrapture.annotate(outer=True)
+        Driver().copy("users")
+
+    outer = observed(work)
+
+    with copy, query, timeline() as tape:
+        outer()
+
+    (event,) = tape.all
+    assert event.data == {"outer": True}
+
+
+def test_a_behaviour_only_binding_is_transparent() -> None:
+    # when=False never records by declaration, so its handler is not
+    # inside a span that failed to exist: it speaks about the
+    # enclosing event, which is how an instrumentation enriches a
+    # recorded operation from a hook on the driver's internals.
+
+    query = binding(Driver, "query", when=False).on_call.decorates(
+        _annotating(server="db.internal")
+    )
+
+    def work() -> None:
+        Driver().query("SELECT 1")
+
+    outer = observed(work)
+
+    with query, timeline() as tape:
+        outer()
+
+    # The real body's own annotate() is transparent the same way.
+
+    (event,) = tape.all
+    assert event.data == {"server": "db.internal", "operation": "SELECT", "done": True}
+
+
+def test_aimed_lookups_from_a_silenced_call_still_reach_the_leaf() -> None:
+    seen: dict[str, Any] = {}
+
+    class Client:
+        def get(self) -> None:
+            seen["unaimed"] = wrapture.current_event()
+            seen["aimed"] = wrapture.current_event(binding=copy)
+            seen["trace"] = wrapture.current_trace()
+            wrapture.current_event(kind="call").annotate(from_client=True)
+
+    def work() -> None:
+        Client().get()
+
+    copy = observed(work, leaf=True)
+    get = binding(Client, "get")
+
+    with get, timeline() as tape:
+        copy()
+
+    (event,) = tape.all
+    assert not seen["unaimed"]
+    assert seen["aimed"] == event
+    assert seen["trace"] is event.trace
+    assert event.data == {"from_client": True}
+
+
+def test_the_empty_handle_says_the_operation_is_unrecorded() -> None:
+    seen: dict[str, Any] = {}
+
+    class Client:
+        def get(self) -> None:
+            seen["handle"] = wrapture.current_event()
+
+    def work() -> None:
+        Client().get()
+
+    copy = observed(work, leaf=True)
+    get = binding(Client, "get")
+
+    with get, timeline():
+        copy()
+
+    handle = seen["handle"]
+    assert not handle
+    assert "unrecorded" in repr(handle)
+
+    with pytest.raises(AttributeError, match="runs unrecorded"):
+        _ = handle.kind
+
+    handle.annotate(ignored=True)
+    handle.note_exception(RuntimeError("ignored"))
 
 
 def test_logs_beneath_a_leaf_record_attached_to_it() -> None:
