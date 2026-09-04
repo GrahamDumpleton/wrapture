@@ -552,8 +552,10 @@ what no convention can, two packages for one target. With that:
   named for something that is not itself a Python package: a vendor,
   product, organisation or theme. The project's own companion
   packages use this form for targets that need a backend to test
-  against (`wrapture-instrumentation-aws` for the AWS SDK), and so
-  does a third party publishing its own collection,
+  against (`wrapture-instrumentation-aws` for the AWS SDK,
+  `wrapture-instrumentation-postgresql` for the PostgreSQL client
+  libraries), and so does a third party publishing its own
+  collection,
   `wrapture-instrumentation-acme`; the qualified name then reads
   `requests@wrapture-instrumentation-acme`.
 
@@ -668,6 +670,14 @@ entry point: every AWS API call as one event named
 datastore, SQS, SNS and Kinesis messaging, Lambda and Step Functions
 tasks, S3 and the rest external), the name, category and tags decided
 per call by [resolvers](ad-hoc-tracing.md#deciding-the-name-kind-and-tags-per-operation-resolvers)
-on a single binding at the SDK's one dispatch seam. Installed beside
-the core package it is enabled the same way, and the listing tool
-shows both.
+on a single binding at the SDK's one dispatch seam. The second is
+[wrapture-instrumentation-postgresql](https://github.com/GrahamDumpleton/wrapture-instrumentation-postgresql),
+covering the PostgreSQL client libraries through one entry point per
+driver, `psycopg`, `psycopg2` and `asyncpg`: every query as a
+`database` leaf however it was issued, the connection being opened
+and each transaction boundary, sync and async alike, with the SQL
+text recorded only when its `statement` setting is on and bound
+parameters never; its test suite runs against a real PostgreSQL
+server in a container, the arrangement the separate-package rule
+exists for. Installed beside the core package each is enabled the
+same way, and the listing tool shows them all.
