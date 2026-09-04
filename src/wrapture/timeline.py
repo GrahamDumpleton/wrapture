@@ -26,7 +26,7 @@ import time
 import warnings
 import weakref
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Any, Protocol, Self, cast, runtime_checkable
 
 from wrapt import MISSING
 
@@ -37,6 +37,7 @@ from .events import (
     CaughtException,
     Event,
     EventLink,
+    Resolver,
     _caught_types,
     _check_category,
     _format_links,
@@ -411,11 +412,13 @@ class _EventQueries:
                 named.update(id(event.binding) for event in step)
             elif hasattr(step, "apply") or hasattr(recorder, "_self_path"):
                 matchers.append(accepts_binding(recorder))
+                label = getattr(step, "label", None)
                 labels.append(
-                    getattr(step, "label", None)
+                    (label if isinstance(label, str) else None)
                     or getattr(step, "path", None)
                     or repr(step)
                 )
+
                 named.add(id(recorder))
             else:
                 raise TypeError(
@@ -1422,6 +1425,28 @@ def seed_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
             )
 
     return seeded
+
+
+def _check_data_option(data: Any) -> dict[str, Any] | Resolver:
+    """Validate a data= option on a binding or observed callable: the
+    seed mapping checked and copied now, or a resolver called per
+    operation whose answer is checked the same way each time."""
+
+    if callable(data):
+        return cast(Resolver, data)
+
+    return seed_data(data)
+
+
+def _resolve_data(data: dict[str, Any] | Resolver, *call: Any) -> dict[str, Any]:
+    """The seed data for one operation: the static mapping, or what
+    the resolver answers for the call, validated as a declaration
+    would be; None means nothing."""
+
+    if callable(data):
+        return seed_data(data(*call))
+
+    return data
 
 
 def block(

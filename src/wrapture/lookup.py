@@ -33,7 +33,11 @@ Observer = Binding | ObservedCallable
 
 
 def _display(observer: Observer) -> str:
-    return observer.label or observer.path
+    # A label resolver names events, not the observer, which then goes
+    # by its path, exactly as an unlabelled one does.
+
+    label = observer.label
+    return label if isinstance(label, str) else observer.path
 
 
 def _order(observer: Observer) -> int:

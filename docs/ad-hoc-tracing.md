@@ -471,13 +471,15 @@ mirror of `"external"`), `"consumer"` (the receiving mirror of
 job) or `"template"`, aligned with the categories instrumentation
 packages are organised by. The category declares the operation's
 role; where its trace identity comes from is a separate declaration
-(`joins=` or `links=` on a block), and neither implies the other. It is carried on every event the binding
-records as a field of its own, `event.category`, never as a data
-key, and never changed afterwards: like a leaf it is a structural
-fact fixed at declaration, not something decided during a call, so
-`annotate()` cannot set it. The two are usually declared together on
-an outbound client, but neither implies the other, for the same
-reason `when=`'s reach never depends on what is passed to it.
+(`joins=` or `links=` on a block), and neither implies the other. It
+is carried on every event the binding records as a field of its own,
+`event.category`, never as a data key, and never changed afterwards:
+it is decided before the event exists, at the declaration or by a
+resolver given in its place (see [below](#deciding-the-name-kind-and-tags-per-operation-resolvers)),
+never during the call, so `annotate()` cannot set it. Leaf and
+category are usually declared together on an outbound client, but
+neither implies the other, for the same reason `when=`'s reach never
+depends on what is passed to it.
 
 The category is for programs, not for the printed tree: `Printer`,
 `canonical()` and `mermaid()` do not show it, since the name already
@@ -496,7 +498,76 @@ contract, for the semantic-convention attributes; the
 [OTel page](otel-export.md#the-category-data-key-contracts) has the
 contracts.
 
+## Deciding the name, kind and tags per operation: resolvers
+
+A label, a category and seed data are declarations about the
+binding's target, and for most targets one value each is the truth:
+a gateway's `charge` is always an external call. Some seams front
+several kinds of operation at once. An SDK client's one dispatch
+method reaches object storage, a queue and a function service
+depending on which client it was called on, and no single category
+or name is honest for all of its calls, while binding the method
+once is the only way to bind it at all. For that, `label=`,
+`category=` and `data=` each accept a callable in place of the
+value, with the `when=` predicate's signature, consulted per
+operation to decide that value for the one event: a resolver.
+
+```python
+KINDS = {"s3": "external", "dynamodb": "datastore", "sqs": "messaging"}
+
+def kind_of(instance, args, kwargs):
+    return KINDS.get(instance.service_name, "external")
+
+def name_of(instance, args, kwargs):
+    return f"{instance.service_name}/{args[0]}"
+
+def tags_of(instance, args, kwargs):
+    return {"service": instance.service_name, "operation": args[0]}
+
+wrapture.binding(
+    Client, "dispatch",
+    leaf=True, category=kind_of, label=name_of, data=tags_of,
+).apply()
+```
+
+The three are consulted together, at the same moment `when=` is,
+after it has accepted the operation and before its event is built.
+So a declined operation consults none of them, nothing runs while
+nothing listens, and a behaviour handler sees the resolved identity
+through `current_event()`. They run under the recorder guard, so
+observed code they touch passes through rather than recording, and
+if one raises the caller sees the exception, the same contract as a
+custom capture policy. An attribute binding hands them the access
+mapped onto call shape as `when=` sees it: the written value as the
+one positional argument on a set, empty args otherwise. `observed()`
+takes the same three; a wsgi or asgi binding takes the static forms
+only, since a request middleware is named once at construction.
+
+What each answers:
+
+- A label resolver returns the event's name, or None for the derived
+  path. The name is what every renderer and the OpenTelemetry export
+  show, so keep it repeatable and low-cardinality, the way a
+  request's route is (`s3/GetObject`, not the object key), and put
+  identifiers in data. A resolved label names the event, not the
+  binding: `find_binding()` and error messages know such a binding by
+  its path, exactly as an unlabelled one.
+
+- A category resolver returns the event's kind, or None. The answer
+  should be one of the categories above, the words sinks, the tape
+  queries and the export understand; another word is carried as
+  given, understood by nothing, so it is a choice to make knowingly.
+
+- A data resolver returns a mapping in the shape `data=` takes, or
+  None for nothing, merged into the event's data ahead of anything
+  `annotate()` adds inside the operation. It is the place for what
+  the arguments already say; what the outcome says still comes from
+  `annotate()` in a handler. Because the seed exists only when the
+  event does, a resolver's tags cannot land on some other event the
+  way an ungated `annotate()` beneath a leaf can.
+
 ## Streaming to disk: JSONLines
+
 
 `JSONLines(path)` writes each completed event to a file as one JSON
 object per line, the [JSON Lines](https://jsonlines.org/) format that

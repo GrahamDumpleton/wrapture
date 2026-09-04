@@ -2,9 +2,11 @@
 its siblings.
 
 A category is a declaration about what kind of operation a binding's
-events are, fixed at the binding (or observed() or block()), carried
+events are, declared on the binding (or observed() or block()) as a
+value, or as a per-operation resolver (see test_resolvers), carried
 on every event as a field of its own, validated against a small fixed
 vocabulary, and selected on everywhere events are selected: the tape
+
 queries, the in-flight handle, the sink filter and its config table,
 and the OpenTelemetry export, where it decides the span kind and maps
 the category's data-key contract onto semantic-convention attributes.

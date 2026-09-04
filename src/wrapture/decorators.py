@@ -27,6 +27,7 @@ from wrapt import MISSING, FunctionWrapper
 
 from .bindings import Binding, binding
 from .capture import CapturePolicy
+from .events import Resolver
 from .exceptions import ExpectationNotMetError, WrongModeError
 from .timeline import _Appliable, _current_tape, timeline
 
@@ -583,7 +584,7 @@ def bound(
     target: Any,
     *attrs: str,
     alias: str | None = None,
-    label: str | None = None,
+    label: str | Resolver | None = None,
     mode: str | None = None,
     missing_ok: bool = False,
     capture: CapturePolicy | str | None = None,
@@ -593,7 +594,7 @@ def bound(
     when: Callable[[Any, tuple[Any, ...], dict[str, Any]], Any] | bool | None = None,
     tree: bool = False,
     leaf: bool = False,
-    category: str | None = None,
+    category: str | Resolver | None = None,
     strict: bool = True,
     attr: str | None = None,
     item: Any = MISSING,

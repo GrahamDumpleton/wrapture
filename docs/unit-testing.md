@@ -385,7 +385,10 @@ path, with `label=` to assign a name where one adds something the
 path cannot say. The keyword options are the uniform subset
 `binding()` takes: `capture=`, `capture_args=`, `capture_result=`, `stack=`,
 `when=` (which receives `(instance, args, kwargs)`; the instance is
-None for a free-standing callable), `tree=`, `leaf=` and `category=`.
+None for a free-standing callable), `tree=`, `leaf=`, `category=` and
+`data=`, the last three also as per-call resolvers with `when=`'s
+signature, as on a binding.
+
 Placed on a class, the proxy binds
 as a method exactly as the wrapped function would: calls made through
 instances record the instance (so `with_instance()` applies), the

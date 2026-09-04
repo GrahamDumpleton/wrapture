@@ -145,23 +145,37 @@ def _build_event(
     policy: CapturePolicy,
     value: Any,
     phase: Phase | None,
+    *,
+    recording: bool = False,
 ) -> Event:
     """Construct the event for one attribute operation, under the
-    recorder guard so capture that runs user code does not record."""
+    recorder guard so capture that runs user code does not record.
+
+    The declarations are resolved on the call shape the when=
+    predicate sees for the access (the written value as the one
+    positional argument on a set, empty args otherwise), only for a
+    recorded access; a private event built for a watched phase carries
+    the static ones."""
 
     guard = _in_recorder.set(True)
     try:
+        call_args = (value,) if value is not MISSING else ()
+        label, category, data = binding._declared(instance, call_args, {}, recording)
+
         event = Event(
             kind,
             binding._path,
-            label=binding._label,
-            category=binding._category,
+            label=label,
+            category=category,
             instance=instance,
             binding=binding,
             capture=_level_of(policy),
             injected=phase is not None and phase.injected,
             phase=binding._phase_of(phase),
         )
+
+        if data:
+            event.data.update(data)
 
         if binding._stack_depth is not None:
             event.stack = _capture_stack(binding._stack_depth)
@@ -330,7 +344,9 @@ def _record(
     if watching and _level_of(policy) < REFERENCE:
         policy = REFERENCE
 
-    event = _build_event(binding, kind, instance, attribute, policy, value, phase)
+    event = _build_event(
+        binding, kind, instance, attribute, policy, value, phase, recording=True
+    )
 
     # Position before delivery: pushed first, so sinks hearing
     # on_enter see the event's final depth and parent link. Timing

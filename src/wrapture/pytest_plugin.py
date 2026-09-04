@@ -64,7 +64,7 @@ def _wrapture_leak_sweep() -> Iterator[None]:
     leaked = [bnd for bnd in _applied_bindings if bnd.applied and bnd not in before]
 
     if leaked:
-        labels = ", ".join(sorted(bnd.label or bnd.path for bnd in leaked))
+        labels = ", ".join(sorted(bnd._display for bnd in leaked))
 
         for bnd in leaked:
             bnd.remove()
