@@ -148,6 +148,12 @@ queries and renders as structured trees that compose into one trace:
 $ pip install wrapture-instrumentation
 ```
 
+Targets that need a real product behind them to test against come as
+separate companion packages under the same convention, starting with
+[wrapture-instrumentation-aws](https://github.com/GrahamDumpleton/wrapture-instrumentation-aws)
+for the AWS SDK (boto3 and botocore), which records every AWS API
+call categorised by the service it addresses.
+
 Enabling a target is an `[[instrument]]` entry in `wrapture.toml`, or
 `wrapture.instrumentation("django", "requests")` in code, and it
 composes with your own bindings in the same trace. The

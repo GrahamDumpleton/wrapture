@@ -543,16 +543,23 @@ what no convention can, two packages for one target. With that:
 
 - `wrapture-instrumentation` is the project's own multi-target
   package.
+
 - `wrapture-instrumentation-<target>` is a package covering exactly
   one target, `wrapture-instrumentation-flask`. First publisher gets
   the name, as with `pytest-<name>`; nothing is reserved.
-- `wrapture-instrumentation-<collection>` is a third-party
-  multi-target package, where `<collection>` is a vendor, organisation
-  or theme name that is not itself a Python package,
+
+- `wrapture-instrumentation-<collection>` is a multi-target package
+  named for something that is not itself a Python package: a vendor,
+  product, organisation or theme. The project's own companion
+  packages use this form for targets that need a backend to test
+  against (`wrapture-instrumentation-aws` for the AWS SDK), and so
+  does a third party publishing its own collection,
   `wrapture-instrumentation-acme`; the qualified name then reads
   `requests@wrapture-instrumentation-acme`.
+
 - Entry point names are always the bare target, `requests`, never
   vendor-prefixed.
+
 - The import package is `wrapture_instrumentation` for the project's
   own and `wrapture_instrumentation_<suffix>` for everyone else, one
   per distribution, not a namespace package shared across
@@ -649,3 +656,18 @@ decisions are documented in a per-target README inside the package,
 linked from the
 [project README](https://github.com/GrahamDumpleton/wrapture-instrumentation#readme),
 and the listing tool above enumerates whatever is installed.
+
+Targets that need a separate product or service behind them to test
+against are kept out of that package and come as companion packages
+under the same convention, each with its own test arrangements and
+release cadence. The first is
+[wrapture-instrumentation-aws](https://github.com/GrahamDumpleton/wrapture-instrumentation-aws),
+covering the AWS SDK (boto3 and botocore) through the one `botocore`
+entry point: every AWS API call as one event named
+`service/operation` and categorised per service (DynamoDB a
+datastore, SQS, SNS and Kinesis messaging, Lambda and Step Functions
+tasks, S3 and the rest external), the name, category and tags decided
+per call by [resolvers](ad-hoc-tracing.md#deciding-the-name-kind-and-tags-per-operation-resolvers)
+on a single binding at the SDK's one dispatch seam. Installed beside
+the core package it is enabled the same way, and the listing tool
+shows both.
