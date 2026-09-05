@@ -553,8 +553,9 @@ what no convention can, two packages for one target. With that:
   product, organisation or theme. The project's own companion
   packages use this form for targets that need a backend to test
   against (`wrapture-instrumentation-aws` for the AWS SDK,
-  `wrapture-instrumentation-postgresql` for the PostgreSQL client
-  libraries), and so does a third party publishing its own
+  `wrapture-instrumentation-postgresql` and
+  `wrapture-instrumentation-mysql` for the PostgreSQL and MySQL
+  client libraries), and so does a third party publishing its own
   collection,
   `wrapture-instrumentation-acme`; the qualified name then reads
   `requests@wrapture-instrumentation-acme`.
@@ -679,5 +680,15 @@ and each transaction boundary, sync and async alike, with the SQL
 text recorded only when its `statement` setting is on and bound
 parameters never; its test suite runs against a real PostgreSQL
 server in a container, the arrangement the separate-package rule
-exists for. Installed beside the core package each is enabled the
-same way, and the listing tool shows them all.
+exists for. The third is
+[wrapture-instrumentation-mysql](https://github.com/GrahamDumpleton/wrapture-instrumentation-mysql),
+the same shape for the MySQL client libraries through the entry
+points `pymysql`, `MySQLdb` (mysqlclient, named as it is imported
+and configured, not as it is installed) and `aiomysql`: every query
+as a `database` leaf, the connection being opened and each
+transaction boundary, the SQL text only with `statement` on and
+bound parameters never, tested against a real MySQL server in a
+container, with the one driver that builds from source against a
+client library confined to that container and to CI. Installed
+beside the core package each is enabled the same way, and the
+listing tool shows them all.

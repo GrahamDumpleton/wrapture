@@ -152,10 +152,13 @@ Targets that need a real product behind them to test against come as
 separate companion packages under the same convention:
 [wrapture-instrumentation-aws](https://github.com/GrahamDumpleton/wrapture-instrumentation-aws)
 for the AWS SDK (boto3 and botocore), which records every AWS API
-call categorised by the service it addresses, and
+call categorised by the service it addresses,
 [wrapture-instrumentation-postgresql](https://github.com/GrahamDumpleton/wrapture-instrumentation-postgresql)
 for the PostgreSQL client libraries (psycopg, psycopg2 and asyncpg),
-which records every query, connection and transaction boundary.
+which records every query, connection and transaction boundary, and
+[wrapture-instrumentation-mysql](https://github.com/GrahamDumpleton/wrapture-instrumentation-mysql)
+doing the same for the MySQL client libraries (PyMySQL, mysqlclient
+and aiomysql).
 
 Enabling a target is an `[[instrument]]` entry in `wrapture.toml`, or
 `wrapture.instrumentation("django", "requests")` in code, and it
