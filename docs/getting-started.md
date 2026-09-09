@@ -40,11 +40,21 @@ repr always tells you its state:
 
 ```python
 >>> charge.on_call.returns({"id": "stub"})
-<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied configured>>
 
 >>> gateway = Gateway()
 >>> gateway.charge(500)
 {'id': 'ch_500', 'amount': 500}
+
+```
+
+The word `configured` in the repr says the binding will intervene once
+applied; `explain()` says how, one line per configured step:
+
+```python
+>>> print(charge.explain())
+<Binding '__main__:Gateway.charge' callable unapplied configured>
+on_call  returns: {'id': 'stub'}
 
 ```
 
@@ -53,7 +63,7 @@ patch, and from then on the configured behaviour answers:
 
 ```python
 >>> charge.apply()
-<Binding '__main__:Gateway.charge' callable active>
+<Binding '__main__:Gateway.charge' callable active configured>
 >>> gateway.charge(500)
 {'id': 'stub'}
 
@@ -64,11 +74,11 @@ even while other code is calling the method:
 
 ```python
 >>> charge.suspend()
-<Binding '__main__:Gateway.charge' callable active suspended>
+<Binding '__main__:Gateway.charge' callable active suspended configured>
 >>> gateway.charge(500)
 {'id': 'ch_500', 'amount': 500}
 >>> charge.resume()
-<Binding '__main__:Gateway.charge' callable active>
+<Binding '__main__:Gateway.charge' callable active configured>
 
 ```
 
@@ -76,7 +86,7 @@ And removing it restores the original exactly:
 
 ```python
 >>> charge.remove()
-<Binding '__main__:Gateway.charge' callable unapplied>
+<Binding '__main__:Gateway.charge' callable unapplied configured>
 >>> gateway.charge(500)
 {'id': 'ch_500', 'amount': 500}
 
@@ -104,7 +114,7 @@ case substitution-based tools cannot express:
 ```python
 >>> pinned = wrapture.binding(Gateway, "charge")
 >>> pinned.on_call.transforms_result(lambda r: {**r, "id": "ch_TEST"})
-<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Gateway.charge' callable unapplied configured>>
 
 >>> with pinned:
 ...     gateway.charge(500)

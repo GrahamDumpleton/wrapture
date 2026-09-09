@@ -134,6 +134,8 @@ class RequestNamespace(Protocol):
     protocol fails at runtime with an AttributeError.
     """
 
+    def explain(self) -> str: ...
+
     def transforms_environ(
         self, fn: Callable[[dict[str, Any]], dict[str, Any]]
     ) -> Binding: ...
@@ -899,6 +901,11 @@ class Binding:
         # bound in and refused everywhere else, before the general
         # check, since the filter is deliberately not callable.
 
+        # A request filter is adapted to the predicate convention here;
+        # the filter itself is kept so explain() can show it as given.
+
+        self._request_filter: RequestFilter | None = None
+
         if isinstance(when, RequestFilter):
             if mode not in ("wsgi", "asgi"):
                 raise ValueError(
@@ -907,6 +914,7 @@ class Binding:
                     f" callable when="
                 )
 
+            self._request_filter = when
             when = _predicate_for(when, mode)
 
         # As with wrapt's `enabled`, when= accepts a boolean as well as
@@ -1248,7 +1256,57 @@ class Binding:
         if self._suspended:
             state += " suspended"
 
+        # One word says whether the binding intervenes at all; what it
+        # does is explain()'s business.
+
+        if self.configured:
+            state += " configured"
+
         return f"<Binding {self._display!r} {self._mode} {state}>"
+
+    def explain(self) -> str:
+        """What this binding is set up to do, as a multi-line string.
+
+        The first line is the repr; the second, when any are set, the
+        options that shape recording (`when`, `tree`, `capture`,
+        `stack`, `leaf`, `category`); then one block per channel with
+        behaviour, phases labelled when there is more than one, or what
+        a value or mapping binding holds. A binding with nothing
+        configured ends with `passes through`. Meant for a person at a
+        prompt or in a notebook; the wording is not a contract.
+        """
+
+        from .explain import explain_binding
+
+        return "\n".join(explain_binding(self))
+
+    @property
+    def configured(self) -> bool:
+        """Whether any behaviour is configured: a stage or terminal on
+        any phase of any operation, a request stage or terminal, or a
+        value or mapping binding told what to hold. A binding that is
+        not configured only observes."""
+
+        if self._mode in _HOLDING_MODES:
+            return self._holding[0] != "through"
+
+        if self._mode in ("wsgi", "asgi"):
+            hooks = self._request_hooks
+            return bool(
+                hooks["inbound"]
+                or hooks["response"]
+                or hooks["body"]
+                or hooks["terminal"] is not None
+            )
+
+        for head in self._heads.values():
+            phase: Phase | None = head
+            while phase is not None:
+                if phase.configured:
+                    return True
+                phase = phase.successor
+
+        return False
 
     # -- behaviour namespaces ----------------------------------------------
 
@@ -1429,7 +1487,9 @@ class Binding:
         """Apply the wrapper to the target. Returns self, so it chains.
 
         With suspended=True the wrapper is installed but inert until
-        resume() is called.
+        resume() is called. A suspend() called before apply() asks for
+        the same thing, so the binding is installed suspended either
+        way.
         """
 
         if self.applied:
@@ -1438,6 +1498,11 @@ class Binding:
                 f" `with binding(...)` or apply()/remove() explicitly,"
                 f" not both."
             )
+
+        # A suspend() on the unapplied binding recorded the intent to
+        # install it inert, the same request as apply(suspended=True).
+
+        suspended = suspended or self._suspended
 
         # A fresh application owns a fresh wrapper; a stale copy from
         # an earlier one is reached through this binding again, which
@@ -1617,6 +1682,11 @@ class Binding:
         The wrapper stays in the chain, so nothing structural changes and
         reconfiguration is atomic from a caller's point of view. A value
         binding puts the slot's prior state back until resume().
+
+        On an unapplied binding, records that the next apply() installs
+        it suspended, as apply(suspended=True) would; resume() before
+        then withdraws the request. The repr shows the pending state as
+        `unapplied suspended`.
         """
 
         if self._mode in _HOLDING_MODES and self._value_applied and not self._suspended:
@@ -2334,13 +2404,19 @@ class Binding:
         *,
         injected: bool = False,
         phase: Phase | None = None,
+        note: tuple[str, Any] | None = None,
     ) -> None:
-        (phase or self._head(operation)).set_terminal(fn, injected=injected)
+        (phase or self._head(operation)).set_terminal(fn, injected=injected, note=note)
 
     def _add_stage(
-        self, operation: str, fn: StageFunction, *, phase: Phase | None = None
+        self,
+        operation: str,
+        fn: StageFunction,
+        *,
+        phase: Phase | None = None,
+        note: tuple[str, Any],
     ) -> None:
-        (phase or self._head(operation)).add_stage(fn)
+        (phase or self._head(operation)).add_stage(fn, note)
 
     def _clear_behaviour(self, operation: str) -> None:
         self._heads.pop(operation, None)
@@ -2724,6 +2800,14 @@ class BindingGroup:
 
     def __repr__(self) -> str:
         return f"<BindingGroup {list(self._bindings)}>"
+
+    def explain(self) -> str:
+        """What every member is set up to do, each under the name it is
+        reached by, as a multi-line string; see Binding.explain()."""
+
+        from .explain import explain_group
+
+        return "\n".join(explain_group(self))
 
     @property
     def active(self) -> bool:

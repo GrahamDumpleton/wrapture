@@ -100,12 +100,16 @@ Three properties report state honestly:
 charge.applied     # did we install the wrapper
 charge.active      # is it still installed on the target (queried, not cached)
 charge.suspended   # is an applied wrapper currently inert
+charge.configured  # is any behaviour set, or does the binding only observe
 ```
 
 `active` resolves the target and inspects the wrapper chain on every
 access, so if a third party replaces the attribute wholesale, or removes
 the patch behind your back, the binding reports it. `repr(charge)` shows one
-of three states: `unapplied`, `active` or `displaced`.
+of three states: `unapplied`, `active` or `displaced`, followed by
+`suspended` while a suspension holds and by `configured` when any
+behaviour is set. What the behaviour is comes from `explain()`; see
+[asking a binding what it is set up to do](#asking-a-binding-what-it-is-set-up-to-do).
 
 The same chain inspection is available for an object in hand rather
 than the location: `charge.is_wrapping(obj)` says whether `obj` is
@@ -261,6 +265,53 @@ charge.on_call.returns({"id": "B"})
 charge.remove()
 ```
 
+### Asking a binding what it is set up to do
+
+The repr says whether a binding intervenes at all, with the word
+`configured`; `explain()` says how. It returns a multi-line string
+meant for a person at a prompt or in a notebook, or for a test author
+reading a fixture someone else wrote, rather than for a program: the
+wording is not a contract. The first line is the binding's repr; the
+second, when any are set, lists the options that shape recording
+(`when`, `tree`, `capture`, `stack`, `leaf`, `category`); then each
+channel with behaviour follows, its stages in the order they run
+around the terminal:
+
+```python
+charge = wrapture.binding(Gateway, "charge", capture=wrapture.redact("card"))
+charge.on_call.transforms_args(add_auth_header)
+charge.on_call.validates_args(check_amount)
+charge.on_call.raises(TimeoutError("busy"))
+
+print(charge.explain())
+```
+
+```
+<Binding '__main__:Gateway.charge' callable unapplied configured>
+capture: redact card
+on_call  transforms args: add_auth_header
+         validates args: check_amount
+         raises: TimeoutError('busy')
+```
+
+A binding with nothing configured ends with `passes through`. Every
+behaviour namespace has the method too: `charge.on_call.explain()`
+describes that channel alone, a phase from `then()` describes only
+itself, and `on_request` on a request binding, the channels of an
+iterator proxy and a binding group all answer in the same shape, the
+group listing each member under its name. Value and mapping bindings,
+which have no channels, say what they hold (`holds: 'sk_test'`,
+`holds: absent`, `updates in place: {...}`) and, once applied, what
+`remove()` will put back.
+
+Callables are named as their author would recognise them, so a lambda
+shows as `<lambda>`; values are summarised one level deep, a nested
+container that would run long collapsing to a placeholder such as
+`<dict 2 keys>`, so one large canned result cannot swamp the
+description. A `returns_from()` sequence given as a list is listed, one
+given as a generator shows as its repr, since it cannot be shown without
+consuming it.
+
 ### Async targets
 
 Result-side stages are await-aware. When the wrapped callable is async,
@@ -325,6 +376,11 @@ and nothing is inherited between phases: a phase with no terminal runs
 the real operation, a phase with no stages runs none. Stating
 `passes_through()` on a fresh phase is therefore optional, and worth
 writing when running the real thing is the point of the phase.
+
+`charge.on_call.explain()` lays a chain out phase by phase, each with
+how it ends (`ends after 2 calls`, `ends when the sequence is
+exhausted`, `ends on advance()`) and a final line saying which phase is
+deciding now.
 
 `then()` is relative to the namespace it is called on:
 `charge.on_call.then(...)` is the phase after phase 0, and
@@ -504,6 +560,12 @@ arrive while suspended run the original callable and are counted on
 
 `remove()` clears suspension, so a re-applied binding starts active unless
 `apply(suspended=True)` says otherwise.
+
+`suspend()` on a binding that is not yet applied is accepted too: it
+records that the next `apply()` should install the wrapper suspended,
+which is `apply(suspended=True)` said in the other order, and the repr
+shows the pending state as `unapplied suspended`. A `resume()` before the
+binding is applied withdraws the request.
 
 ## Binding groups
 
@@ -1000,6 +1062,10 @@ configured through its `on_item` namespace:
 doubles = wrapture.iterator()
 doubles.on_item.transforms_item(lambda item: 2 * item)
 ```
+
+`doubles.explain()` lists each channel with behaviour under its name,
+and a binding whose stage was handed a proxy shows the proxy's
+description indented beneath that stage.
 
 As on a binding's namespaces, every verb hands the namespace back, so
 several verbs chain without naming the namespace again, and the

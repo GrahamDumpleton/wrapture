@@ -200,7 +200,7 @@ enough here:
 
 ```python
 >>> pages.on_call.transforms_result(watch)
-<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied configured>>
 
 >>> with pages:
 ...     collect_ids(catalogue.pages())
@@ -282,7 +282,7 @@ in the injected error rather than exhaustion:
 
 ```python
 >>> pages.on_call.passes_through().transforms_result(flaky)
-<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied configured>>
 
 >>> with wrapture.timeline(pages) as tape:
 ...     out: list[str] = []
@@ -323,7 +323,7 @@ to check that the exporter counts rows and not pages:
 <IteratorItemBehaviour of <IteratorProxy 1 behaviour(s)>>
 
 >>> pages.on_call.passes_through().transforms_result(thin)
-<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Catalogue.pages' callable unapplied configured>>
 
 >>> with pages:
 ...     Exporter().write(catalogue.pages(), out := [])
@@ -353,7 +353,7 @@ touching `Catalogue` at all:
 >>> write.on_call.transforms_args(
 ...     lambda args, kwargs: ((watch(args[0]), *args[1:]), kwargs)
 ... )
-<CallBehaviour of <Binding '__main__:Exporter.write' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Exporter.write' callable unapplied configured>>
 
 >>> with write:
 ...     Exporter().write(catalogue.pages(), [])

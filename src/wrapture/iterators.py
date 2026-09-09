@@ -23,7 +23,7 @@ from collections.abc import (
     Iterable,
     Iterator,
 )
-from typing import Any, NamedTuple, Self
+from typing import Any, ClassVar, NamedTuple, Self
 
 ItemFunction = Callable[[Any], Any]
 FinishFunction = Callable[[Any], Any]
@@ -230,6 +230,8 @@ class _IteratorBehaviour:
 
     __slots__ = ("_factory",)
 
+    _channel: ClassVar[str]
+
     def __init__(self, factory: IteratorProxy) -> None:
         self._factory = factory
 
@@ -251,6 +253,14 @@ class _IteratorBehaviour:
     def __repr__(self) -> str:
         return f"<{type(self).__name__} of {self._factory!r}>"
 
+    def explain(self) -> str:
+        """What this channel is set up to do, as a multi-line string, or
+        `passes through`. Meant for a person at a prompt."""
+
+        from .explain import describe_iterator_channel
+
+        return "\n".join(describe_iterator_channel(self._factory, self._channel))
+
 
 class IteratorItemBehaviour(_IteratorBehaviour):
     """`iterator().on_item`: behaviour applied to each item.
@@ -261,10 +271,12 @@ class IteratorItemBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
+    _channel = "item"
+
     def transforms_item(self, fn: ItemFunction) -> Self:
         """fn(item) -> item, rewriting each item as it passes through."""
 
-        self._factory._add(self._factory._item_stages, fn)
+        self._factory._add("item", fn, ("transforms item", fn))
         return self
 
     def validates_item(self, check: Callable[[Any], Any]) -> Self:
@@ -278,13 +290,13 @@ class IteratorItemBehaviour(_IteratorBehaviour):
             check(item)
             return item
 
-        self._factory._add(self._factory._item_stages, stage)
+        self._factory._add("item", stage, ("validates item", check))
         return self
 
     def passes_through(self) -> Self:
         """Drop all configured item behaviour."""
 
-        self._factory._clear(self._factory._item_stages)
+        self._factory._clear("item")
         return self
 
 
@@ -297,16 +309,18 @@ class IteratorFinishBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
+    _channel = "finish"
+
     def validates(self, check: FinishFunction) -> Self:
         """check(value); completion stands unless check raises."""
 
-        self._factory._add(self._factory._finish_checks, check)
+        self._factory._add("finish", check, ("validates", check))
         return self
 
     def passes_through(self) -> Self:
         """Drop all configured finish behaviour."""
 
-        self._factory._clear(self._factory._finish_checks)
+        self._factory._clear("finish")
         return self
 
 
@@ -321,16 +335,18 @@ class IteratorErrorBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
+    _channel = "error"
+
     def notifies(self, fn: ErrorFunction) -> Self:
         """fn(exc), called before the exception propagates."""
 
-        self._factory._add(self._factory._error_hooks, fn)
+        self._factory._add("error", fn, ("notifies", fn))
         return self
 
     def passes_through(self) -> Self:
         """Drop all configured error behaviour."""
 
-        self._factory._clear(self._factory._error_hooks)
+        self._factory._clear("error")
         return self
 
 
@@ -345,16 +361,18 @@ class IteratorAbandonBehaviour(_IteratorBehaviour):
 
     __slots__ = ()
 
+    _channel = "abandon"
+
     def notifies(self, fn: AbandonFunction) -> Self:
         """fn(), called after the wrapped generator has been closed."""
 
-        self._factory._add(self._factory._abandon_hooks, fn)
+        self._factory._add("abandon", fn, ("notifies", fn))
         return self
 
     def passes_through(self) -> Self:
         """Drop all configured abandon behaviour."""
 
-        self._factory._clear(self._factory._abandon_hooks)
+        self._factory._clear("abandon")
         return self
 
 
@@ -370,11 +388,17 @@ class IteratorProxy:
     the factory affects only iterators wrapped afterwards.
     """
 
+    _CHANNELS: ClassVar[tuple[str, ...]] = ("item", "finish", "error", "abandon")
+
     def __init__(self) -> None:
-        self._item_stages: list[ItemFunction] = []
-        self._finish_checks: list[FinishFunction] = []
-        self._error_hooks: list[ErrorFunction] = []
-        self._abandon_hooks: list[AbandonFunction] = []
+        # The hooks each channel runs, and beside them what the verbs
+        # were told, one (verb, argument) note per hook, so explain()
+        # can describe a channel without unpicking the closures.
+
+        self._hooks: dict[str, list[Any]] = {name: [] for name in self._CHANNELS}
+        self._notes: dict[str, list[tuple[str, Any]]] = {
+            name: [] for name in self._CHANNELS
+        }
 
     @property
     def on_item(self) -> IteratorItemBehaviour:
@@ -400,30 +424,36 @@ class IteratorProxy:
 
         return IteratorAbandonBehaviour(self)
 
-    def _add(self, hooks: list[Any], fn: Any) -> Self:
-        hooks.append(fn)
+    def _add(self, channel: str, fn: Any, note: tuple[str, Any]) -> Self:
+        self._hooks[channel].append(fn)
+        self._notes[channel].append(note)
         return self
 
-    def _clear(self, hooks: list[Any]) -> Self:
-        hooks.clear()
+    def _clear(self, channel: str) -> Self:
+        self._hooks[channel].clear()
+        self._notes[channel].clear()
         return self
 
     def _snapshot(self) -> _Hooks:
         return _Hooks(
-            tuple(self._item_stages),
-            tuple(self._finish_checks),
-            tuple(self._error_hooks),
-            tuple(self._abandon_hooks),
+            tuple(self._hooks["item"]),
+            tuple(self._hooks["finish"]),
+            tuple(self._hooks["error"]),
+            tuple(self._hooks["abandon"]),
         )
 
     def __repr__(self) -> str:
-        count = (
-            len(self._item_stages)
-            + len(self._finish_checks)
-            + len(self._error_hooks)
-            + len(self._abandon_hooks)
-        )
+        count = sum(len(hooks) for hooks in self._hooks.values())
         return f"<IteratorProxy {count} behaviour(s)>"
+
+    def explain(self) -> str:
+        """What the factory is set up to do, as a multi-line string: the
+        repr, then each channel with behaviour under its name, or
+        `passes through`. Meant for a person at a prompt."""
+
+        from .explain import explain_iterator
+
+        return "\n".join(explain_iterator(self))
 
     def __call__(self, iterable: Any) -> Any:
         """Wrap an iterator so configured behaviour applies as it runs.

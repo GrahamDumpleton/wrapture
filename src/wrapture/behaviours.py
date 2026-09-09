@@ -195,6 +195,8 @@ class Phase:
         "stages",
         "terminal",
         "injected",
+        "notes",
+        "terminal_note",
         "_composed",
         "successor",
         "exit",
@@ -210,6 +212,13 @@ class Phase:
         self.terminal: WrapperFunction | None = None
         self.injected = False
         self._composed: dict[str | None, WrapperFunction] = {}
+
+        # What the verbs were told, kept beside the closures they built
+        # so explain() can say what the phase does: one (verb, argument)
+        # note per stage in the order added, and one for the terminal.
+
+        self.notes: list[tuple[str, Any]] = []
+        self.terminal_note: tuple[str, Any] | None = None
 
         # Chain bookkeeping: the phase that takes over, the condition
         # under which it does, and how many operations this phase has
@@ -240,9 +249,16 @@ class Phase:
 
         return self.exit is not None and self.exit[0] == "until"
 
-    def set_terminal(self, fn: WrapperFunction, *, injected: bool = False) -> None:
+    def set_terminal(
+        self,
+        fn: WrapperFunction,
+        *,
+        injected: bool = False,
+        note: tuple[str, Any] | None = None,
+    ) -> None:
         self.terminal = fn
         self.injected = injected
+        self.terminal_note = note
         self._composed.clear()
         self.source = None
         self.iterator = None
@@ -267,7 +283,7 @@ class Phase:
                 except StopIteration:
                     raise _Exhausted from None
 
-        self.set_terminal(draw, injected=True)
+        self.set_terminal(draw, injected=True, note=("returns from", iterable))
         self.source = iterable
         self.iterator = iter(iterable)
         self.draw_lock = threading.RLock()
@@ -281,8 +297,9 @@ class Phase:
         if self.source is not None:
             self.iterator = iter(self.source)
 
-    def add_stage(self, fn: StageFunction) -> None:
+    def add_stage(self, fn: StageFunction, note: tuple[str, Any]) -> None:
         self.stages.append(fn)
+        self.notes.append(note)
         self._composed.clear()
 
     def clear(self) -> None:
@@ -291,6 +308,8 @@ class Phase:
         self.stages = []
         self.terminal = None
         self.injected = False
+        self.notes = []
+        self.terminal_note = None
         self._composed.clear()
         self.source = None
         self.iterator = None
@@ -344,8 +363,32 @@ class _Behaviour[R]:
         raise NotImplementedError
 
     def __repr__(self) -> str:
+        # A phase namespace comes back from every verb on it, so like
+        # the base namespaces it names its kind, here with the phase
+        # index, and shows the binding's own state inside.
+
         index = 0 if self._phase is None else self._phase.index
-        return f"<{type(self).__name__} {index} of {self._binding._display!r}>"
+        return f"<{type(self).__name__} {index} of {self._binding!r}>"
+
+    def explain(self) -> str:
+        """What this namespace is set up to do, as a multi-line string.
+
+        A base namespace (`on_call` and friends) describes every phase
+        of its operation, labelled when there is more than one, with
+        how each phase ends and which one is deciding now; a phase
+        namespace from then() describes its own phase. A namespace with
+        nothing configured explains as `passes through`. Meant for a
+        person at a prompt; the wording is not a contract.
+        """
+
+        from .explain import explain_channel, explain_phase
+
+        if self._phase is not None:
+            lines = explain_phase(self._phase, self._operation)
+        else:
+            lines = explain_channel(self._binding, self._operation)
+
+        return "\n".join(lines)
 
     def _current(self) -> Phase:
         """The phase this namespace configures."""
@@ -355,14 +398,16 @@ class _Behaviour[R]:
 
         return self._binding._head(self._operation)
 
-    def _terminal(self, fn: WrapperFunction, *, injected: bool = False) -> R:
+    def _terminal(
+        self, fn: WrapperFunction, note: tuple[str, Any], *, injected: bool = False
+    ) -> R:
         self._binding._set_terminal(
-            self._operation, fn, injected=injected, phase=self._phase
+            self._operation, fn, injected=injected, phase=self._phase, note=note
         )
         return self._done()
 
-    def _stage(self, fn: StageFunction) -> R:
-        self._binding._add_stage(self._operation, fn, phase=self._phase)
+    def _stage(self, fn: StageFunction, note: tuple[str, Any]) -> R:
+        self._binding._add_stage(self._operation, fn, phase=self._phase, note=note)
         return self._done()
 
     def _successor(
@@ -411,7 +456,7 @@ class _Behaviour[R]:
         ) -> NoReturn:
             raise exc
 
-        return self._terminal(boom, injected=True)
+        return self._terminal(boom, ("raises", exc), injected=True)
 
     def passes_through(self) -> R:
         """Perform the real operation in this phase: drop the phase's
@@ -450,7 +495,9 @@ class _CallVerbs[R](_Behaviour[R]):
     def returns(self, value: Any) -> R:
         """Return `value`; the real callable is never invoked. Terminal."""
 
-        return self._terminal(lambda nxt, i, a, k: value, injected=True)
+        return self._terminal(
+            lambda nxt, i, a, k: value, ("returns", value), injected=True
+        )
 
     def returns_from(self, iterable: Iterable[Any]) -> R:
         """Return the next value of `iterable` on each call; the real
@@ -475,7 +522,7 @@ class _CallVerbs[R](_Behaviour[R]):
         whether and how the real callable is invoked.
         """
 
-        return self._terminal(fn)
+        return self._terminal(fn, ("decorates", fn))
 
     # -- composing --------------------------------------------------------
 
@@ -497,7 +544,7 @@ class _CallVerbs[R](_Behaviour[R]):
             new_args, new_kwargs = fn(args, kwargs)
             return nxt(*new_args, **new_kwargs)
 
-        return self._stage(stage)
+        return self._stage(stage, ("transforms args", fn))
 
     def transforms_result(self, fn: Callable[[Any], Any]) -> R:
         """fn(result) -> result, rewriting what came back.
@@ -514,7 +561,7 @@ class _CallVerbs[R](_Behaviour[R]):
         ) -> Any:
             return _then(nxt(*args, **kwargs), fn)
 
-        return self._stage(stage)
+        return self._stage(stage, ("transforms result", fn))
 
     def validates_args(self, check: Callable[..., Any]) -> R:
         """check(*args, **kwargs); the call passes through unchanged.
@@ -532,7 +579,7 @@ class _CallVerbs[R](_Behaviour[R]):
             check(*args, **kwargs)
             return nxt(*args, **kwargs)
 
-        return self._stage(stage)
+        return self._stage(stage, ("validates args", check))
 
     def validates_result(self, check: Callable[[Any], Any]) -> R:
         """check(result); the result passes through unchanged.
@@ -554,7 +601,7 @@ class _CallVerbs[R](_Behaviour[R]):
 
             return _then(nxt(*args, **kwargs), verify)
 
-        return self._stage(stage)
+        return self._stage(stage, ("validates result", check))
 
 
 class _GetVerbs[R](_Behaviour[R]):
@@ -585,7 +632,9 @@ class _GetVerbs[R](_Behaviour[R]):
     def returns(self, value: Any) -> R:
         """Reading gives `value`; the real read never happens. Terminal."""
 
-        return self._terminal(lambda nxt, i, a, k: value, injected=True)
+        return self._terminal(
+            lambda nxt, i, a, k: value, ("returns", value), injected=True
+        )
 
     def returns_from(self, iterable: Iterable[Any]) -> R:
         """Reading gives the next value of `iterable` on each read; the
@@ -614,7 +663,7 @@ class _GetVerbs[R](_Behaviour[R]):
         ) -> Any:
             return fn(wrapped, instance)
 
-        return self._terminal(terminal)
+        return self._terminal(terminal, ("decorates", fn))
 
     def transforms(self, fn: Callable[[Any], Any]) -> R:
         """fn(value) -> value, rewriting the value read."""
@@ -627,7 +676,7 @@ class _GetVerbs[R](_Behaviour[R]):
         ) -> Any:
             return fn(nxt())
 
-        return self._stage(stage)
+        return self._stage(stage, ("transforms", fn))
 
     def validates(self, check: Callable[[Any], Any]) -> R:
         """check(value); the read passes through unchanged.
@@ -646,7 +695,7 @@ class _GetVerbs[R](_Behaviour[R]):
             check(value)
             return value
 
-        return self._stage(stage)
+        return self._stage(stage, ("validates", check))
 
 
 class _SetVerbs[R](_Behaviour[R]):
@@ -688,7 +737,7 @@ class _SetVerbs[R](_Behaviour[R]):
         ) -> NoReturn:
             raise AttributeError(f"can't set attribute {binding._name!r}")
 
-        return self._terminal(terminal, injected=True)
+        return self._terminal(terminal, ("rejects", None), injected=True)
 
     def decorates(self, fn: Callable[[Callable[[Any], Any], Any, Any], Any]) -> R:
         """Wrap the real write: fn(write, instance, value), where
@@ -702,7 +751,7 @@ class _SetVerbs[R](_Behaviour[R]):
         ) -> Any:
             return fn(wrapped, instance, args[0])
 
-        return self._terminal(terminal)
+        return self._terminal(terminal, ("decorates", fn))
 
     def transforms(self, fn: Callable[[Any], Any]) -> R:
         """fn(value) -> value, rewriting the value actually written."""
@@ -715,7 +764,7 @@ class _SetVerbs[R](_Behaviour[R]):
         ) -> Any:
             return nxt(fn(args[0]))
 
-        return self._stage(stage)
+        return self._stage(stage, ("transforms", fn))
 
     def validates(self, check: Callable[[Any], Any]) -> R:
         """check(value); the write passes through unchanged.
@@ -733,7 +782,7 @@ class _SetVerbs[R](_Behaviour[R]):
             check(args[0])
             return nxt(args[0])
 
-        return self._stage(stage)
+        return self._stage(stage, ("validates", check))
 
 
 class _DeleteVerbs[R](_Behaviour[R]):
@@ -775,7 +824,7 @@ class _DeleteVerbs[R](_Behaviour[R]):
         ) -> NoReturn:
             raise AttributeError(f"can't delete attribute {binding._name!r}")
 
-        return self._terminal(terminal, injected=True)
+        return self._terminal(terminal, ("rejects", None), injected=True)
 
     def decorates(self, fn: Callable[[Callable[[], Any], Any], Any]) -> R:
         """Wrap the real delete: fn(erase, instance), where erase()
@@ -789,7 +838,7 @@ class _DeleteVerbs[R](_Behaviour[R]):
         ) -> Any:
             return fn(wrapped, instance)
 
-        return self._terminal(terminal)
+        return self._terminal(terminal, ("decorates", fn))
 
     def validates(self, check: Callable[[Any], Any]) -> R:
         """check(instance); the delete passes through unchanged.
@@ -807,7 +856,7 @@ class _DeleteVerbs[R](_Behaviour[R]):
             check(instance)
             return nxt()
 
-        return self._stage(stage)
+        return self._stage(stage, ("validates", check))
 
 
 # The concrete namespaces. A base namespace configures phase 0 and

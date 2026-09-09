@@ -157,6 +157,7 @@ def redact(
         return _capture_value(level, name, value)
 
     policy.level = _level_of(level)  # type: ignore[attr-defined]
+    policy.description = f"redact {', '.join(names)}"  # type: ignore[attr-defined]
     return policy
 
 

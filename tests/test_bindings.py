@@ -220,6 +220,40 @@ def test_remove_clears_suspension() -> None:
         bnd.remove()
 
 
+def test_suspend_before_apply_installs_suspended() -> None:
+    # suspend() on an unapplied binding is apply(suspended=True) said in
+    # the other order: the wrapper goes in inert, and calls made while
+    # it is inert run the original and are counted.
+
+    gw = Gateway()
+    bnd = binding(Gateway, "charge").on_call.returns({"id": "STUB"}).suspend()
+    assert not bnd.applied and bnd.suspended
+    assert "unapplied suspended" in repr(bnd)
+
+    bnd.apply()
+    try:
+        assert bnd.applied and bnd.suspended
+        assert gw.charge(1)["id"] == "ch_1"
+        assert bnd.suspended_calls == 1
+
+        bnd.resume()
+        assert gw.charge(1) == {"id": "STUB"}
+    finally:
+        bnd.remove()
+
+    assert not bnd.suspended
+
+
+def test_resume_before_apply_withdraws_the_request() -> None:
+    gw = Gateway()
+    bnd = binding(Gateway, "charge").on_call.returns({"id": "STUB"})
+    bnd.suspend().resume()
+
+    with bnd:
+        assert not bnd.suspended
+        assert gw.charge(1) == {"id": "STUB"}
+
+
 # ---------------------------------------------------------------------------
 # deferred patching is rejected
 # ---------------------------------------------------------------------------

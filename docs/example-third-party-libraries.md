@@ -97,7 +97,7 @@ only the `headers` keyword is different by the time it does:
 
 >>> request = wrapture.binding(Client, "request")
 >>> request.on_call.transforms_args(with_tenant)
-<CallBehaviour of <Binding '__main__:Client.request' callable unapplied>>
+<CallBehaviour of <Binding '__main__:Client.request' callable unapplied configured>>
 
 ```
 
@@ -108,7 +108,7 @@ with whatever the caller passed:
 
 ```python
 >>> request.apply()
-<Binding '__main__:Client.request' callable active>
+<Binding '__main__:Client.request' callable active configured>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {'X-Tenant': 'acme'}, 'timeout': 30}
 >>> client.request("GET", "/orders", headers={"Accept": "text/csv"})
@@ -142,13 +142,13 @@ are counted:
 
 ```python
 >>> request.suspend()
-<Binding '__main__:Client.request' callable active suspended>
+<Binding '__main__:Client.request' callable active suspended configured>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {}, 'timeout': 30}
 >>> request.suspended_calls
 1
 >>> request.resume()
-<Binding '__main__:Client.request' callable active>
+<Binding '__main__:Client.request' callable active configured>
 
 ```
 
@@ -170,7 +170,7 @@ the patch itself never leaves the method:
 ...     return args, {**kwargs, "headers": headers}
 
 >>> request.on_call.passes_through().transforms_args(with_other_tenant)
-<CallBehaviour of <Binding '__main__:Client.request' callable active>>
+<CallBehaviour of <Binding '__main__:Client.request' callable active configured>>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {'X-Tenant': 'globex'}, 'timeout': 30}
 
@@ -198,7 +198,7 @@ retry working:
 ...         return wrapped(*args, **kwargs)
 
 >>> request.on_call.decorates(retry_once)
-<CallBehaviour of <Binding '__main__:Client.request' callable active>>
+<CallBehaviour of <Binding '__main__:Client.request' callable active configured>>
 
 >>> class DropsFirst:
 ...     def __init__(self) -> None:
@@ -226,7 +226,7 @@ be applied again:
 
 ```python
 >>> request.remove()
-<Binding '__main__:Client.request' callable unapplied>
+<Binding '__main__:Client.request' callable unapplied configured>
 >>> client.request("GET", "/orders")
 {'method': 'GET', 'url': 'https://api.example/orders', 'headers': {}, 'timeout': 30}
 
@@ -246,7 +246,7 @@ override. Used as a context manager, it is a scoped clamp:
 >>> timeout
 <Binding '__main__:Client.timeout' attribute unapplied>
 >>> timeout.on_get.transforms(lambda value: min(value, 5))
-<GetBehaviour of <Binding '__main__:Client.timeout' attribute unapplied>>
+<GetBehaviour of <Binding '__main__:Client.timeout' attribute unapplied configured>>
 
 >>> with timeout:
 ...     client.timeout = 120
@@ -321,7 +321,7 @@ False
 
 >>> import vendored_client
 >>> installed
-[<Binding 'vendored_client:Client.request' callable active>]
+[<Binding 'vendored_client:Client.request' callable active configured>]
 >>> vendored_client.Client().request("GET", "/orders")
 {'method': 'GET', 'path': '/orders', 'headers': {'X-Tenant': 'acme'}}
 
@@ -403,7 +403,7 @@ function is its `__wrapped__`, so a bypass is a direct call to that:
 ```python
 >>> request = wrapture.binding(Client, "request")
 >>> request.on_call.transforms_args(with_tenant).apply()
-<Binding '__main__:Client.request' callable active>
+<Binding '__main__:Client.request' callable active configured>
 
 >>> request.wrapper.__wrapped__(client, "GET", "/health")
 {'method': 'GET', 'url': 'https://api.example/health', 'headers': {}, 'timeout': 30}
@@ -411,7 +411,7 @@ function is its `__wrapped__`, so a bypass is a direct call to that:
 {'method': 'GET', 'url': 'https://api.example/health', 'headers': {'X-Tenant': 'acme'}, 'timeout': 30}
 
 >>> request.remove()
-<Binding '__main__:Client.request' callable unapplied>
+<Binding '__main__:Client.request' callable unapplied configured>
 
 ```
 

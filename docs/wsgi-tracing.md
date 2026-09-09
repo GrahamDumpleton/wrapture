@@ -268,6 +268,10 @@ def short_circuit(app, environ, start_response):
 app.on_request.decorates(short_circuit)
 ```
 
+`app.on_request.explain()` lists the stages and terminal configured,
+in the order they apply, and `app.explain()` puts the same under the
+binding's repr with any `when=` filter on the line above.
+
 `passes_through()` clears all of it. Behaviour applies whether or not
 anything is recording, matching every other namespace, and `when=`
 receives the environ as its single positional argument, so a

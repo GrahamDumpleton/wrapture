@@ -797,6 +797,18 @@ class RequestBehaviour:
         self._binding = binding
         self._hooks = binding._request_hooks
 
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} of {self._binding!r}>"
+
+    def explain(self) -> str:
+        """What this namespace is set up to do, as a multi-line string:
+        the stages in the order they run and the terminal, or `passes
+        through`. Meant for a person at a prompt."""
+
+        from .explain import describe_request
+
+        return "\n".join(describe_request(self._binding))
+
     def transforms_environ(
         self, fn: Callable[[dict[str, Any]], dict[str, Any]]
     ) -> Binding:

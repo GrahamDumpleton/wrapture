@@ -272,7 +272,7 @@ def test_active_reports_displacement() -> None:
         assert settings.active
         SETTINGS["currency"] = "GBP"
         assert not settings.active
-        assert repr(settings).endswith("mapping displaced>")
+        assert repr(settings).endswith("mapping displaced configured>")
 
     merged = binding(SETTINGS, mode="mapping").updates({"currency": "EUR"})
 

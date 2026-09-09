@@ -116,7 +116,7 @@ call with a canned receipt and never reaches the real method, so
 ```python
 >>> charge = wrapture.binding(PaymentClient, "charge")
 >>> charge.on_call.returns({"id": "ch_TEST", "amount": 500, "currency": "USD"})
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with charge:
 ...     service.place("o-1", 500)
@@ -153,7 +153,7 @@ raised, it is what the service does about it, and that code is real:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with charge:
 ...     service.place("o-2", 300)
@@ -173,7 +173,7 @@ nothing carries over from the first, so it starts empty:
 ```python
 >>> recovered = charge.on_call.then(after=2)
 >>> recovered.returns({"id": "ch_RETRY", "amount": 300, "currency": "USD"})
-<CallPhase 1 of '__main__:PaymentClient.charge'>
+<CallPhase 1 of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with charge:
 ...     [service.place(f"o-{n}", 300)["status"] for n in (5, 6, 7)]
@@ -205,7 +205,7 @@ down to the network edge, and the real `charge()` runs above it:
 ```python
 >>> post = wrapture.binding(PaymentClient, "_post")
 >>> post.on_call.returns({"id": "ch_LIVE_9f2"})
-<CallBehaviour of <Binding '__main__:PaymentClient._post' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient._post' callable unapplied configured>>
 
 >>> with post:
 ...     service.place("o-3", 250)
@@ -231,9 +231,9 @@ do not depend on what a live gateway happened to return:
 
 ```python
 >>> charge.on_call.transforms_args(lambda args, kwargs: (args, {**kwargs, "currency": "EUR"}))
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 >>> charge.on_call.transforms_result(lambda receipt: {**receipt, "id": "ch_TEST"})
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with post, charge:
 ...     service.client.charge(250)
@@ -298,7 +298,7 @@ so, printing the events it looked at if it is wrong:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with wrapture.timeline(charge, refund):
 ...     _ = service.place("o-7", 400)
@@ -338,7 +338,7 @@ block:
 
 ```python
 >>> charge.on_call.raises(TimeoutError("gateway timed out"))
-<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied>>
+<CallBehaviour of <Binding '__main__:PaymentClient.charge' callable unapplied configured>>
 
 >>> with wrapture.timeline(charge, refund, post):
 ...     _ = service.place("o-9", 900)
