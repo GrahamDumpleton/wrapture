@@ -221,7 +221,9 @@ interplay for generators at length.
 ## As a pytest suite
 
 `pytest-asyncio` (or anyio) drives the coroutines; the bindings and
-assertions are unchanged. The plugin's `tape` fixture spans each test:
+assertions are unchanged. Each test requests the plugin's `tape`
+fixture, which is what opens a recording scope spanning the test; the
+events read by the assertions are only recorded inside one:
 
 ```python
 import pytest
@@ -240,7 +242,7 @@ def send():
 
 
 @pytest.mark.asyncio
-async def test_every_user_is_sent_to_and_awaited(send):
+async def test_every_user_is_sent_to_and_awaited(send, tape):
     delivered = await Notifier(PushClient()).broadcast(["ana", "ben"], "hello")
 
     assert delivered == 2
@@ -249,7 +251,7 @@ async def test_every_user_is_sent_to_and_awaited(send):
 
 
 @pytest.mark.asyncio
-async def test_a_timeout_stops_the_broadcast_early(send):
+async def test_a_timeout_stops_the_broadcast_early(send, tape):
     send.on_call.then(after=1).raises(TimeoutError("gateway busy"))
 
     delivered = await Notifier(PushClient()).broadcast(["ana", "ben", "cal"], "hello")
