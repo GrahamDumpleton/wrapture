@@ -207,7 +207,7 @@ explains the process and the thinking.
 ## Requirements
 
 - Python 3.12+
-- [wrapt](https://github.com/GrahamDumpleton/wrapt) 2.4.1rc1 or later
+- [wrapt](https://github.com/GrahamDumpleton/wrapt) 2.4.1 or later
 
 ## Issues
 
