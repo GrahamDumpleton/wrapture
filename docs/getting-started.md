@@ -241,10 +241,17 @@ pytest_plugins = ["wrapture.pytest_plugin"]
 - Coming from `unittest.mock`? The comparison page maps each mock idiom
   to its wrapture counterpart, and says when mock remains the right
   tool.
+
 - The monkey patching page is the full reference for bindings:
   behaviour, lifecycle, groups, attribute bindings, iterators.
+
 - The unit testing page covers the recording workflow in depth:
   scoping patterns, event filters and assertions, expectations, capture
   policies, and the pytest plugin.
+
 - The design philosophy page explains the thinking: why wrapping beats
   substitution, and why the API fails loudly.
+
+- The [blog posts and workshops](blog-posts-and-workshops.md) page lists
+  the posts that walk through each area and the guided workshops, which
+  run in the browser on Binder with nothing to install.

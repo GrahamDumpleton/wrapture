@@ -22,6 +22,9 @@ What the alpha series needs now is use: `unittest.mock` and
 OpenTelemetry's own instrumentation are the established tools for the
 two halves of what wrapture does, and the open question is whether an
 alternative doing both from one mechanism is something people want.
+The [blog posts and workshops](blog-posts-and-workshops.md) page lists
+the quickest ways to try it, including guided workshops that run in the
+browser with nothing installed.
 Reports of it working, or not, on real code, and of what confused or
 was missing, are what will decide whether anything changes before a
 beta.
@@ -128,6 +131,7 @@ from the problem to a finished test or configuration.
 getting-started
 design-philosophy
 coming-from-mock
+blog-posts-and-workshops
 how-wrapture-was-built
 ```
 

@@ -56,6 +56,21 @@ worked examples, starting with
 [testing code that calls external services](https://wrapture.readthedocs.io/en/latest/example-external-services.html),
 each take one question you might arrive with and answer it end to end.
 
+## Blog posts and workshops
+
+[![Launch on Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/GrahamDumpleton/wrapture-workshops/main?urlpath=lab)
+
+A series of blog posts walks through wrapture one area at a time, from
+the introduction through unit testing to tracing; the
+[guide page](https://grahamdumpleton.me/guides/testing-and-tracing-with-wrapture/)
+on Graham Dumpleton's blog lists them in reading order. Alongside them,
+[wrapture-workshops](https://github.com/GrahamDumpleton/wrapture-workshops)
+holds two dozen guided, hands-on workshops that run in JupyterLab and
+check your work as you go; the badge above starts them on
+[mybinder.org](https://mybinder.org) with nothing to install. The
+[blog posts and workshops](https://wrapture.readthedocs.io/en/latest/blog-posts-and-workshops.html)
+page of the documentation lists both in full.
+
 ## At a glance
 
 None of the classes below import wrapture or know they are observed:
