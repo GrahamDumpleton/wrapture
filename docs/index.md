@@ -1,5 +1,10 @@
 # wrapture
 
+```{image} _static/wrapture-logo.svg
+:alt: wrapture
+:width: 480px
+```
+
 **Wrap anything, capture everything, change nothing.**
 
 wrapture (`wrapt` + `capture`) is a Python library for attaching bindings to

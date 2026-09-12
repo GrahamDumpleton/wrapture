@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/GrahamDumpleton/wrapture/develop/docs/_static/wrapture-logo.svg" alt="wrapture" width="480">
+
 # wrapture
 
 **Wrap anything, capture everything, change nothing.**
