@@ -11,14 +11,14 @@ and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on
 the safe monkey-patching machinery wrapt provides.
 
 ```{note}
-wrapture is in alpha ahead of 1.0.0, with pre-releases published to
+wrapture is in beta ahead of 1.0.0, with pre-releases published to
 [PyPI](https://pypi.org/project/wrapture/). Until 1.0.0 is final, a
 plain `pip install wrapture` picks up the latest pre-release
 automatically, so there is no need to pin a specific version. The API
 is complete for the three uses described below and is not foreseen to
 break, and the recording path has been through a performance pass, so
 code written against it today is expected to carry forward to 1.0.0.
-What the alpha series needs now is use: `unittest.mock` and
+What the beta series needs now is use: `unittest.mock` and
 OpenTelemetry's own instrumentation are the established tools for the
 two halves of what wrapture does, and the open question is whether an
 alternative doing both from one mechanism is something people want.
@@ -27,7 +27,7 @@ the quickest ways to try it, including guided workshops that run in the
 browser with nothing installed.
 Reports of it working, or not, on real code, and of what confused or
 was missing, are what will decide whether anything changes before a
-beta.
+release candidate.
 ```
 
 ## What it does

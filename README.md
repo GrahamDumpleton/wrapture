@@ -13,7 +13,7 @@ It is a sibling project to [wrapt](https://github.com/GrahamDumpleton/wrapt)
 and [autowrapt](https://github.com/GrahamDumpleton/autowrapt), building on the
 safe monkey-patching machinery wrapt provides.
 
-> **Status: alpha, ahead of 1.0.0.** Pre-releases are published to PyPI,
+> **Status: beta, ahead of 1.0.0.** Pre-releases are published to PyPI,
 > and until 1.0.0 is final a plain `pip install wrapture` picks up the
 > latest pre-release automatically, so there is no need to pin a specific
 > version. The API is complete for the three uses described below and is
@@ -21,14 +21,15 @@ safe monkey-patching machinery wrapt provides.
 > performance pass (the
 > [OpenTelemetry export](https://wrapture.readthedocs.io/en/latest/otel-export.html#what-it-costs)
 > guide puts numbers beside OTel's own instrumentation), so code written
-> against it today is expected to carry forward to 1.0.0. What the alpha
+> against it today is expected to carry forward to 1.0.0. What the beta
 > series needs now is use. `unittest.mock` and OpenTelemetry's own
 > instrumentation are the established tools for the two halves of what
 > wrapture does, and the open question is whether an alternative that
 > does both from one mechanism is something people want. Reports of it
 > working, or not, on real code, and of what confused or was missing,
-> are what will decide whether anything changes before a beta; they go
-> to the [issue tracker](https://github.com/GrahamDumpleton/wrapture/issues).
+> are what will decide whether anything changes before a release
+> candidate; they go to the
+> [issue tracker](https://github.com/GrahamDumpleton/wrapture/issues).
 
 ## Installation
 
