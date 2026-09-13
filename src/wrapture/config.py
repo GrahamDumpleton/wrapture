@@ -206,6 +206,14 @@ class ObserveEntry:
     names what kind of operation they are ("external", "database",
     "datastore", "messaging", "task", "server", "consumer" or
     "template"), the `binding(leaf=, category=)` options as TOML.
+
+    `capture`, `capture_args` and `capture_result` set the capture
+    level on this entry's bindings, the `binding()` options of the
+    same names: `capture` covers both axes and beats the config's
+    top-level `capture`, while `capture_args` and `capture_result`
+    each override their own axis. A `redact` list composes over the
+    arguments axis, so the named parameters become the marker and the
+    rest capture at the level that axis resolves to.
     """
 
     target: str
@@ -219,6 +227,9 @@ class ObserveEntry:
     requests: Mapping[str, Any] = field(default_factory=dict)
     leaf: bool = False
     category: str = ""
+    capture: CapturePolicy | str | None = None
+    capture_args: CapturePolicy | str | None = None
+    capture_result: CapturePolicy | str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -314,6 +325,19 @@ class ObserveEntry:
             object.__setattr__(self, "data", seed_data(self.data))
         except TypeError as exc:
             raise ConfigError(f"{where}: {exc}") from None
+
+        # The capture keys take the forms binding() accepts; a bad
+        # level fails the load rather than the apply.
+
+        for key in ("capture", "capture_args", "capture_result"):
+            value = getattr(self, key)
+            if value is None:
+                continue
+
+            try:
+                _resolve_policy(value)
+            except ValueError as exc:
+                raise ConfigError(f"{where}: {key}: {exc}") from None
 
 
 class AppliedConfig:
@@ -859,14 +883,20 @@ def _bindings_for(
                 stacklevel=3,
             )
 
-    # A redact list turns into a capture policy over the entry's
-    # capture level: named parameters become the marker, everything
-    # else captures at the level the config asked for.
+    # The entry's own capture keys beat the config's top-level level,
+    # each axis key beating the entry's capture in turn. A redact list
+    # then turns the arguments axis into a policy over its level:
+    # named parameters become the marker, everything else captures at
+    # the level that axis resolved to.
 
-    effective: CapturePolicy | str | None = capture
+    level = entry.capture if entry.capture is not None else capture
+    args_level = entry.capture_args if entry.capture_args is not None else level
+    result_level = entry.capture_result
+
+    args_policy: CapturePolicy | str | None = args_level
     if entry.redact:
-        base = capture if capture is not None else REFERENCE
-        effective = _redact(*entry.redact, level=base)
+        base = args_level if args_level is not None else REFERENCE
+        args_policy = _redact(*entry.redact, level=base)
 
     # A requests table is the entry's when=, reaching the whole tree:
     # an ignored request drops everything beneath it along with itself.
@@ -878,7 +908,9 @@ def _bindings_for(
         binding(
             module_name,
             prefix + member,
-            capture=effective,
+            capture=level,
+            capture_args=args_policy,
+            capture_result=result_level,
             mode=entry.mode or None,
             data=entry.data or None,
             when=request_filter,
@@ -1535,6 +1567,9 @@ def _config_from(document: Any, location: str) -> Config:
                 "requests",
                 "leaf",
                 "category",
+                "capture",
+                "capture_args",
+                "capture_result",
             ),
         )
         observe.append(ObserveEntry(**table))

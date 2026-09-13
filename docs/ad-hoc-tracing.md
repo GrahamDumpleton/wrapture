@@ -925,15 +925,26 @@ a `ConfigWarning` at interpreter shutdown, so an empty trace has an
 explanation.
 
 The top-level `capture` key overrides the capture level on every
-binding the file creates.
+binding the file creates. An entry can set its own: `capture` on an
+entry covers both axes and beats the top-level key, while
+`capture_args` and `capture_result` each override one axis, the
+`binding()` options of the same names spelt as TOML. The levels are
+the ones the [capture policies](unit-testing.md#how-much-is-captured)
+define, so `capture_result = "none"` keeps a call's arguments and
+drops what it returned, and `capture_args = "types"` records only
+the type of each argument. On a wsgi or asgi entry the two axes are
+the request and the response.
 
 `redact` on an entry names parameters whose values are replaced with
 `<redacted>` on that entry's bindings, everything else capturing at
-the configured level. This is the expected posture for anything
-leaving the process: streaming sinks already reduce values to
-bounded summaries, but a summary of a secret is still a secret, so
-tokens, card numbers and credentials should be redacted by name at
-the entry, where they never reach any sink at all.
+the level the entry's arguments axis resolves to. Results have no
+parameter name, so a secret that comes back out is dropped with
+`capture_result = "none"` rather than redacted. This is the expected
+posture for anything leaving the process: streaming sinks already
+reduce values to bounded summaries, but a summary of a secret is
+still a secret, so tokens, card numbers and credentials should be
+redacted by name at the entry, where they never reach any sink at
+all.
 
 ### Sinks: the [[sink]] list
 

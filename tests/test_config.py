@@ -75,6 +75,10 @@ def parse_widget(text: str) -> str:
     return f"widget:{text}"
 
 
+def label_widget(text: str, label: str) -> str:
+    return f"{label}:{text}"
+
+
 def _unwind(applied: AppliedConfig) -> None:
     applied.revert()
 
@@ -512,6 +516,134 @@ def test_redact_replaces_named_parameters_on_the_entrys_bindings() -> None:
 
     (event,) = collector.entered
     assert event.arguments == {"text": "<redacted>"}
+
+
+def test_an_entrys_capture_beats_the_top_level_capture() -> None:
+    # The top-level "none" would drop every value, but an entry that
+    # asks for references keeps its own arguments and result.
+
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(target=__name__, name="parse_widget", capture="reference")
+        ],
+        sink=collector,
+        capture="none",
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "gear"}
+    assert event.result == "widget:gear"
+
+
+def test_capture_result_drops_the_result_and_keeps_the_arguments() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(target=__name__, name="parse_widget", capture_result="none")
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "gear"}
+    assert event.result is wrapt.MISSING
+
+
+def test_capture_args_overrides_one_axis_of_the_entrys_capture() -> None:
+    # capture sets both axes on the entry; capture_args then takes the
+    # arguments axis down to type names while the result keeps the
+    # entry's level.
+
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(
+                target=__name__,
+                name="parse_widget",
+                capture="reference",
+                capture_args="types",
+            )
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "<str>"}
+    assert event.result == "widget:gear"
+
+
+def test_redact_composes_over_the_entrys_capture_args_level() -> None:
+    # The named parameter is masked whatever the level; a second
+    # parameter shows the surrounding level is the entry's own.
+
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(
+                target=__name__,
+                name="label_widget",
+                redact="text",
+                capture_args="types",
+            )
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        label_widget("secret-token", "gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "<redacted>", "label": "<str>"}
+
+
+def test_a_bad_entry_capture_level_fails_the_build() -> None:
+    with pytest.raises(ConfigError, match="capture_result: capture level must be"):
+        ObserveEntry(target=__name__, name="parse_widget", capture_result="nope")
+
+
+def test_the_loader_accepts_the_capture_keys(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[observe]]
+            target = "{__name__}"
+            name = "parse_widget"
+            capture = "summary"
+            capture_args = "types"
+            capture_result = "none"
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    entry = config.observe[0]
+    assert entry.capture == "summary"
+    assert entry.capture_args == "types"
+    assert entry.capture_result == "none"
 
 
 def test_the_loader_accepts_a_redact_key(tmp_path: Path) -> None:
