@@ -128,7 +128,7 @@ def summarize(value: Any, *, limit: int = 200, items: int = 10) -> Any:
 
 def redact(
     *names: str,
-    level: CapturePolicy | str = REFERENCE,
+    level: CapturePolicy | str | None = None,
     marker: str = "<redacted>",
 ) -> CapturePolicy:
     """A capture policy that replaces named parameters with a marker.
@@ -138,25 +138,49 @@ def redact(
     Matching is by parameter name against the signature-normalized
     arguments, so it works whether the caller passed the value
     positionally or by keyword. Everything not named is captured at
-    `level`.
+    `level`, the reference level unless given.
 
-    Two limits: results have no parameter name, so a bare redact() does
-    not touch them (pair it with capture_result=NONE when the secret
-    comes back out); and names are top-level parameters only, so a
-    secret nested inside a dict argument is not found. Any custom
-    fn(name, value) callable handles those cases.
+    With no names at all the policy masks every value it is asked
+    about, on whichever axis it is given: `capture_result=redact()`
+    hides a result, which has no parameter name for the named form to
+    match, and `capture_args=redact()` hides every argument while
+    keeping the shape of the call. Nothing is left for `level` to
+    apply to in that form, so giving both is refused.
+
+    Names are top-level parameters only, so a secret nested inside a
+    dict argument is not found; a custom fn(name, value) callable
+    handles that case.
     """
+
+    # The bare form has no level of its own: every value becomes the
+    # marker, so a level alongside it states an intent that can never
+    # take effect.
+
+    if not names:
+        if level is not None:
+            raise ValueError(
+                "redact() with no names masks every value, so level= has"
+                " nothing to apply to; name the parameters to keep at that"
+                " level or drop level="
+            )
+
+        def mask_all(name: str | None, value: Any) -> Any:
+            return marker
+
+        mask_all.level = REFERENCE  # type: ignore[attr-defined]
+        mask_all.description = "redact everything"  # type: ignore[attr-defined]
+        return mask_all
 
     wanted = set(names)
     resolved = _resolve_policy(level)
-    level = REFERENCE if resolved is None else resolved
+    base = REFERENCE if resolved is None else resolved
 
     def policy(name: str | None, value: Any) -> Any:
         if name in wanted:
             return marker
-        return _capture_value(level, name, value)
+        return _capture_value(base, name, value)
 
-    policy.level = _level_of(level)  # type: ignore[attr-defined]
+    policy.level = _level_of(base)  # type: ignore[attr-defined]
     policy.description = f"redact {', '.join(names)}"  # type: ignore[attr-defined]
     return policy
 

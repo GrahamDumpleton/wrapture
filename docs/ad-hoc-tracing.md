@@ -938,13 +938,23 @@ the request and the response.
 `redact` on an entry names parameters whose values are replaced with
 `<redacted>` on that entry's bindings, everything else capturing at
 the level the entry's arguments axis resolves to. Results have no
-parameter name, so a secret that comes back out is dropped with
-`capture_result = "none"` rather than redacted. This is the expected
-posture for anything leaving the process: streaming sinks already
-reduce values to bounded summaries, but a summary of a secret is
-still a secret, so tokens, card numbers and credentials should be
-redacted by name at the entry, where they never reach any sink at
-all.
+parameter name, so a secret that comes back out is hidden with
+`redact_result = true` instead, which records the marker in place of
+the result (where `capture_result = "none"` would record nothing at
+all); it cannot be combined with `capture_result`, which would have
+nothing left to apply to. `redact_marker` replaces the `<redacted>`
+text for both, and needs one of them. This is the expected posture
+for anything leaving the process: streaming sinks already reduce
+values to bounded summaries, but a summary of a secret is still a
+secret, so tokens, card numbers and credentials should be redacted by
+name at the entry, where they never reach any sink at all.
+
+`stack` on an entry records how control reached each of its events,
+the `binding(stack=)` option as TOML: `"caller"` for the calling
+frame alone, a positive frame count, or `"full"`, priced as the
+[stack capture](unit-testing.md#capturing-the-call-stack)
+section describes. It answers "which code path is hitting this" for
+code the config observes but does not own.
 
 ### Sinks: the [[sink]] list
 

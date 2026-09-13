@@ -1042,9 +1042,15 @@ charge = wrapture.binding(
 
 Redaction matches by parameter name against the normalized arguments,
 so positional and keyword calls redact identically, and everything not
-named is captured at `level=` (`"reference"` unless given). Results
-have no parameter name, so pair it with `capture_result="none"` when
-the secret comes back out.
+named is captured at `level=` (`"reference"` unless given). With no
+names at all, `redact()` masks every value it is given, on whichever
+axis it sits: results have no parameter name for the named form to
+match, so `capture_result=wrapture.redact()` is how a secret that
+comes back out is hidden while the tape still shows the call
+returned, and `capture_args=wrapture.redact()` hides every argument
+while keeping the shape of the call. Nothing is left for `level=` to
+apply to in the bare form, so giving both is refused. `marker=`
+replaces the `<redacted>` text in either form.
 
 The same vocabulary reaches URL query strings through
 `capture_query(query, policy="reference")`, which returns the form the

@@ -170,6 +170,61 @@ def test_redact_accepts_a_level_name_for_everything_unnamed() -> None:
         assert event.arguments["attempts"] == "<int>"
 
 
+def test_a_bare_redact_masks_every_argument_keeping_the_calls_shape() -> None:
+    vault = binding(Vault, "open", capture_args=redact())
+
+    with timeline(vault):
+        Vault().open("hunter2", attempts=3)
+
+        event = vault.events.first
+        assert event.arguments == {"secret": "<redacted>", "attempts": "<redacted>"}
+        assert event.result == "opened:hunter2"
+
+
+def test_a_bare_redact_on_the_result_axis_masks_the_result() -> None:
+    vault = binding(
+        Vault, "open", capture_args=redact("secret"), capture_result=redact()
+    )
+
+    with timeline(vault):
+        Vault().open("hunter2", attempts=3)
+
+        event = vault.events.first
+        assert event.arguments == {"secret": "<redacted>", "attempts": 3}
+        assert event.result == "<redacted>"
+
+
+def test_redact_takes_a_marker_in_both_forms() -> None:
+    vault = binding(
+        Vault,
+        "open",
+        capture_args=redact("secret", marker="***"),
+        capture_result=redact(marker="***"),
+    )
+
+    with timeline(vault):
+        Vault().open("hunter2")
+
+        event = vault.events.first
+        assert event.arguments == {"secret": "***", "attempts": 1}
+        assert event.result == "***"
+
+
+def test_a_bare_redact_refuses_a_level() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="no names masks every value"):
+        redact(level="summary")
+
+
+def test_redact_describes_itself_for_explain() -> None:
+    named: Any = redact("secret", "pin")
+    bare: Any = redact()
+
+    assert named.description == "redact secret, pin"
+    assert bare.description == "redact everything"
+
+
 def test_a_custom_callable_is_a_policy() -> None:
     def masked(name: str | None, value: Any) -> Any:
         return f"{name}!{value}"

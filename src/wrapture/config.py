@@ -68,6 +68,7 @@ from .sinks import (
     add_sink,
     remove_sink,
 )
+from .stacks import _resolve_depth
 from .timeline import Tape, seed_data
 from .windows import Window
 
@@ -214,6 +215,16 @@ class ObserveEntry:
     each override their own axis. A `redact` list composes over the
     arguments axis, so the named parameters become the marker and the
     rest capture at the level that axis resolves to.
+
+    `redact_result = true` replaces the result with the marker, the
+    `capture_result=redact()` policy as TOML; it cannot be combined
+    with `capture_result`, which would have nothing to apply to.
+    `redact_marker` replaces the `<redacted>` marker for both the
+    `redact` list and `redact_result`, and needs one of them.
+
+    `stack` records how control reached each event, the
+    `binding(stack=)` option: "caller" for the calling frame alone, a
+    positive frame count, or "full".
     """
 
     target: str
@@ -230,6 +241,9 @@ class ObserveEntry:
     capture: CapturePolicy | str | None = None
     capture_args: CapturePolicy | str | None = None
     capture_result: CapturePolicy | str | None = None
+    redact_result: bool = False
+    redact_marker: str | None = None
+    stack: int | str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, str) or not self.target:
@@ -338,6 +352,51 @@ class ObserveEntry:
                 _resolve_policy(value)
             except ValueError as exc:
                 raise ConfigError(f"{where}: {key}: {exc}") from None
+
+        # Result redaction is a policy of its own on the result axis,
+        # so a level for that axis alongside it could never act; the
+        # marker only means something with a redaction to apply it to.
+
+        if not isinstance(self.redact_result, bool):
+            raise ConfigError(
+                f"{where}: redact_result must be true or false, got"
+                f" {self.redact_result!r}"
+            )
+
+        if self.redact_result and self.capture_result is not None:
+            raise ConfigError(
+                f"{where}: redact_result replaces the result with the marker,"
+                f" so capture_result has nothing to apply to; use one or the"
+                f" other"
+            )
+
+        if self.redact_marker is not None:
+            if not isinstance(self.redact_marker, str) or not self.redact_marker:
+                raise ConfigError(
+                    f"{where}: redact_marker must be a non-empty string, got"
+                    f" {self.redact_marker!r}"
+                )
+
+            if not self.redact and not self.redact_result:
+                raise ConfigError(
+                    f"{where}: redact_marker needs a redact list or"
+                    f" redact_result = true to apply to"
+                )
+
+        # The stack depth takes the forms binding() accepts, checked
+        # here so a bad value fails the load rather than the apply.
+
+        if self.stack is not None:
+            try:
+                depth = _resolve_depth(self.stack)
+            except ValueError as exc:
+                raise ConfigError(f"{where}: {exc}") from None
+
+            if isinstance(self.stack, bool) or depth is None or depth < 1:
+                raise ConfigError(
+                    f"{where}: stack must be 'caller', 'full' or a positive"
+                    f" frame count, got {self.stack!r}"
+                )
 
 
 class AppliedConfig:
@@ -893,10 +952,16 @@ def _bindings_for(
     args_level = entry.capture_args if entry.capture_args is not None else level
     result_level = entry.capture_result
 
+    marker = {} if entry.redact_marker is None else {"marker": entry.redact_marker}
+
     args_policy: CapturePolicy | str | None = args_level
     if entry.redact:
         base = args_level if args_level is not None else REFERENCE
-        args_policy = _redact(*entry.redact, level=base)
+        args_policy = _redact(*entry.redact, level=base, **marker)
+
+    result_policy: CapturePolicy | str | None = result_level
+    if entry.redact_result:
+        result_policy = _redact(**marker)
 
     # A requests table is the entry's when=, reaching the whole tree:
     # an ignored request drops everything beneath it along with itself.
@@ -910,7 +975,8 @@ def _bindings_for(
             prefix + member,
             capture=level,
             capture_args=args_policy,
-            capture_result=result_level,
+            capture_result=result_policy,
+            stack=entry.stack,
             mode=entry.mode or None,
             data=entry.data or None,
             when=request_filter,
@@ -1570,6 +1636,9 @@ def _config_from(document: Any, location: str) -> Config:
                 "capture",
                 "capture_args",
                 "capture_result",
+                "redact_result",
+                "redact_marker",
+                "stack",
             ),
         )
         observe.append(ObserveEntry(**table))

@@ -32,6 +32,7 @@ from wrapture import (
     binding,
     find_config,
     load_config,
+    stack_frames,
 )
 
 
@@ -621,6 +622,117 @@ def test_redact_composes_over_the_entrys_capture_args_level() -> None:
 def test_a_bad_entry_capture_level_fails_the_build() -> None:
     with pytest.raises(ConfigError, match="capture_result: capture level must be"):
         ObserveEntry(target=__name__, name="parse_widget", capture_result="nope")
+
+
+def test_redact_result_replaces_the_result_with_the_marker() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(target=__name__, name="parse_widget", redact_result=True)
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "gear"}
+    assert event.result == "<redacted>"
+
+
+def test_redact_result_refuses_a_capture_result_level() -> None:
+    with pytest.raises(ConfigError, match="capture_result has nothing to apply to"):
+        ObserveEntry(
+            target=__name__,
+            name="parse_widget",
+            redact_result=True,
+            capture_result="summary",
+        )
+
+
+def test_redact_marker_applies_to_the_list_and_the_result() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[
+            ObserveEntry(
+                target=__name__,
+                name="parse_widget",
+                redact="text",
+                redact_result=True,
+                redact_marker="***",
+            )
+        ],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.arguments == {"text": "***"}
+    assert event.result == "***"
+
+
+def test_redact_marker_needs_a_redaction_to_apply_to() -> None:
+    with pytest.raises(ConfigError, match="redact_marker needs a redact list"):
+        ObserveEntry(target=__name__, name="parse_widget", redact_marker="***")
+
+
+def test_stack_records_the_calling_frame_on_the_entrys_bindings() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target=__name__, name="parse_widget", stack="caller")],
+        sink=collector,
+    )
+
+    applied = config.apply()
+    try:
+        parse_widget("gear")
+    finally:
+        _unwind(applied)
+
+    (event,) = collector.entered
+    assert event.stack is not None
+    (frame,) = stack_frames(event.stack)
+    assert (
+        frame.function == "test_stack_records_the_calling_frame_on_the_entrys_bindings"
+    )
+
+
+@pytest.mark.parametrize("value", ["sideways", 0, -1, True])
+def test_a_bad_stack_value_fails_the_build(value: Any) -> None:
+    with pytest.raises(ConfigError, match="stack must be"):
+        ObserveEntry(target=__name__, name="parse_widget", stack=value)
+
+
+def test_the_loader_accepts_the_redaction_and_stack_keys(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[observe]]
+            target = "{__name__}"
+            name = "parse_widget"
+            redact_result = true
+            redact_marker = "***"
+            stack = 3
+            """
+        )
+    )
+
+    config = load_config(source)
+
+    entry = config.observe[0]
+    assert entry.redact_result is True
+    assert entry.redact_marker == "***"
+    assert entry.stack == 3
 
 
 def test_the_loader_accepts_the_capture_keys(tmp_path: Path) -> None:
