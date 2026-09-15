@@ -28,9 +28,9 @@ from typing import Any, NoReturn
 from ..config import _apply_pythonpath, _instrument_entries, _read_document
 from ..exceptions import ConfigError, ConfigWarning
 from ..instrumentations import (
+    Aspect,
     Instrumentation,
     InstrumentEntry,
-    Part,
     _plan,
     _registered,
     _resolve,
@@ -472,13 +472,13 @@ def _policy_text(value: Any) -> str:
 
 def _settings_rows(cls: type[Instrumentation]) -> list[tuple[int, str, str]]:
     # The settings table as (depth, text, note) rows: a Setting is one
-    # row, a Part is a heading row with its switch and its keys beneath
+    # row, an Aspect is a heading row with its switch and its keys beneath
     # it, so the table also says what the package wraps.
 
     rows: list[tuple[int, str, str]] = []
 
     for name, setting in cls.settings.items():
-        if not isinstance(setting, Part):
+        if not isinstance(setting, Aspect):
             rows.append(
                 (0, f"{name} = {_toml_value(setting.default)}", setting.description)
             )
@@ -518,7 +518,7 @@ def _aligned(rows: Sequence[tuple[int, str, str]], *, indent: str) -> list[str]:
 
 def _template_rows(cls: type[Instrumentation]) -> list[tuple[str, str]]:
     # The commented-out settings of one template entry as (text, note)
-    # rows, a blank text separating each part's sub-table from what
+    # rows, a blank text separating each aspect's sub-table from what
     # precedes it. A default with no TOML spelling says so in the note.
 
     def row(key: str, value: Any, description: str) -> tuple[str, str]:
@@ -531,11 +531,11 @@ def _template_rows(cls: type[Instrumentation]) -> list[tuple[str, str]]:
 
     rows: list[tuple[str, str]] = []
     for name, setting in cls.settings.items():
-        if not isinstance(setting, Part):
+        if not isinstance(setting, Aspect):
             rows.append(row(name, setting.default, setting.description))
 
     for name, setting in cls.settings.items():
-        if not isinstance(setting, Part):
+        if not isinstance(setting, Aspect):
             continue
 
         note = f"{setting.description}{' (primary)' if setting.primary else ''}"

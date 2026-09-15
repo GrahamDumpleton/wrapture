@@ -28,19 +28,19 @@ import wrapt
 
 import wrapture
 from wrapture import (
+    Aspect,
     Config,
     ConfigError,
     ConfigWarning,
     Instrumentation,
     InstrumentEntry,
-    Part,
     Setting,
     instrumentation,
     instrumentation_hook,
     load_config,
 )
 from wrapture.capture import REFERENCE
-from wrapture.instrumentations import PartSettings, _active, _trampolines
+from wrapture.instrumentations import AspectSettings, _active, _trampolines
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -162,13 +162,13 @@ class Framework(Instrumentation):
     target = "cfgi_framework"
     removable = True
     settings = {
-        "requests": Part(
+        "requests": Aspect(
             "the request boundary",
             primary=True,
             ignore_paths=Setting((), "paths not to record"),
         ),
-        "views": Part("view functions", capture_result="shape"),
-        "lifecycle": Part("lifecycle callbacks"),
+        "views": Aspect("view functions", capture_result="shape"),
+        "lifecycle": Aspect("lifecycle callbacks"),
         "handled_errors": Setting(True, "note an exception a handler absorbed"),
     }
 
@@ -476,7 +476,7 @@ def test_setting_description_must_be_a_string() -> None:
 
 
 # ---------------------------------------------------------------------------
-# parts
+# aspects
 # ---------------------------------------------------------------------------
 
 
@@ -484,7 +484,7 @@ def test_a_part_resolves_to_its_declared_defaults() -> None:
     instance = Framework()
 
     requests = instance.settings["requests"]
-    assert isinstance(requests, PartSettings)
+    assert isinstance(requests, AspectSettings)
     assert requests.name == "requests"
     assert requests.description == "the request boundary"
     assert requests.enabled is True
@@ -551,7 +551,7 @@ def test_a_key_given_flat_and_under_the_primary_part_is_refused() -> None:
 def test_a_flat_recording_key_needs_a_primary_part() -> None:
     class NoPrimary(Instrumentation):
         target = "cfgi_noprimary"
-        settings = {"client": Part("outgoing calls")}
+        settings = {"client": Aspect("outgoing calls")}
 
         @instrumentation_hook("cfgi_noprimary")
         def hook(self, name: str, module: Any) -> None:
@@ -573,13 +573,13 @@ def test_an_unknown_key_names_the_primary_parts_keys_too() -> None:
 
 def test_an_unknown_key_under_a_part_is_refused() -> None:
     with pytest.raises(
-        ConfigError, match=r"part 'views': unknown keys \['ignore_paths'\]"
+        ConfigError, match=r"aspect 'views': unknown keys \['ignore_paths'\]"
     ):
         Framework(views={"ignore_paths": []})
 
 
 def test_a_part_is_given_as_a_table_or_a_boolean() -> None:
-    with pytest.raises(ConfigError, match="part 'views': expects a table"):
+    with pytest.raises(ConfigError, match="aspect 'views': expects a table"):
         Framework(views="yes")
 
 
@@ -590,22 +590,22 @@ def test_a_parts_own_setting_is_type_checked() -> None:
 
 def test_recording_keys_under_a_part_are_checked_as_an_observe_entrys_are() -> None:
     with pytest.raises(
-        ConfigError, match="part 'views': capture_result: capture level"
+        ConfigError, match="aspect 'views': capture_result: capture level"
     ):
         Framework(views={"capture_result": "sumary"})
 
-    with pytest.raises(ConfigError, match="part 'views': redact_marker needs"):
+    with pytest.raises(ConfigError, match="aspect 'views': redact_marker needs"):
         Framework(views={"redact_marker": "***"})
 
-    with pytest.raises(ConfigError, match="part 'views': enabled must be true"):
+    with pytest.raises(ConfigError, match="aspect 'views': enabled must be true"):
         Framework(views={"enabled": "yes"})
 
-    with pytest.raises(ConfigError, match="part 'views': stack must be"):
+    with pytest.raises(ConfigError, match="aspect 'views': stack must be"):
         Framework(views={"stack": 0})
 
 
 def test_a_given_key_displaces_the_default_it_replaces() -> None:
-    # The views part declares capture_result = "shape"; result
+    # The views aspect declares capture_result = "shape"; result
     # redaction replaces that rather than clashing with it, and capture
     # covers both axes over the declared one.
 
@@ -640,54 +640,56 @@ def test_a_recording_key_cannot_be_a_setting() -> None:
             settings = {"leaf": Setting(True, "record as a leaf")}
 
     with pytest.raises(ConfigError, match="'leaf' is a recording key wrapture owns"):
-        Part("statements", leaf=Setting(True, "record as a leaf"))
+        Aspect("statements", leaf=Setting(True, "record as a leaf"))
 
 
 def test_a_part_declares_recording_defaults_or_settings_and_nothing_else() -> None:
-    with pytest.raises(ConfigError, match="cannot nest a part"):
-        Part("outer", inner=Part("inner"))
+    with pytest.raises(ConfigError, match="cannot nest an aspect"):
+        Aspect("outer", inner=Aspect("inner"))
 
     with pytest.raises(ConfigError, match="'threshold' is neither a recording key"):
-        Part("charges", threshold=100)
+        Aspect("charges", threshold=100)
 
     with pytest.raises(ConfigError, match="enabled must default to true or false"):
-        Part("charges", enabled="yes")
+        Aspect("charges", enabled="yes")
 
     with pytest.raises(TypeError, match="description must be a string"):
-        Part(1)  # type: ignore[arg-type]
+        Aspect(1)  # type: ignore[arg-type]
 
     with pytest.raises(TypeError, match="primary must be a boolean"):
-        Part("charges", primary="yes")  # type: ignore[arg-type]
+        Aspect("charges", primary="yes")  # type: ignore[arg-type]
 
 
 def test_a_parts_declared_defaults_are_checked_when_the_class_is_defined() -> None:
     with pytest.raises(
-        ConfigError, match="part 'views': capture_result: capture level"
+        ConfigError, match="aspect 'views': capture_result: capture level"
     ):
 
         class Bad(Instrumentation):
             target = "cfgi_bad"
-            settings = {"views": Part("view functions", capture_result="sumary")}
+            settings = {"views": Aspect("view functions", capture_result="sumary")}
 
 
 def test_at_most_one_part_is_primary() -> None:
-    with pytest.raises(ConfigError, match="at most one part may be primary"):
+    with pytest.raises(ConfigError, match="at most one aspect may be primary"):
 
         class TwoPrimaries(Instrumentation):
             target = "cfgi_twoprimaries"
             settings = {
-                "requests": Part("requests", primary=True),
-                "views": Part("views", primary=True),
+                "requests": Aspect("requests", primary=True),
+                "views": Aspect("views", primary=True),
             }
 
 
 def test_a_part_and_its_resolved_form_describe_themselves() -> None:
-    part = Part("view functions", primary=True, capture_result="shape")
-    assert repr(part) == "Part('view functions', primary=True, capture_result='shape')"
+    aspect = Aspect("view functions", primary=True, capture_result="shape")
+    assert (
+        repr(aspect) == "Aspect('view functions', primary=True, capture_result='shape')"
+    )
 
     views = Framework().settings["views"]
     assert repr(views) == (
-        "PartSettings('views', enabled=True, options={'capture_result': 'shape'},"
+        "AspectSettings('views', enabled=True, options={'capture_result': 'shape'},"
         " settings={})"
     )
 
@@ -733,7 +735,7 @@ def test_the_loader_validates_a_parts_keys_against_the_declaration(
         )
     )
 
-    with pytest.raises(ConfigError, match="part 'views': capture_result"):
+    with pytest.raises(ConfigError, match="aspect 'views': capture_result"):
         load_config(source)
 
 

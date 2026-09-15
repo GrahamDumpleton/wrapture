@@ -17,7 +17,7 @@ def _format_version(parts: tuple[str, ...]) -> str:
     )
 
 
-__version_info__ = ("1", "0", "0", "b3")
+__version_info__ = ("1", "0", "0", "b4")
 __version__ = _format_version(__version_info__)
 
 from wrapt import MISSING, register_post_import_hook, when_imported
@@ -102,10 +102,10 @@ from .filters import (
     filter_requests,
 )
 from .instrumentations import (
+    Aspect,
     Instrumentation,
     Instrumented,
     InstrumentEntry,
-    Part,
     Setting,
     instrumentation,
     instrumentation_hook,
@@ -195,6 +195,7 @@ __all__ = [
     "AlreadyAppliedError",
     "AmbiguousBindingError",
     "AppliedConfig",
+    "Aspect",
     "Binding",
     "BoundSpec",
     "Collector",
@@ -244,7 +245,6 @@ __all__ = [
     "Printer",
     "RecordingGapWarning",
     "RequestFilter",
-    "Part",
     "Sample",
     "SequenceExhaustedError",
     "SetBehaviour",

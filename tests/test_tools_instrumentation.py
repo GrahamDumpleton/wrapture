@@ -80,12 +80,12 @@ class FlaskishInstrumentation(wrapture.Instrumentation):
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
         "timeout": wrapture.Setting(None, "slow view threshold in seconds"),
-        "requests": wrapture.Part(
+        "requests": wrapture.Aspect(
             "the request boundary",
             primary=True,
             ignore_paths=wrapture.Setting((), "paths never traced, exact match"),
         ),
-        "views": wrapture.Part(
+        "views": wrapture.Aspect(
             "view functions",
             capture_args=wrapture.redact("token"),
             capture_result="shape",

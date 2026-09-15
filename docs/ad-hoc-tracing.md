@@ -1166,14 +1166,14 @@ The pieces, in the order they matter:
   `ConfigError` raised there still surfaces at apply time. The
   resolved values, class defaults under the entry's, are
   `self.settings` on the instance. A class that binds several
-  distinct groups of call sites declares each as a `Part`, a
+  distinct groups of call sites declares each as an `Aspect`, a
   sub-table of the entry (`[instrument.views]`) carrying that group's
   switch, the recording keys an `[[observe]]` entry takes (`capture`,
   `capture_args`, `capture_result`, `redact`, `redact_result`,
   `redact_marker`, `leaf`, `stack`) and any settings of its own; a
-  bare boolean under the part's name is its `enabled`, and the keys of
-  the part the class marks primary may be written flat on the entry.
-  [Parts](instrumentation-packages.md#parts) has the whole scheme.
+  bare boolean under the aspect's name is its `enabled`, and the keys of
+  the aspect the class marks primary may be written flat on the entry.
+  [Aspects](instrumentation-packages.md#aspects) has the whole scheme.
 - The decorated hook is the door: one
   `@wrapture.instrumentation_hook(module)` method per trigger, called
   as `method(self, name, module)`, the method name free and the

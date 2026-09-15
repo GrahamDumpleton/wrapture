@@ -40,7 +40,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from .exceptions import ConfigError, ConfigWarning
-from .options import PART_KEYS, RECORDING_KEYS, check_recording, compose_recording
+from .options import ASPECT_KEYS, RECORDING_KEYS, check_recording, compose_recording
 
 if TYPE_CHECKING:
     from .config import AppliedConfig, Config
@@ -77,86 +77,90 @@ class Setting:
         return f"Setting({self.default!r}, {self.description!r})"
 
 
-class Part:
-    """One part of an instrumentation: a named group of the call sites
+class Aspect:
+    """One aspect of an instrumentation: a named group of the call sites
     it binds, with its own switch, its own recording defaults and its
     own settings.
 
-    A part is a value in the class's `settings` table beside `Setting`,
+    An aspect is a value in the class's `settings` table beside `Setting`,
     so the declaration is one tree that mirrors the TOML: a `Setting`
-    is a key of the entry, a `Part` is a sub-table of it. The keyword
-    arguments are the part's keys, told apart by type: a plain value is
+    is a key of the entry, an `Aspect` is a sub-table of it. The keyword
+    arguments are the aspect's keys, told apart by type: a plain value is
     a default for one of the recording keys wrapture owns (`enabled`,
     `capture`, `capture_args`, `capture_result`, `redact`,
     `redact_result`, `redact_marker`, `leaf`, `stack`), checked as an
     [[observe]] entry's would be, and a `Setting` is a setting of the
-    package that belongs to this part. A recording key can never be a
-    `Setting`, so a package cannot redefine what `leaf` means, and a
-    part cannot nest a part.
+    package that belongs to this aspect. A recording key can never be a
+    `Setting`, so a package cannot redefine what `leaf` means, and an
+    aspect cannot nest an aspect.
 
-    `primary=True` marks the one part the entry's own top-level keys
-    apply to: a recording key or one of the primary part's settings
+    `primary=True` marks the one aspect the entry's own top-level keys
+    apply to: a recording key or one of the primary aspect's settings
     written flat on the entry means the same as writing it under the
-    part's sub-table, so a package with one part needs no sub-table at
-    all. A bare boolean under a part's name is shorthand for its
+    aspect's sub-table, so a package with one aspect needs no sub-table at
+    all. A bare boolean under an aspect's name is shorthand for its
     `enabled`.
 
-    On the instance, `self.settings[name]` is the resolved part, with
+    On the instance, `self.settings[name]` is the resolved aspect, with
     `enabled`, the `options` to pass to observed() or binding(), and
-    item access to the part's own settings.
+    item access to the aspect's own settings.
     """
 
     __slots__ = ("description", "primary", "defaults", "settings")
 
     def __init__(self, description: str, *, primary: bool = False, **keys: Any):
         if not isinstance(description, str):
-            raise TypeError(f"Part description must be a string, got {description!r}")
+            raise TypeError(f"Aspect description must be a string, got {description!r}")
 
         if not isinstance(primary, bool):
-            raise TypeError(f"Part primary must be a boolean, got {primary!r}")
+            raise TypeError(f"Aspect primary must be a boolean, got {primary!r}")
 
         self.description = description
         self.primary = primary
         self.defaults: dict[str, Any] = {}
         self.settings: dict[str, Setting] = {}
 
-        # A key is a recording default or a setting of the part's own,
+        # A key is a recording default or a setting of the aspect's own,
         # never both and never anything else.
 
         for key, value in keys.items():
-            if isinstance(value, Part):
-                raise ConfigError(f"Part: {key!r} is a Part; a part cannot nest a part")
+            if isinstance(value, Aspect):
+                raise ConfigError(
+                    f"Aspect: {key!r} is an Aspect; an aspect cannot nest an aspect"
+                )
 
             if isinstance(value, Setting):
-                if key in PART_KEYS:
+                if key in ASPECT_KEYS:
                     raise ConfigError(
-                        f"Part: {key!r} is a recording key wrapture owns, so it"
+                        f"Aspect: {key!r} is a recording key wrapture owns, so it"
                         f" cannot be a Setting; give it a plain value as the"
-                        f" part's default"
+                        f" aspect's default"
                     )
                 self.settings[key] = value
-            elif key in PART_KEYS:
+            elif key in ASPECT_KEYS:
                 self.defaults[key] = value
             else:
                 raise ConfigError(
-                    f"Part: {key!r} is neither a recording key"
-                    f" ({', '.join(PART_KEYS)}) nor a wrapture.Setting"
+                    f"Aspect: {key!r} is neither a recording key"
+                    f" ({', '.join(ASPECT_KEYS)}) nor a wrapture.Setting"
                 )
 
         enabled = self.defaults.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigError(
-                f"Part: enabled must default to true or false, got {enabled!r}"
+                f"Aspect: enabled must default to true or false, got {enabled!r}"
             )
 
     def __repr__(self) -> str:
         keys = {**self.defaults, **self.settings}
         extra = "".join(f", {key}={value!r}" for key, value in keys.items())
         primary = ", primary=True" if self.primary else ""
-        return f"Part({self.description!r}{primary}{extra})"
+        return f"Aspect({self.description!r}{primary}{extra})"
 
-    def _resolve(self, name: str, given: Mapping[str, Any], where: str) -> PartSettings:
-        # The part's keys under the supplied values: its own settings
+    def _resolve(
+        self, name: str, given: Mapping[str, Any], where: str
+    ) -> AspectSettings:
+        # The aspect's keys under the supplied values: its own settings
         # fill in from their defaults as a class's do, and the recording
         # keys compose over the declared defaults into the options.
 
@@ -180,7 +184,7 @@ class Part:
         # capture covers both axes, and result redaction and a result
         # level exclude each other.
 
-        recording = {key: value for key, value in given.items() if key in PART_KEYS}
+        recording = {key: value for key, value in given.items() if key in ASPECT_KEYS}
         merged = dict(self.defaults)
 
         if recording.get("capture") is not None:
@@ -201,7 +205,7 @@ class Part:
 
         check_recording(merged, where)
 
-        return PartSettings(
+        return AspectSettings(
             name,
             self.description,
             enabled=enabled,
@@ -210,16 +214,16 @@ class Part:
         )
 
 
-class PartSettings:
-    """The resolved form of one part on an instance: what an
+class AspectSettings:
+    """The resolved form of one aspect on an instance: what an
     instrumentation reads at the wrapping site.
 
-    `enabled` is the part's switch. `options` are the keyword
-    arguments for observed() or binding() that the part's recording
+    `enabled` is the aspect's switch. `options` are the keyword
+    arguments for observed() or binding() that the aspect's recording
     keys amount to, the declared defaults under the entry's own, with
     any redact list or result redaction already a policy; only the
     keys set are present, so it splats over a package's own defaults
-    without disturbing what it leaves alone. The part's own settings
+    without disturbing what it leaves alone. The aspect's own settings
     are reached by item access, `settings["client"]["propagate"]`.
     """
 
@@ -242,7 +246,7 @@ class PartSettings:
 
     @property
     def settings(self) -> Mapping[str, Any]:
-        """The part's own settings, resolved over their defaults."""
+        """The aspect's own settings, resolved over their defaults."""
 
         return self._settings
 
@@ -254,7 +258,7 @@ class PartSettings:
 
     def __repr__(self) -> str:
         return (
-            f"PartSettings({self.name!r}, enabled={self.enabled!r},"
+            f"AspectSettings({self.name!r}, enabled={self.enabled!r},"
             f" options={dict(self.options)!r}, settings={dict(self._settings)!r})"
         )
 
@@ -458,10 +462,10 @@ class Instrumentation:
 
     removable: bool = False
 
-    # The declaration, name to Setting or Part. The resolved values take
+    # The declaration, name to Setting or Aspect. The resolved values take
     # the same name on the instance, an ordinary attribute __init__
     # assigns that shadows this one for instance access: the plain
-    # value for a Setting, a PartSettings record for a Part.
+    # value for a Setting, an AspectSettings record for an Aspect.
 
     settings: Mapping[str, Any] = {}
 
@@ -484,8 +488,8 @@ class Instrumentation:
         a package's own tests construct one directly. An unknown setting
         raises ConfigError, as does a value whose outer type does not
         match its default's; declared settings not given take their
-        defaults. A part is given as a table of its keys, or a bare
-        boolean for its switch, and the primary part's keys may be
+        defaults. An aspect is given as a table of its keys, or a bare
+        boolean for its switch, and the primary aspect's keys may be
         given flat. Not meant to be overridden: one-time work goes in
         configure().
         """
@@ -908,7 +912,7 @@ def _check_class(cls: type[Instrumentation]) -> None:
 
     if not isinstance(cls.settings, Mapping):
         raise ConfigError(
-            f"{where}: settings must be a mapping of name to Setting or Part"
+            f"{where}: settings must be a mapping of name to Setting or Aspect"
         )
 
     primary: list[str] = []
@@ -916,8 +920,8 @@ def _check_class(cls: type[Instrumentation]) -> None:
         if not isinstance(key, str) or not key:
             raise ConfigError(f"{where}: setting names must be strings, got {key!r}")
 
-        if isinstance(setting, Part):
-            check_recording(setting.defaults, f"{where}: part {key!r}")
+        if isinstance(setting, Aspect):
+            check_recording(setting.defaults, f"{where}: aspect {key!r}")
             if setting.primary:
                 primary.append(key)
             continue
@@ -926,23 +930,23 @@ def _check_class(cls: type[Instrumentation]) -> None:
             raise ConfigError(
                 f"{where}: setting {key!r} must be declared as"
                 f" wrapture.Setting(default, description) or"
-                f" wrapture.Part(description, ...), got {setting!r}"
+                f" wrapture.Aspect(description, ...), got {setting!r}"
             )
 
         # The recording keys are wrapture's vocabulary, the same under
-        # every part of every package; a package declares a default for
-        # one on the part it applies to, never a setting of its own.
+        # every aspect of every package; a package declares a default for
+        # one on the aspect it applies to, never a setting of its own.
 
-        if key in PART_KEYS:
+        if key in ASPECT_KEYS:
             raise ConfigError(
                 f"{where}: {key!r} is a recording key wrapture owns, so it"
-                f" cannot be a Setting; declare it as a default of the Part it"
+                f" cannot be a Setting; declare it as a default of the Aspect it"
                 f" applies to"
             )
 
     if len(primary) > 1:
         raise ConfigError(
-            f"{where}: at most one part may be primary, got {sorted(primary)}"
+            f"{where}: at most one aspect may be primary, got {sorted(primary)}"
         )
 
 
@@ -1001,17 +1005,19 @@ def _resolve_settings(
     cls: type[Instrumentation], given: Mapping[str, Any], where: str
 ) -> dict[str, Any]:
     # Class defaults under the supplied values: unknown names and
-    # wrong outer types are loud, everything else fills in. A Part
-    # resolves from its sub-table, with the primary part also taking
+    # wrong outer types are loud, everything else fills in. An Aspect
+    # resolves from its sub-table, with the primary aspect also taking
     # the recording keys and its own settings given flat.
 
     declared = cls.settings
-    parts = {name: part for name, part in declared.items() if isinstance(part, Part)}
-    primary = next((name for name, part in parts.items() if part.primary), None)
+    aspects = {
+        name: aspect for name, aspect in declared.items() if isinstance(aspect, Aspect)
+    }
+    primary = next((name for name, aspect in aspects.items() if aspect.primary), None)
 
     # Sort the given keys: a declared name is the setting's or the
-    # part's, a flat key the primary part owns routes to it, and
-    # anything else is unknown, with the primary part's keys named in
+    # aspect's, a flat key the primary aspect owns routes to it, and
+    # anything else is unknown, with the primary aspect's keys named in
     # the hint alongside the declared names.
 
     flat: dict[str, Any] = {}
@@ -1022,7 +1028,7 @@ def _resolve_settings(
         if key in declared:
             flat[key] = value
         elif primary is not None and (
-            key in RECORDING_KEYS or key in parts[primary].settings
+            key in RECORDING_KEYS or key in aspects[primary].settings
         ):
             routed[key] = value
         else:
@@ -1032,20 +1038,20 @@ def _resolve_settings(
         known = sorted(declared)
         if primary is not None:
             known = sorted(
-                set(known) | set(RECORDING_KEYS) | set(parts[primary].settings)
+                set(known) | set(RECORDING_KEYS) | set(aspects[primary].settings)
             )
         hint = f"; the declared settings are {known}" if known else "; it declares none"
         raise ConfigError(f"{where}: unknown settings {sorted(unknown)}{hint}")
 
     resolved: dict[str, Any] = {}
     for name, setting in declared.items():
-        if isinstance(setting, Part):
+        if isinstance(setting, Aspect):
             resolved[name] = _resolve_part(
                 name,
                 setting,
                 flat.get(name),
                 routed if name == primary else {},
-                f"{where}: part {name!r}",
+                f"{where}: aspect {name!r}",
             )
             continue
 
@@ -1065,10 +1071,10 @@ def _resolve_settings(
 
 
 def _resolve_part(
-    name: str, part: Part, given: Any, routed: Mapping[str, Any], where: str
-) -> PartSettings:
-    # A part is given as a table of its keys, a bare boolean standing
-    # for its enabled key, or nothing; the primary part's keys may also
+    name: str, aspect: Aspect, given: Any, routed: Mapping[str, Any], where: str
+) -> AspectSettings:
+    # An aspect is given as a table of its keys, a bare boolean standing
+    # for its enabled key, or nothing; the primary aspect's keys may also
     # arrive routed from the entry's top level, and a key given both
     # ways is refused rather than one spelling silently winning.
 
@@ -1080,25 +1086,25 @@ def _resolve_part(
         table = dict(given)
     else:
         raise ConfigError(
-            f"{where}: expects a table of the part's keys, or true or false"
+            f"{where}: expects a table of the aspect's keys, or true or false"
             f" for its enabled key, got {given!r}"
         )
 
-    known = set(PART_KEYS) | set(part.settings)
+    known = set(ASPECT_KEYS) | set(aspect.settings)
     unknown = sorted(set(table) - known)
     if unknown:
         raise ConfigError(
-            f"{where}: unknown keys {unknown}; the part's keys are {sorted(known)}"
+            f"{where}: unknown keys {unknown}; the aspect's keys are {sorted(known)}"
         )
 
     twice = sorted(set(table) & set(routed))
     if twice:
         raise ConfigError(
-            f"{where}: {twice} given both on the entry and under the part; write"
+            f"{where}: {twice} given both on the entry and under the aspect; write"
             f" each once"
         )
 
-    return part._resolve(name, {**table, **routed}, where)
+    return aspect._resolve(name, {**table, **routed}, where)
 
 
 # ---------------------------------------------------------------------------

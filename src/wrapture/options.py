@@ -1,10 +1,10 @@
 """The recording options an [[observe]] entry and an instrumentation
-part share.
+aspect share.
 
 These are the keys wrapture owns that say how a group of bindings
 records: capture, capture_args, capture_result, redact, redact_result,
-redact_marker, leaf and stack, with enabled joining them under a part.
-An observe entry carries them as its own keys and a part of an
+redact_marker, leaf and stack, with enabled joining them under an aspect.
+An observe entry carries them as its own keys and an aspect of an
 instrumentation carries them as a sub-table, and they mean the same
 thing in both places because both places check them here and compose
 them here into the keyword arguments binding() and observed() take.
@@ -20,8 +20,8 @@ from .capture import redact as _redact
 from .exceptions import ConfigError
 from .stacks import _resolve_depth
 
-# The recording keys, in the order the documentation lists them; a
-# part adds enabled ahead of them.
+# The recording keys, in the order the documentation lists them; an
+# aspect adds enabled ahead of them.
 
 RECORDING_KEYS: tuple[str, ...] = (
     "capture",
@@ -34,7 +34,7 @@ RECORDING_KEYS: tuple[str, ...] = (
     "stack",
 )
 
-PART_KEYS: tuple[str, ...] = ("enabled", *RECORDING_KEYS)
+ASPECT_KEYS: tuple[str, ...] = ("enabled", *RECORDING_KEYS)
 
 
 def _names(value: Any) -> tuple[str, ...]:

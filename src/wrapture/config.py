@@ -336,7 +336,7 @@ class ObserveEntry:
         except TypeError as exc:
             raise ConfigError(f"{where}: {exc}") from None
 
-        # The recording keys are the vocabulary an instrumentation part
+        # The recording keys are the vocabulary an instrumentation aspect
         # shares, checked by the same code so a bad level or an
         # impossible combination fails the load in both places alike.
 
@@ -895,7 +895,7 @@ def _bindings_for(
     # The entry's own capture keys beat the config's top-level level,
     # each axis key beating the entry's capture in turn, and a redact
     # list composes over the arguments axis; the options module does
-    # the same for an instrumentation part.
+    # the same for an instrumentation aspect.
 
     recording = compose_recording(entry._recording, capture)
 

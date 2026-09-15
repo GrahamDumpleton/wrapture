@@ -1642,10 +1642,10 @@ of one or more instrumentations to a block. It takes what an
 `[[instrument]]` entry's `name` takes (a registered name, a
 qualified `name@distribution`, a `module:attr` reference) or the
 class itself, and its settings as keyword arguments when there is
-one item, or as `(item, settings)` pairs when there are several. A
-[part](instrumentation-packages.md#parts) of the instrumentation is a
-keyword whose value is a table of the part's keys, or a bare boolean
-for its switch (`views={"capture_result": "types"}`,
+one item, or as `(item, settings)` pairs when there are several. An
+[aspect](instrumentation-packages.md#aspects) of the instrumentation
+is a keyword whose value is a table of the aspect's keys, or a bare
+boolean for its switch (`views={"capture_result": "types"}`,
 `lifecycle=False`):
 
 ```python

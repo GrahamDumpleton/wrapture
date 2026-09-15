@@ -32,7 +32,7 @@ class FlaskInstrumentation(wrapture.Instrumentation):
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
         "ignore_paths": wrapture.Setting((), "paths never traced, exact match"),
-        "views": wrapture.Part("view functions", capture_result="shape"),
+        "views": wrapture.Aspect("view functions", capture_result="shape"),
     }
 
     @wrapture.instrumentation_hook("flask.app")
@@ -95,9 +95,9 @@ Reading down:
   the class-level claim consumers see is then true only for the
   triggers that keep it.
 - `settings` declares every key an `[[instrument]]` entry may carry,
-  each a `Setting(default, description)` or a `Part`, a named group
+  each a `Setting(default, description)` or an `Aspect`, a named group
   of the call sites the class binds with a switch and recording
-  defaults of its own, described under [parts](#parts) below. An
+  defaults of its own, described under [aspects](#aspects) below. An
   unknown key, or a value whose outer type does not match the
   default's, is a `ConfigError` when the config loads; the resolved
   values are `self.settings` inside the hooks. The description is
@@ -403,56 +403,56 @@ class FlaskInstrumentation(wrapture.Instrumentation):
 wrapture guarantees `routes` is a list before `configure()` runs; the
 class guarantees the rest.
 
-## Parts
+## Aspects
 
 An instrumentation rarely binds one kind of call site. A framework
 package wraps the request boundary, the view functions, the lifecycle
 callbacks and the template renders, and a setting such as
 `ignore_paths` belongs to the first of those and nothing else, while
 how a view's result is recorded is a question about the second alone.
-A `Part` declares such a group as a value in `settings` beside the
+An `Aspect` declares such a group as a value in `settings` beside the
 plain settings, so the declaration is one tree that mirrors the TOML:
-a `Setting` is a key of the entry, a `Part` is a sub-table of it.
+a `Setting` is a key of the entry, an `Aspect` is a sub-table of it.
 
 ```python
 class FlaskInstrumentation(wrapture.Instrumentation):
     ...
     settings = {
-        "requests": wrapture.Part(
+        "requests": wrapture.Aspect(
             "the request boundary",
             primary=True,
             ignore_paths=wrapture.Setting((), "request paths not to record"),
         ),
-        "views": wrapture.Part("view functions", capture_result="shape"),
-        "lifecycle": wrapture.Part("before, after and teardown callbacks"),
-        "templates": wrapture.Part("template rendering"),
+        "views": wrapture.Aspect("view functions", capture_result="shape"),
+        "lifecycle": wrapture.Aspect("before, after and teardown callbacks"),
+        "templates": wrapture.Aspect("template rendering"),
         "handled_errors": wrapture.Setting(True, "note an exception a handler absorbed"),
     }
 ```
 
-`Part(description, *, primary=False, **keys)`. The description is one
-line saying what the part wraps, shown by the listing tool and the
+`Aspect(description, *, primary=False, **keys)`. The description is one
+line saying what the aspect wraps, shown by the listing tool and the
 template. The keys are told apart by type:
 
 - A plain value is a default for one of the **recording keys**
   wrapture owns: `enabled`, `capture`, `capture_args`,
   `capture_result`, `redact`, `redact_result`, `redact_marker`,
   `leaf` and `stack`, the keys an `[[observe]]` entry accepts, checked
-  the same way and meaning the same thing under every part of every
+  the same way and meaning the same thing under every aspect of every
   package. `capture_result="shape"` above is one; a callable policy
   such as `wrapture.redact("token")` works too, and the listing shows
   it by its `description` attribute.
 
 - A `Setting` is a setting of the package's own that belongs to this
-  part, `ignore_paths` above.
+  aspect, `ignore_paths` above.
 
-A recording key can never be a `Setting`, at the top level or under a
-part, so a package cannot redefine what `leaf` means; a plain value
-under any other name is refused; and a part cannot nest a part. Every
-part is switchable, so `enabled` needs no declaring.
+A recording key can never be a `Setting`, at the top level or under an
+aspect, so a package cannot redefine what `leaf` means; a plain value
+under any other name is refused; and an aspect cannot nest an aspect.
+Every aspect is switchable, so `enabled` needs no declaring.
 
-In the file a part is a sub-table of the entry, and a bare boolean
-under the part's name is shorthand for its `enabled`:
+In the file an aspect is a sub-table of the entry, and a bare boolean
+under the aspect's name is shorthand for its `enabled`:
 
 ```toml
 [[instrument]]
@@ -466,20 +466,20 @@ capture_result = "types"
 ```
 
 `ignore_paths` and `redact` sit flat on the entry because `requests`
-is the **primary** part: a recording key, or one of the primary
-part's own settings, written at the top level of the entry applies to
-it, so a package with one part needs no sub-table at all. Writing
+is the **primary** aspect: a recording key, or one of the primary
+aspect's own settings, written at the top level of the entry applies to
+it, so a package with one aspect needs no sub-table at all. Writing
 them under `[instrument.requests]` means the same thing, and the same
-key in both places is a `ConfigError` naming it. At most one part is
+key in both places is a `ConfigError` naming it. At most one aspect is
 primary, and a package may have none, in which case a recording key
 at the top level is an unknown setting. The entry's own `enabled` and
-`triggers` keys are the entry's and never reach a part. From code the
-forms follow the TOML, a part being a keyword whose value is a table
+`triggers` keys are the entry's and never reach an aspect. From code the
+forms follow the TOML, an aspect being a keyword whose value is a table
 of its keys or a bare boolean:
 `FlaskInstrumentation(views={"capture_result": "types"}, lifecycle=False)`,
 and the same keywords to `wrapture.instrumentation("flask", ...)`.
 
-A key given under a part beats the part's declared default, which
+A key given under an aspect beats the aspect's declared default, which
 beats the level the active sinks declare, the fallback for any
 binding that sets nothing. A `redact` list composes over whatever
 level the arguments axis resolved to, as on an observe entry; a given
@@ -487,10 +487,10 @@ level the arguments axis resolved to, as on an observe entry; a given
 given `redact_result` replaces a declared `capture_result` rather
 than clashing with it.
 
-On the instance, `self.settings[name]` is the resolved part, with
-`enabled`, `options`, and item access to the part's own settings.
+On the instance, `self.settings[name]` is the resolved aspect, with
+`enabled`, `options`, and item access to the aspect's own settings.
 `options` are the keyword arguments for `wrapture.observed()` or
-`wrapture.binding()` that the part's recording keys amount to, any
+`wrapture.binding()` that the aspect's recording keys amount to, any
 `redact` list or `redact_result` already turned into a policy and
 only the keys that are set present, so a wrapping site is one splat:
 
@@ -513,7 +513,7 @@ options = {"capture_args": captured, **settings["statements"].options}
 ```
 
 The package policy is the default and an explicit `capture_args`
-under the part replaces it, the same override path as everywhere
+under the aspect replaces it, the same override path as everywhere
 else, which the package's README should say.
 
 ## Declaring what a target is
@@ -748,7 +748,7 @@ A class that cannot load shows its error in place, and one whose
 module imported its own target shows the warning described above.
 `--toml` writes the `[[instrument]]` template a user would paste into
 their file, every entry disabled, every setting commented out at its
-default and every part as a commented-out sub-table of its own, which
+default and every aspect as a commented-out sub-table of its own, which
 is also a quick check that the descriptions read well where they will
 be read.
 

@@ -1,5 +1,16 @@
 # Release notes
 
+## Version 1.0.0b4
+
+- `wrapture.Part` is renamed `wrapture.Aspect`, and the resolved form
+  on the instance `AspectSettings`, the config file being unchanged.
+  Reviewed in the packages that declare them, `Part` did not read
+  right beside `Instrumentation`, and an aspect of what the
+  instrumentation covers is a better fit for a thing that spans many
+  call sites. The rename lands hours after 1.0.0b3 introduced the
+  class, so there is no alias for the old name. See
+  [aspects](instrumentation-packages.md#aspects).
+
 ## Version 1.0.0b3
 
 - A new `shape` capture level, between `reference` and `summary`. A
@@ -19,7 +30,7 @@
   thing everywhere. A package may mark one part primary, whose keys
   may be written flat on the entry, and a bare boolean under a part's
   name is its switch. The listing tool and the generated template
-  print the parts. See [parts](instrumentation-packages.md#parts).
+  print the parts. See [aspects](instrumentation-packages.md#aspects).
 
 ## Version 1.0.0b2
 
