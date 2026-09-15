@@ -40,8 +40,7 @@ import wrapt
 
 from . import trace as _trace
 from .bindings import Binding, _select_members, binding
-from .capture import REFERENCE, CapturePolicy, _resolve_policy
-from .capture import redact as _redact
+from .capture import CapturePolicy, _resolve_policy
 from .collectors import Aggregate, Counter
 from .events import CATEGORIES, Event, _check_category
 from .exceptions import ConfigError, ConfigWarning
@@ -56,6 +55,7 @@ from .instrumentations import (
     _revert_applied,
 )
 from .logs import LogCapture, capture_logs
+from .options import RECORDING_KEYS, check_recording, compose_recording
 from .outputs import OutputPath
 from .sinks import (
     Depth,
@@ -68,7 +68,6 @@ from .sinks import (
     add_sink,
     remove_sink,
 )
-from .stacks import _resolve_depth
 from .timeline import Tape, seed_data
 from .windows import Window
 
@@ -314,9 +313,6 @@ class ObserveEntry:
                 f"{where}: trace must be true or false, got {self.trace!r}"
             )
 
-        if not isinstance(self.leaf, bool):
-            raise ConfigError(f"{where}: leaf must be true or false, got {self.leaf!r}")
-
         if not isinstance(self.category, str):
             raise ConfigError(
                 f"{where}: category must be a string, got {self.category!r}"
@@ -340,63 +336,17 @@ class ObserveEntry:
         except TypeError as exc:
             raise ConfigError(f"{where}: {exc}") from None
 
-        # The capture keys take the forms binding() accepts; a bad
-        # level fails the load rather than the apply.
+        # The recording keys are the vocabulary an instrumentation part
+        # shares, checked by the same code so a bad level or an
+        # impossible combination fails the load in both places alike.
 
-        for key in ("capture", "capture_args", "capture_result"):
-            value = getattr(self, key)
-            if value is None:
-                continue
+        check_recording(self._recording, where)
 
-            try:
-                _resolve_policy(value)
-            except ValueError as exc:
-                raise ConfigError(f"{where}: {key}: {exc}") from None
+    @property
+    def _recording(self) -> dict[str, Any]:
+        # The entry's recording keys as the options module takes them.
 
-        # Result redaction is a policy of its own on the result axis,
-        # so a level for that axis alongside it could never act; the
-        # marker only means something with a redaction to apply it to.
-
-        if not isinstance(self.redact_result, bool):
-            raise ConfigError(
-                f"{where}: redact_result must be true or false, got"
-                f" {self.redact_result!r}"
-            )
-
-        if self.redact_result and self.capture_result is not None:
-            raise ConfigError(
-                f"{where}: redact_result replaces the result with the marker,"
-                f" so capture_result has nothing to apply to; use one or the"
-                f" other"
-            )
-
-        if self.redact_marker is not None:
-            if not isinstance(self.redact_marker, str) or not self.redact_marker:
-                raise ConfigError(
-                    f"{where}: redact_marker must be a non-empty string, got"
-                    f" {self.redact_marker!r}"
-                )
-
-            if not self.redact and not self.redact_result:
-                raise ConfigError(
-                    f"{where}: redact_marker needs a redact list or"
-                    f" redact_result = true to apply to"
-                )
-
-        # The stack depth takes the forms binding() accepts, checked
-        # here so a bad value fails the load rather than the apply.
-
-        if self.stack is not None:
-            try:
-                depth = _resolve_depth(self.stack)
-            except ValueError as exc:
-                raise ConfigError(f"{where}: {exc}") from None
-
-            if isinstance(self.stack, bool) or depth is None or depth < 1:
-                raise ConfigError(
-                    f"{where}: stack must be 'caller', 'full' or a positive"
-                    f" frame count, got {self.stack!r}"
-                )
+        return {key: getattr(self, key) for key in RECORDING_KEYS}
 
 
 class AppliedConfig:
@@ -943,25 +893,11 @@ def _bindings_for(
             )
 
     # The entry's own capture keys beat the config's top-level level,
-    # each axis key beating the entry's capture in turn. A redact list
-    # then turns the arguments axis into a policy over its level:
-    # named parameters become the marker, everything else captures at
-    # the level that axis resolved to.
+    # each axis key beating the entry's capture in turn, and a redact
+    # list composes over the arguments axis; the options module does
+    # the same for an instrumentation part.
 
-    level = entry.capture if entry.capture is not None else capture
-    args_level = entry.capture_args if entry.capture_args is not None else level
-    result_level = entry.capture_result
-
-    marker = {} if entry.redact_marker is None else {"marker": entry.redact_marker}
-
-    args_policy: CapturePolicy | str | None = args_level
-    if entry.redact:
-        base = args_level if args_level is not None else REFERENCE
-        args_policy = _redact(*entry.redact, level=base, **marker)
-
-    result_policy: CapturePolicy | str | None = result_level
-    if entry.redact_result:
-        result_policy = _redact(**marker)
+    recording = compose_recording(entry._recording, capture)
 
     # A requests table is the entry's when=, reaching the whole tree:
     # an ignored request drops everything beneath it along with itself.
@@ -973,16 +909,12 @@ def _bindings_for(
         binding(
             module_name,
             prefix + member,
-            capture=level,
-            capture_args=args_policy,
-            capture_result=result_policy,
-            stack=entry.stack,
             mode=entry.mode or None,
             data=entry.data or None,
             when=request_filter,
             tree=request_filter is not None,
-            leaf=entry.leaf,
             category=entry.category or None,
+            **recording,
         )
         for member in members
     ]

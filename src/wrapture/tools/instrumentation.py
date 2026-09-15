@@ -30,6 +30,7 @@ from ..exceptions import ConfigError, ConfigWarning
 from ..instrumentations import (
     Instrumentation,
     InstrumentEntry,
+    Part,
     _plan,
     _registered,
     _resolve,
@@ -401,14 +402,7 @@ def _render_listing(
 
         if cls.settings:
             lines.append("  settings:")
-            rows = [
-                (f"{name} = {_toml_value(setting.default)}", setting.description)
-                for name, setting in cls.settings.items()
-            ]
-            width = max(len(text) for text, _ in rows)
-            for text, description in rows:
-                tail = f"   {description}" if description else ""
-                lines.append(f"    {text.ljust(width) if tail else text}{tail}")
+            lines.extend(_aligned(_settings_rows(cls), indent="    "))
         else:
             lines.append("  settings: (none)")
 
@@ -445,9 +439,10 @@ def _toml_key(key: str) -> str:
 
 def _toml_value(value: Any) -> str:
     """Render a setting default as a TOML value. None has no TOML
-    spelling and renders as a placeholder the caller comments out."""
+    spelling and renders as a placeholder the caller comments out, and
+    so does a callable, which the note beside it then describes."""
 
-    if value is None:
+    if value is None or callable(value):
         return "..."
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -463,6 +458,99 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     return json.dumps(str(value))
+
+
+def _policy_text(value: Any) -> str:
+    # A callable default is a policy the package built; it shows as its
+    # description where it has one, else as the callable's name.
+
+    description = getattr(value, "description", None)
+    if isinstance(description, str) and description:
+        return description
+    return getattr(value, "__qualname__", None) or repr(value)
+
+
+def _settings_rows(cls: type[Instrumentation]) -> list[tuple[int, str, str]]:
+    # The settings table as (depth, text, note) rows: a Setting is one
+    # row, a Part is a heading row with its switch and its keys beneath
+    # it, so the table also says what the package wraps.
+
+    rows: list[tuple[int, str, str]] = []
+
+    for name, setting in cls.settings.items():
+        if not isinstance(setting, Part):
+            rows.append(
+                (0, f"{name} = {_toml_value(setting.default)}", setting.description)
+            )
+            continue
+
+        primary = " (primary)" if setting.primary else ""
+        rows.append((0, f"{name}{primary}:", setting.description))
+
+        enabled = setting.defaults.get("enabled", True)
+        rows.append((1, f"enabled = {_toml_value(enabled)}", ""))
+
+        for key, value in setting.defaults.items():
+            if key == "enabled":
+                continue
+            note = _policy_text(value) if callable(value) else ""
+            rows.append((1, f"{key} = {_toml_value(value)}", note))
+
+        for key, inner in setting.settings.items():
+            rows.append((1, f"{key} = {_toml_value(inner.default)}", inner.description))
+
+    return rows
+
+
+def _aligned(rows: Sequence[tuple[int, str, str]], *, indent: str) -> list[str]:
+    # Lay the rows out with the notes in one column, each row indented
+    # by its depth under the given indent.
+
+    texts = [f"{indent}{'  ' * depth}{text}" for depth, text, _ in rows]
+    width = max(len(text) for text in texts)
+
+    lines: list[str] = []
+    for text, (_, _, note) in zip(texts, rows, strict=True):
+        lines.append(f"{text.ljust(width)}   {note}" if note else text)
+
+    return lines
+
+
+def _template_rows(cls: type[Instrumentation]) -> list[tuple[str, str]]:
+    # The commented-out settings of one template entry as (text, note)
+    # rows, a blank text separating each part's sub-table from what
+    # precedes it. A default with no TOML spelling says so in the note.
+
+    def row(key: str, value: Any, description: str) -> tuple[str, str]:
+        note = description
+        if value is None:
+            note = f"(no default) {note}".strip()
+        elif callable(value):
+            note = f"(package policy: {_policy_text(value)}) {note}".strip()
+        return f"# {key} = {_toml_value(value)}", note
+
+    rows: list[tuple[str, str]] = []
+    for name, setting in cls.settings.items():
+        if not isinstance(setting, Part):
+            rows.append(row(name, setting.default, setting.description))
+
+    for name, setting in cls.settings.items():
+        if not isinstance(setting, Part):
+            continue
+
+        note = f"{setting.description}{' (primary)' if setting.primary else ''}"
+        rows.append(("", ""))
+        rows.append((f"# [instrument.{name}]", note))
+        rows.append(row("enabled", setting.defaults.get("enabled", True), ""))
+
+        for key, value in setting.defaults.items():
+            if key != "enabled":
+                rows.append(row(key, value, ""))
+
+        for key, inner in setting.settings.items():
+            rows.append(row(key, inner.default, inner.description))
+
+    return rows
 
 
 def _render_toml(items: Sequence[_Listed], *, enabled: bool, skip: set[str]) -> str:
@@ -534,13 +622,7 @@ def _render_toml(items: Sequence[_Listed], *, enabled: bool, skip: set[str]) -> 
             lines.append("enabled = false")
 
         if cls.settings:
-            rows = []
-            for name, setting in cls.settings.items():
-                text = f"# {name} = {_toml_value(setting.default)}"
-                note = setting.description
-                if setting.default is None:
-                    note = f"(no default) {note}".strip()
-                rows.append((text, note))
+            rows = _template_rows(cls)
             width = max(len(text) for text, _ in rows)
             for text, note in rows:
                 if note:

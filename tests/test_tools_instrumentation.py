@@ -79,8 +79,17 @@ class FlaskishInstrumentation(wrapture.Instrumentation):
     removable = True
     settings = {
         "capture_headers": wrapture.Setting(False, "record request headers"),
-        "ignore_paths": wrapture.Setting((), "paths never traced, exact match"),
-        "timeout": wrapture.Setting(None, "seconds before a slow view is flagged"),
+        "timeout": wrapture.Setting(None, "slow view threshold in seconds"),
+        "requests": wrapture.Part(
+            "the request boundary",
+            primary=True,
+            ignore_paths=wrapture.Setting((), "paths never traced, exact match"),
+        ),
+        "views": wrapture.Part(
+            "view functions",
+            capture_args=wrapture.redact("token"),
+            capture_result="shape",
+        ),
     }
 
     @wrapture.instrumentation_hook("cfgt_flaskish.app")
@@ -212,9 +221,15 @@ def test_the_listing_describes_each_installed_instrumentation(
           requires: cfgt_werkzeugish
           removable: yes
           settings:
-            capture_headers = false   record request headers
-            ignore_paths = []         paths never traced, exact match
-            timeout = ...             seconds before a slow view is flagged
+            capture_headers = false      record request headers
+            timeout = ...                slow view threshold in seconds
+            requests (primary):          the request boundary
+              enabled = true
+              ignore_paths = []          paths never traced, exact match
+            views:                       view functions
+              enabled = true
+              capture_args = ...         redact token
+              capture_result = "shape"
 
         werkzeugish  (wrapture-instrumentation-werkzeugish 0.3)
           Routing tracing for Werkzeugish
@@ -432,9 +447,17 @@ def test_toml_writes_a_disabled_template_per_instrumentation(
         [[instrument]]
         name = "flaskish"
         enabled = false
-        # capture_headers = false   # record request headers
-        # ignore_paths = []         # paths never traced, exact match
-        # timeout = ...             # (no default) seconds before a slow view is flagged
+        # capture_headers = false    # record request headers
+        # timeout = ...              # (no default) slow view threshold in seconds
+
+        # [instrument.requests]      # the request boundary (primary)
+        # enabled = true
+        # ignore_paths = []          # paths never traced, exact match
+
+        # [instrument.views]         # view functions
+        # enabled = true
+        # capture_args = ...         # (package policy: redact token)
+        # capture_result = "shape"
 
         # werkzeugish@wrapture-instrumentation-werkzeugish 0.3
         # Routing tracing for Werkzeugish

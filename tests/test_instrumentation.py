@@ -33,12 +33,14 @@ from wrapture import (
     ConfigWarning,
     Instrumentation,
     InstrumentEntry,
+    Part,
     Setting,
     instrumentation,
     instrumentation_hook,
     load_config,
 )
-from wrapture.instrumentations import _active, _trampolines
+from wrapture.capture import REFERENCE
+from wrapture.instrumentations import PartSettings, _active, _trampolines
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -152,6 +154,30 @@ class Shop(Instrumentation):
         charge = wrapture.binding(module.Gateway, "charge", label=label).apply()
 
         self.on_cleanup(charge.remove)
+
+
+class Framework(Instrumentation):
+    """Observe a framework's requests and views."""
+
+    target = "cfgi_framework"
+    removable = True
+    settings = {
+        "requests": Part(
+            "the request boundary",
+            primary=True,
+            ignore_paths=Setting((), "paths not to record"),
+        ),
+        "views": Part("view functions", capture_result="shape"),
+        "lifecycle": Part("lifecycle callbacks"),
+        "handled_errors": Setting(True, "note an exception a handler absorbed"),
+    }
+
+    @instrumentation_hook("cfgi_framework")
+    def framework(self, name: str, module: Any) -> None:
+        views = self.settings["views"]
+        if views.enabled:
+            charge = wrapture.binding(module.Gateway, "charge", **views.options)
+            self.on_cleanup(charge.apply().remove)
 
 
 class TwoTriggers(Instrumentation):
@@ -447,6 +473,292 @@ def test_nothing_inside_a_collection_is_checked() -> None:
 def test_setting_description_must_be_a_string() -> None:
     with pytest.raises(TypeError, match="description must be a string"):
         Setting(1, 2)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# parts
+# ---------------------------------------------------------------------------
+
+
+def test_a_part_resolves_to_its_declared_defaults() -> None:
+    instance = Framework()
+
+    requests = instance.settings["requests"]
+    assert isinstance(requests, PartSettings)
+    assert requests.name == "requests"
+    assert requests.description == "the request boundary"
+    assert requests.enabled is True
+    assert requests.options == {}
+    assert requests["ignore_paths"] == ()
+    assert requests.settings == {"ignore_paths": ()}
+    assert "ignore_paths" in requests
+
+    views = instance.settings["views"]
+    assert views.enabled is True
+    assert views.options == {"capture_result": "shape"}
+    assert views.settings == {}
+
+    assert instance.settings["lifecycle"].enabled is True
+    assert instance.settings["handled_errors"] is True
+
+
+def test_a_part_takes_a_table_of_its_keys() -> None:
+    instance = Framework(
+        views={"capture_result": "types", "redact": ["token"], "stack": "caller"}
+    )
+
+    options = instance.settings["views"].options
+    assert options["capture_result"] == "types"
+    assert options["stack"] == "caller"
+
+    # The redact list is already the policy binding() takes, composed
+    # over the level the arguments axis resolved to.
+
+    policy = options["capture_args"]
+    assert callable(policy)
+    assert policy.description == "redact token"
+    assert policy.level == REFERENCE
+    assert policy("token", "s3cret") == "<redacted>"
+
+
+def test_a_bare_boolean_is_the_parts_switch() -> None:
+    lifecycle = Framework(lifecycle=False).settings["lifecycle"]
+    assert lifecycle.enabled is False
+    assert lifecycle.options == {}
+
+    lifecycle = Framework(lifecycle={"enabled": False}).settings["lifecycle"]
+    assert lifecycle.enabled is False
+
+
+def test_the_primary_parts_keys_may_be_written_flat() -> None:
+    flat = Framework(ignore_paths=["/health"], redact="token", leaf=True)
+    nested = Framework(
+        requests={"ignore_paths": ["/health"], "redact": "token", "leaf": True}
+    )
+
+    for instance in (flat, nested):
+        requests = instance.settings["requests"]
+        assert requests["ignore_paths"] == ["/health"]
+        assert requests.options["leaf"] is True
+        assert requests.options["capture_args"].description == "redact token"
+
+
+def test_a_key_given_flat_and_under_the_primary_part_is_refused() -> None:
+    with pytest.raises(ConfigError, match=r"\['leaf'\] given both on the entry"):
+        Framework(leaf=True, requests={"leaf": False})
+
+
+def test_a_flat_recording_key_needs_a_primary_part() -> None:
+    class NoPrimary(Instrumentation):
+        target = "cfgi_noprimary"
+        settings = {"client": Part("outgoing calls")}
+
+        @instrumentation_hook("cfgi_noprimary")
+        def hook(self, name: str, module: Any) -> None:
+            pass
+
+    with pytest.raises(ConfigError, match=r"unknown settings \['leaf'\]"):
+        NoPrimary(leaf=True)
+
+
+def test_an_unknown_key_names_the_primary_parts_keys_too() -> None:
+    with pytest.raises(
+        ConfigError, match=r"unknown settings \['ignore_path'\]"
+    ) as info:
+        Framework(ignore_path=["/health"])
+
+    assert "'ignore_paths'" in str(info.value)
+    assert "'capture_result'" in str(info.value)
+
+
+def test_an_unknown_key_under_a_part_is_refused() -> None:
+    with pytest.raises(
+        ConfigError, match=r"part 'views': unknown keys \['ignore_paths'\]"
+    ):
+        Framework(views={"ignore_paths": []})
+
+
+def test_a_part_is_given_as_a_table_or_a_boolean() -> None:
+    with pytest.raises(ConfigError, match="part 'views': expects a table"):
+        Framework(views="yes")
+
+
+def test_a_parts_own_setting_is_type_checked() -> None:
+    with pytest.raises(ConfigError, match="setting 'ignore_paths' expects a list"):
+        Framework(ignore_paths="/health")
+
+
+def test_recording_keys_under_a_part_are_checked_as_an_observe_entrys_are() -> None:
+    with pytest.raises(
+        ConfigError, match="part 'views': capture_result: capture level"
+    ):
+        Framework(views={"capture_result": "sumary"})
+
+    with pytest.raises(ConfigError, match="part 'views': redact_marker needs"):
+        Framework(views={"redact_marker": "***"})
+
+    with pytest.raises(ConfigError, match="part 'views': enabled must be true"):
+        Framework(views={"enabled": "yes"})
+
+    with pytest.raises(ConfigError, match="part 'views': stack must be"):
+        Framework(views={"stack": 0})
+
+
+def test_a_given_key_displaces_the_default_it_replaces() -> None:
+    # The views part declares capture_result = "shape"; result
+    # redaction replaces that rather than clashing with it, and capture
+    # covers both axes over the declared one.
+
+    masked = Framework(views={"redact_result": True}).settings["views"]
+    assert masked.options["capture_result"].description == "redact everything"
+
+    typed = Framework(views={"capture": "types"}).settings["views"]
+    assert typed.options == {"capture_args": "types", "capture_result": "types"}
+
+    shaped = Framework(views={"capture": "types", "capture_result": "summary"})
+    assert shaped.settings["views"].options == {
+        "capture_args": "types",
+        "capture_result": "summary",
+    }
+
+
+def test_the_resolved_part_is_read_only() -> None:
+    views = Framework().settings["views"]
+
+    with pytest.raises(TypeError):
+        views.options["capture_result"] = "none"
+
+    with pytest.raises(TypeError):
+        views.settings["x"] = 1
+
+
+def test_a_recording_key_cannot_be_a_setting() -> None:
+    with pytest.raises(ConfigError, match="'leaf' is a recording key wrapture owns"):
+
+        class Leafy(Instrumentation):
+            target = "cfgi_leafy"
+            settings = {"leaf": Setting(True, "record as a leaf")}
+
+    with pytest.raises(ConfigError, match="'leaf' is a recording key wrapture owns"):
+        Part("statements", leaf=Setting(True, "record as a leaf"))
+
+
+def test_a_part_declares_recording_defaults_or_settings_and_nothing_else() -> None:
+    with pytest.raises(ConfigError, match="cannot nest a part"):
+        Part("outer", inner=Part("inner"))
+
+    with pytest.raises(ConfigError, match="'threshold' is neither a recording key"):
+        Part("charges", threshold=100)
+
+    with pytest.raises(ConfigError, match="enabled must default to true or false"):
+        Part("charges", enabled="yes")
+
+    with pytest.raises(TypeError, match="description must be a string"):
+        Part(1)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="primary must be a boolean"):
+        Part("charges", primary="yes")  # type: ignore[arg-type]
+
+
+def test_a_parts_declared_defaults_are_checked_when_the_class_is_defined() -> None:
+    with pytest.raises(
+        ConfigError, match="part 'views': capture_result: capture level"
+    ):
+
+        class Bad(Instrumentation):
+            target = "cfgi_bad"
+            settings = {"views": Part("view functions", capture_result="sumary")}
+
+
+def test_at_most_one_part_is_primary() -> None:
+    with pytest.raises(ConfigError, match="at most one part may be primary"):
+
+        class TwoPrimaries(Instrumentation):
+            target = "cfgi_twoprimaries"
+            settings = {
+                "requests": Part("requests", primary=True),
+                "views": Part("views", primary=True),
+            }
+
+
+def test_a_part_and_its_resolved_form_describe_themselves() -> None:
+    part = Part("view functions", primary=True, capture_result="shape")
+    assert repr(part) == "Part('view functions', primary=True, capture_result='shape')"
+
+    views = Framework().settings["views"]
+    assert repr(views) == (
+        "PartSettings('views', enabled=True, options={'capture_result': 'shape'},"
+        " settings={})"
+    )
+
+
+def test_the_loader_reads_a_parts_sub_table(tmp_path: Path) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[instrument]]
+            name = "{__name__}:Framework"
+            ignore_paths = ["/health"]
+            lifecycle = false
+
+            [instrument.views]
+            capture_result = "types"
+            """
+        )
+    )
+
+    (entry,) = load_config(source).instrument
+
+    assert entry.settings == {
+        "ignore_paths": ["/health"],
+        "lifecycle": False,
+        "views": {"capture_result": "types"},
+    }
+
+
+def test_the_loader_validates_a_parts_keys_against_the_declaration(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "trace.toml"
+    source.write_text(
+        textwrap.dedent(
+            f"""
+            [[instrument]]
+            name = "{__name__}:Framework"
+
+            [instrument.views]
+            capture_result = "sumary"
+            """
+        )
+    )
+
+    with pytest.raises(ConfigError, match="part 'views': capture_result"):
+        load_config(source)
+
+
+def test_a_parts_options_reach_the_wrapping_site() -> None:
+    module = _fake_module("cfgi_framework", Gateway=Gateway)
+
+    # The declared "shape" default records the result's size only.
+
+    with instrumentation(Framework), wrapture.timeline() as tape:
+        module.Gateway().charge(5)
+
+    (event,) = tape.all
+    assert event.result == "<str 4 chars>"
+
+    with (
+        instrumentation(Framework, views={"capture_result": "summary"}),
+        wrapture.timeline() as tape,
+    ):
+        module.Gateway().charge(5)
+
+    (event,) = tape.all
+    assert event.result == "ch_5"
+
+    with instrumentation(Framework, views=False):
+        assert not _patched(module.Gateway)
 
 
 # ---------------------------------------------------------------------------
