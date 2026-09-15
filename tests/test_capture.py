@@ -19,7 +19,7 @@ from wrapture import (
     redact,
     timeline,
 )
-from wrapture.capture import NONE, summarize, type_name
+from wrapture.capture import NONE, shape, summarize, type_name
 
 
 class Ledger:
@@ -69,6 +69,19 @@ def test_summary_snapshots_a_bounded_repr() -> None:
         assert event.arguments["entries"] == "<list ['a', 'b']>"
         assert event.args is None
         assert event.result == 2
+
+
+def test_shape_records_size_without_contents() -> None:
+    record = binding(Ledger, "record", capture="shape")
+
+    with timeline(record):
+        Ledger().record(["a", "b", "c"])
+
+        event = record.events.first
+        assert event.arguments is not None
+        assert event.arguments["entries"] == "<list 3 items>"
+        assert event.args is None
+        assert event.result == 3
 
 
 def test_types_records_type_names_only() -> None:
@@ -369,6 +382,30 @@ def test_summarize_bounds_work_and_never_raises() -> None:
     assert summarize({"k": "v"}) == "<dict {'k': 'v'}>"
     assert summarize(42) == 42
     assert summarize(Unreprable()) == "<unreprable Unreprable: RuntimeError>"
+
+
+def test_shape_keeps_the_type_and_size_of_data_and_summarises_the_rest() -> None:
+    class Response:
+        def __repr__(self) -> str:
+            return "<Response 29 bytes [200 OK]>"
+
+    # Strings and containers are the values a framework turns into a
+    # body, so they record as their size alone, one item singular.
+
+    assert shape("x" * 5120) == "<str 5120 chars>"
+    assert shape("x") == "<str 1 char>"
+    assert shape(b"\x00" * 2048) == "<bytes 2048>"
+    assert shape(list(range(40))) == "<list 40 items>"
+    assert shape((1,)) == "<tuple 1 item>"
+    assert shape({"a", "b"}) == "<set 2 items>"
+    assert shape({"k": "v", "l": "w", "m": "x"}) == "<dict 3 keys>"
+
+    # Atomic values are themselves and everything else is the summary
+    # form, so a response object still reads as its repr.
+
+    assert shape(42) == 42
+    assert shape(None) is None
+    assert shape(Response()) == "<Response 29 bytes [200 OK]>"
 
 
 # ---------------------------------------------------------------------------

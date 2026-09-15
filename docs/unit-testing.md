@@ -998,6 +998,11 @@ The levels, named by string and ordered by cost:
 - `"types"` stores type names only (`<list>`), and never calls user
   code.
 - `"reference"` stores references; the default.
+- `"shape"` stores the type and size of a string or container
+  (`<dict 3 keys>`, `<list 40 items>`, `<str 5120 chars>`) and never
+  its contents, an atomic value as itself, and anything else as the
+  summary form below. It is the level for values that are data rather
+  than objects: a response body, a parsed request, a query's rows.
 - `"summary"` stores a bounded, type-aware repr. It survives locks and
   sockets and retains nothing, but repr is user code and may have side
   effects: summarising a lazy ORM object can issue the very query being

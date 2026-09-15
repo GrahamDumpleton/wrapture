@@ -12,13 +12,14 @@ callable fn(name, value) -> stored applied to each captured value:
     NONE        no arguments, no result; skips signature binding
     TYPES       type names only; never calls user code
     REFERENCE   store references (what unittest.mock does); the default
+    SHAPE       type and size for strings and containers, else the summary
     SUMMARY     bounded repr; survives locks and sockets, retains nothing
     SNAPSHOT    deepcopy; highest fidelity, falls back where it raises
 
 The safe levels are the ones that call no user code: NONE, TYPES and
-REFERENCE cannot trigger anything, while SUMMARY and SNAPSHOT execute
-methods on the values being captured, which may be slow, may raise, and
-may have effects. That is why REFERENCE is the default.
+REFERENCE cannot trigger anything, while SHAPE, SUMMARY and SNAPSHOT
+execute methods on the values being captured, which may be slow, may
+raise, and may have effects. That is why REFERENCE is the default.
 """
 
 from __future__ import annotations
@@ -31,8 +32,9 @@ from urllib.parse import unquote_plus
 NONE = 0
 TYPES = 1
 REFERENCE = 2
-SUMMARY = 3
-SNAPSHOT = 4
+SHAPE = 3
+SUMMARY = 4
+SNAPSHOT = 5
 
 CapturePolicy = int | Callable[[str | None, Any], Any]
 
@@ -43,6 +45,7 @@ _LEVEL_NAMES = {
     "none": NONE,
     "types": TYPES,
     "reference": REFERENCE,
+    "shape": SHAPE,
     "summary": SUMMARY,
     "snapshot": SNAPSHOT,
 }
@@ -124,6 +127,45 @@ def summarize(value: Any, *, limit: int = 200, items: int = 10) -> Any:
     if len(text) > limit:
         return text[:limit] + f"...+{len(text) - limit}"
     return text
+
+
+def _counted(kind: str, count: int, unit: str) -> str:
+    plural = unit if count == 1 else unit + "s"
+    return f"<{kind} {count} {plural}>"
+
+
+def shape(value: Any) -> Any:
+    """Type and size for the values a program treats as data.
+
+    A string or a container records as what it is and how big it is,
+    `<dict 3 keys>`, `<list 40 items>`, `<str 5120 chars>`,
+    `<bytes 2048>`, and never its contents: these are the values a
+    framework turns into a request or response body, and the body is
+    what a recording should not carry by default. An atomic value
+    records as itself and anything else as its bounded summary, so a
+    response object still reads as the summary makes it read.
+
+    This is the container branch of summarize() with the contents left
+    out. It calls repr() on the values it summarises, so it is user
+    code on that path, as SUMMARY is.
+    """
+
+    if isinstance(value, _ATOMIC):
+        return value
+
+    if isinstance(value, str):
+        return _counted("str", len(value), "char")
+
+    if isinstance(value, bytes):
+        return f"<bytes {len(value)}>"
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return _counted(type(value).__name__, len(value), "item")
+
+    if isinstance(value, dict):
+        return _counted("dict", len(value), "key")
+
+    return summarize(value)
 
 
 def redact(
@@ -294,5 +336,8 @@ def _apply_capture(level: int, value: Any) -> Any:
 
     if level == SUMMARY:
         return summarize(value)
+
+    if level == SHAPE:
+        return shape(value)
 
     return value

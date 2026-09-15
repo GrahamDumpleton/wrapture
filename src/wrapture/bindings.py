@@ -2966,7 +2966,7 @@ def binding(
 
     `capture=` overrides how much of the recorded values this binding
     stores: a level named by string ("none", "types", "reference",
-    "summary" or "snapshot"), or a fn(name, value) callable.
+    "shape", "summary" or "snapshot"), or a fn(name, value) callable.
     `capture_args=` and `capture_result=` control the two axes
     separately and win over the shorthand. Left unset, the binding
     follows what the sink consuming the events declares.
