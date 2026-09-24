@@ -30,8 +30,8 @@ exclude_patterns = ["_build"]
 
 html_theme = "sphinx_rtd_theme"
 
-# The logos live here, and are copied into the build output alongside the
-# pages that reference them.
+# The logo lives here, and is copied into the build output alongside the
+# pages that reference it.
 html_static_path = ["_static"]
 
 # Give every page an "Edit on GitHub" link pointing at its source in the
