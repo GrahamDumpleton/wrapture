@@ -1,8 +1,9 @@
 """The autowrapt bootstrap entry point: zero-code injection.
 
 Two opt-ins gate this path, and both live outside wrapture. The
-autowrapt package must be installed, whose .pth hook is what makes
-interpreter startup do anything at all, and
+autowrapt package must be installed, whose startup hook (a PEP 829
+.start file on Python 3.15 and later, a .pth file before that) is
+what makes interpreter startup do anything at all, and
 AUTOWRAPT_BOOTSTRAP=wrapture must be set in the environment. The
 variable's value names an entry point group that autowrapt hands to
 wrapt.discover_post_import_hooks() once site initialisation

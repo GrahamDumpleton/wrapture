@@ -1397,6 +1397,13 @@ applies what it finds, before the application's own code runs. The
 runner and autowrapt are two doorways into identical machinery;
 nothing is expressible through one and not the other.
 
+How autowrapt hooks startup, a PEP 829 `.start` file on Python 3.15
+and later and a `.pth` file before that, is described under
+[applying patches at interpreter startup](https://wrapt.readthedocs.io/en/latest/monkey.html#applying-patches-at-interpreter-startup)
+in the wrapt documentation. Install autowrapt 2.0.0 or later: it is
+the first release to ship the `.start` file, and Python 3.15 onwards
+phases out running code from `.pth` files in its favour.
+
 Positioning matters here. Injection is a development, staging and
 break-glass tool: the unwritten rule for autowrapt is that it is not
 installed on production systems in normal situations, precisely
