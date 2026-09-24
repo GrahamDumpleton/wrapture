@@ -62,6 +62,7 @@ each take one question you might arrive with and answer it end to end.
 ## Blog posts and workshops
 
 [![Launch on Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/GrahamDumpleton/wrapture-workshops/main?urlpath=lab)
+[![Open in GitHub Codespaces](https://img.shields.io/badge/launch-codespaces-579ACA?logo=github&logoColor=white)](https://codespaces.new/GrahamDumpleton/wrapture-workshops?quickstart=1)
 
 A series of blog posts walks through wrapture one area at a time, from
 the introduction through unit testing to tracing; the
@@ -69,8 +70,11 @@ the introduction through unit testing to tracing; the
 on Graham Dumpleton's blog lists them in reading order. Alongside them,
 [wrapture-workshops](https://github.com/GrahamDumpleton/wrapture-workshops)
 holds two dozen guided, hands-on workshops that run in JupyterLab and
-check your work as you go; the badge above starts them on
-[mybinder.org](https://mybinder.org) with nothing to install. The
+check your work as you go. The badges above start them with nothing
+to install: on [mybinder.org](https://mybinder.org) with no account
+needed, or in [GitHub Codespaces](https://github.com/features/codespaces)
+with a GitHub account. The repository README explains each option and
+how to run the workshops locally. The
 [blog posts and workshops](https://wrapture.readthedocs.io/en/latest/blog-posts-and-workshops.html)
 page of the documentation lists both in full.
 

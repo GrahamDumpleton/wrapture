@@ -7,8 +7,9 @@ and check your work as you go. These docs are the reference; the posts
 and the workshops are the tour.
 
 [![Launch on Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/GrahamDumpleton/wrapture-workshops/main?urlpath=lab)
+[![Open in GitHub Codespaces](https://img.shields.io/badge/launch-codespaces-579ACA?logo=github&logoColor=white)](https://codespaces.new/GrahamDumpleton/wrapture-workshops?quickstart=1)
 
-The workshops need nothing installed. The badge above, or
+The workshops need nothing installed. The Binder badge above, or
 [this link](https://mybinder.org/v2/gh/GrahamDumpleton/wrapture-workshops/main?urlpath=lab),
 starts them on [mybinder.org](https://mybinder.org), a free public
 service that builds the workshops repository into a temporary
@@ -16,6 +17,19 @@ JupyterLab running in your browser. Building takes a minute or two.
 A session is discarded when it ends, so finish a workshop in the
 session you started it in, and shut the session down when you are
 done rather than closing the tab.
+
+The Codespaces badge, or
+[this link](https://codespaces.new/GrahamDumpleton/wrapture-workshops?quickstart=1),
+starts them instead in [GitHub Codespaces](https://github.com/features/codespaces),
+which builds the repository into a container of your own in the cloud
+and opens it in VS Code in the browser, with JupyterLab served on a
+forwarded port. It needs a GitHub account and uses your account's
+Codespaces allowance. Unlike a Binder session, a codespace is kept
+until you delete it, so your work survives between visits; delete it
+from [github.com/codespaces](https://github.com/codespaces) when you
+have finished with the workshops. The repository
+[README](https://github.com/GrahamDumpleton/wrapture-workshops#launch-on-codespaces)
+describes the codespace in full.
 
 ## Blog posts
 
@@ -85,8 +99,8 @@ pinned in the repository, so these docs may describe a newer version
 than the one a workshop uses. A feature described here may not be in a
 workshop until its pin moves.
 
-Besides Binder, the workshops run locally under any JupyterLab: the
-repository's
+Besides Binder and Codespaces, the workshops run locally under any
+JupyterLab: the repository's
 [README](https://github.com/GrahamDumpleton/wrapture-workshops#run-locally)
 has the steps, with uv and with pip. The list below is in the order to
 take them, with roughly how long each takes; the repository README
