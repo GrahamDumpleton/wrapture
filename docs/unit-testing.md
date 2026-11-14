@@ -783,6 +783,10 @@ arguments, the event keeps both sides: `args` as the caller sent them,
 and `forwarded` as the `(args, kwargs)` the wrapped function actually
 received. No substitution-based mock can record that distinction, because
 replacing a function discards what it would have been called with.
+`forwarded` is captured under the same policy as the arguments: by
+reference it holds the values as passed, and at any other level, or
+with a policy such as `redact()`, each value is captured as its
+argument is.
 
 Calls on `async def` targets record the awaited outcome, not the
 coroutine object: the event completes when the coroutine does, and calls
@@ -1056,6 +1060,12 @@ returned, and `capture_args=wrapture.redact()` hides every argument
 while keeping the shape of the call. Nothing is left for `level=` to
 apply to in the bare form, so giving both is refused. `marker=`
 replaces the `<redacted>` text in either form.
+
+The policy covers `forwarded` too, the arguments call behaviour passed
+on to the wrapped function, so a value masked in `arguments` is masked
+there as well. `forwarded` keeps the raw call shape, so a positional is
+matched by the name of the parameter it lands on, and one gathered by
+`*args` has no name to match.
 
 The same vocabulary reaches URL query strings through
 `capture_query(query, policy="reference")`, which returns the form the

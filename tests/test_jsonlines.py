@@ -251,6 +251,32 @@ def test_values_captured_by_reference_are_reduced_at_serialisation(
     assert "connection" in line["result"]
 
 
+def test_forwarded_arguments_are_written_under_the_capture_policy(
+    tmp_path: Path,
+) -> None:
+    class Vault:
+        def open(self, user: str, password: str) -> str:
+            return "opened"
+
+    trace = tmp_path / "trace.jsonl"
+    sink = JSONLines(trace)
+
+    vault = binding(Vault, "open", capture_args=wrapture.redact("password"))
+    vault.on_call.decorates(
+        lambda wrapped, instance, args, kwargs: wrapped(*args, **kwargs)
+    )
+
+    with vault, listening(sink):
+        Vault().open("graham", password="hunter2")
+
+    sink.close()
+    (line,) = read_lines(trace)
+
+    assert line["arguments"]["password"] == "<redacted>"
+    assert line["forwarded"]["kwargs"]["password"] == "<redacted>"
+    assert "hunter2" not in json.dumps(line)
+
+
 def test_self_referential_values_cannot_hang_serialisation(tmp_path: Path) -> None:
     class Builder:
         def loop(self) -> list[Any]:

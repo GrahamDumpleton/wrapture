@@ -426,12 +426,26 @@ def _outcome_kind(outcome: Any) -> str | None:
     return None
 
 
-def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
+def _forwarder(
+    wrapped: WrappedFunction, event: Event, capture: _ForwardCapture | None
+) -> WrappedFunction:
     """The `wrapped` handed to behaviour, recording what the original
-    actually received, which may differ from what the caller sent."""
+    actually received, which may differ from what the caller sent.
+
+    What is recorded passes through `capture`, the binding's argument
+    capture policy, so a value the policy masks in `arguments` is
+    masked in `forwarded` too. None records nothing, for a call whose
+    arguments are not captured at all.
+    """
 
     def forward(*args: Any, **kwargs: Any) -> Any:
-        event.forwarded = (args, kwargs)
+        if capture is not None:
+            guard = _in_recorder.set(True)
+            try:
+                event.forwarded = capture(args, kwargs)
+            finally:
+                _in_recorder.reset(guard)
+
         return wrapped(*args, **kwargs)
 
     # Carry the target's names, so anything behaviour derives from the
@@ -444,6 +458,77 @@ def _forwarder(wrapped: WrappedFunction, event: Event) -> WrappedFunction:
             setattr(forward, attribute, name)
 
     return forward
+
+
+# Captures the (args, kwargs) a call forwarded, returning the form the
+# event records.
+
+_ForwardCapture = Callable[
+    [tuple[Any, ...], dict[str, Any]], tuple[tuple[Any, ...], dict[str, Any]]
+]
+
+
+def _forward_capture(
+    info: SignatureInfo, policy: CapturePolicy
+) -> _ForwardCapture | None:
+    """The capture for what a call forwards, under the argument policy.
+
+    At NONE nothing is recorded. By reference, with no by-name policy,
+    the values are kept as they are, which is what a test asserting on
+    a transform wants. Above that, or with a by-name policy such as
+    redact(), each value is captured as the arguments are: a keyword
+    by its name, and a positional by the name of the parameter it
+    lands on in the target's signature, so redact("password") masks a
+    password passed either way. A positional with no parameter of its
+    own (one gathered by *args, or with no signature to read) is
+    captured under no name.
+    """
+
+    level = _level_of(policy)
+
+    if level == NONE:
+        return None
+
+    if not callable(policy) and level == REFERENCE:
+        return lambda args, kwargs: (args, kwargs)
+
+    names = _positional_names(info)
+
+    def capture(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        captured_args = tuple(
+            _capture_value(policy, names[index] if index < len(names) else None, value)
+            for index, value in enumerate(args)
+        )
+        captured_kwargs = {
+            name: _capture_value(policy, name, value) for name, value in kwargs.items()
+        }
+
+        return captured_args, captured_kwargs
+
+    return capture
+
+
+def _positional_names(info: SignatureInfo) -> tuple[str, ...]:
+    """The names of the parameters a positional argument can fill, in
+    order, stopping at *args; empty when there is no signature."""
+
+    if info.signature is None:
+        return ()
+
+    names: list[str] = []
+
+    for parameter in info.signature.parameters.values():
+        if parameter.kind not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            break
+
+        names.append(parameter.name)
+
+    return tuple(names)
 
 
 async def _record_awaited(
@@ -2148,9 +2233,13 @@ class Binding:
             # the bookkeeping calls that is itself observed passes
             # through instead of recording recursively.
 
+            policy = bnd._args_policy(active, phase)
+
             guard = _in_recorder.set(True)
             try:
-                event = bnd._record_call(active, wrapped, instance, args, kwargs, phase)
+                event = bnd._record_call(
+                    active, wrapped, instance, args, kwargs, phase, policy
+                )
             finally:
                 _in_recorder.reset(guard)
 
@@ -2188,7 +2277,17 @@ class Binding:
                     args,
                     kwargs,
                     event,
-                    via=_forwarder(wrapped, event) if phase is not None else None,
+                    via=(
+                        _forwarder(
+                            wrapped,
+                            event,
+                            _forward_capture(
+                                cached_signature_info(bnd._signatures, wrapped), policy
+                            ),
+                        )
+                        if phase is not None
+                        else None
+                    ),
                     slot=slot,
                 )
             except BaseException as exc:
@@ -2271,6 +2370,23 @@ class Binding:
 
         return wrapper
 
+    def _args_policy(
+        self, active: tuple[Sink, ...], phase: Phase | None
+    ) -> CapturePolicy:
+        """The argument capture policy for one call: the binding's
+        override, else the highest level the active sinks declare, and
+        at least by reference when an until= predicate needs to see the
+        arguments."""
+
+        policy = self._capture_args
+        if policy is None:
+            policy = _required_policy(active, "capture_args")
+
+        if phase is not None and phase.watches and _level_of(policy) < REFERENCE:
+            policy = REFERENCE
+
+        return policy
+
     def _record_call(
         self,
         active: tuple[Sink, ...],
@@ -2279,20 +2395,8 @@ class Binding:
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         phase: Phase | None,
+        policy: CapturePolicy,
     ) -> Event:
-        # Resolve the argument capture policy: the binding's override,
-        # else the highest level the active sinks declare.
-
-        policy = self._capture_args
-        if policy is None:
-            policy = _required_policy(active, "capture_args")
-
-        # An until= predicate needs the arguments whatever the sinks
-        # asked for, so capture at least by reference for it.
-
-        if phase is not None and phase.watches and _level_of(policy) < REFERENCE:
-            policy = REFERENCE
-
         level = _level_of(policy)
 
         # The private event a watched phase sees on an unrecorded call
@@ -2622,7 +2726,15 @@ class Binding:
             final = slot[0]
 
             if final is not None and final.watches:
-                event = self._record_call((), wrapped, instance, args, kwargs, final)
+                event = self._record_call(
+                    (),
+                    wrapped,
+                    instance,
+                    args,
+                    kwargs,
+                    final,
+                    self._args_policy((), final),
+                )
                 event.exception = exc
                 self._completed(operation, final, event)
 
@@ -2632,7 +2744,9 @@ class Binding:
         if final is None or not final.watches:
             return outcome
 
-        event = self._record_call((), wrapped, instance, args, kwargs, final)
+        event = self._record_call(
+            (), wrapped, instance, args, kwargs, final, self._args_policy((), final)
+        )
 
         # A coroutine has not run yet, so the predicate sees it once it
         # resolves; a generator is shown at construction, with no result.

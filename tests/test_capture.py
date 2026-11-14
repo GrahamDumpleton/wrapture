@@ -252,6 +252,69 @@ def test_a_custom_callable_is_a_policy() -> None:
 
 
 # ---------------------------------------------------------------------------
+# forwarded arguments
+# ---------------------------------------------------------------------------
+
+
+def passing_through(
+    wrapped: Any, instance: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Any:
+    return wrapped(*args, **kwargs)
+
+
+def test_forwarded_arguments_are_redacted_by_name_however_passed() -> None:
+    vault = binding(Vault, "open", capture_args=redact("secret"))
+    vault.on_call.decorates(passing_through)
+
+    with timeline(vault):
+        Vault().open("hunter2", 3)
+        Vault().open(secret="hunter2", attempts=3)
+
+        # A positional is captured under the name of the parameter it
+        # lands on, so the policy masks it as it masks the keyword.
+
+        assert vault.events.first.forwarded == (("<redacted>", 3), {})
+        assert vault.events.last.forwarded == (
+            (),
+            {"secret": "<redacted>", "attempts": 3},
+        )
+
+
+def test_forwarded_arguments_follow_the_capture_level() -> None:
+    vault = binding(Vault, "open", capture="types")
+    vault.on_call.decorates(passing_through)
+
+    with timeline(vault):
+        Vault().open("hunter2", attempts=3)
+
+        assert vault.events.first.forwarded == (("<str>",), {"attempts": "<int>"})
+
+
+def test_forwarded_arguments_are_not_recorded_when_arguments_are_not() -> None:
+    vault = binding(Vault, "open", capture_args=NONE)
+    vault.on_call.decorates(passing_through)
+
+    with timeline(vault):
+        Vault().open("hunter2")
+
+        assert vault.events.first.arguments is None
+        assert vault.events.first.forwarded is None
+
+
+def test_forwarded_arguments_by_reference_are_kept_as_passed() -> None:
+    entries = ["a", "b"]
+    record = binding(Ledger, "record")
+    record.on_call.decorates(passing_through)
+
+    with timeline(record):
+        Ledger().record(entries)
+
+        forwarded = record.events.first.forwarded
+        assert forwarded is not None
+        assert forwarded[0][0] is entries
+
+
+# ---------------------------------------------------------------------------
 # injected results
 # ---------------------------------------------------------------------------
 

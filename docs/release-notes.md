@@ -2,6 +2,17 @@
 
 ## Version 1.0.0b5
 
+- An event's `forwarded` arguments, recorded when call behaviour such
+  as `decorates()` or `transforms_args()` runs, are now captured under
+  the binding's argument capture policy, as `arguments` are. Before,
+  they were kept as passed and written by a sink as they were, so a
+  value `redact()` masked in `arguments` reached a JSON lines file
+  through `forwarded`, and an instrumentation that proxies calls (the
+  sqlite3 instrumentation's query events) wrote its bound parameters.
+  By reference, as on a test's timeline, `forwarded` still holds the
+  values as passed. See
+  [how much is captured](unit-testing.md#how-much-is-captured).
+
 ## Version 1.0.0b4
 
 - `wrapture.Part` is renamed `wrapture.Aspect`, and the resolved form
