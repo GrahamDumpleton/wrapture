@@ -81,7 +81,8 @@ is refused and counted on `refused`, since runs never overlap; a
 kick with no `for` closes the open run and starts the next, so a
 signal toggles: kick to start, kick again to report and start over.
 The signal handler is installed at `start()` (for a config window,
-at apply), which must happen on the main thread, and any handler
+at apply, or at the applied record's `start()` when apply held the
+outputs back), which must happen on the main thread, and any handler
 already there is called after wrapture's and restored when the last
 window listening for that signal stops. `SIGUSR1`/`SIGUSR2` do not
 exist on Windows; `on_file` is the cross-platform equivalent, and

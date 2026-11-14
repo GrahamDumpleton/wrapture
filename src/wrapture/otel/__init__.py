@@ -39,7 +39,8 @@ the application asks for the sink, so a plain install pays nothing.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import inspect
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import wrapture
@@ -92,6 +93,46 @@ def sink(
     alone), for deployments where exception messages may carry
     values a backend should not see. One setting for both signals,
     so it cannot be set on one and forgotten on the other.
+
+    The export pipelines, whose batch processors and periodic readers
+    run threads of their own, are built here. The config's [otel]
+    table validates the same arguments when the file loads and builds
+    the pipelines only when the config's outputs start.
+    """
+
+    build, _ = _prepare(
+        service_name=service_name,
+        signals=signals,
+        traces=traces,
+        metrics=metrics,
+        logs=logs,
+        environment=environment,
+        exceptions=exceptions,
+    )
+
+    return build()
+
+
+def _prepare(
+    *,
+    service_name: str | None = None,
+    signals: Sequence[str] = _SIGNALS,
+    traces: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    logs: dict[str, Any] | None = None,
+    environment: dict[str, Any] | None = None,
+    exceptions: str = "full",
+) -> tuple[Callable[[], wrapture.Sink], str]:
+    """Check the arguments sink() takes and return a function that
+    builds the export sink, with the capture level it declares.
+
+    Everything that can be refused is refused here, where nothing has
+    been built yet: the signals, the sampler and export interval
+    values, and every other option, checked against the constructor
+    it is passed to. The environment defaults are applied here too.
+    The returned function builds the pipelines and the sinks, which
+    is where threads start, so a caller can check a config early and
+    start its exporters later, in the process that will use them.
     """
 
     exceptions = _exception_level(exceptions)
@@ -104,79 +145,134 @@ def sink(
 
     _apply_environment(environment or {})
 
-    sinks: list[wrapture.Sink] = []
+    # Each signal's tuning is checked now: the keys wrapture handles
+    # itself by value, the rest by binding them to the constructor
+    # they are passed to, which refuses an unknown key the same way
+    # the constructor would.
 
-    # The trace export, optionally sampled inside this registration:
-    # Sample decides per tree at the root, so the span sink beneath it
-    # still sees whole, consistently paired trees, while the metrics
-    # sink alongside hears everything. The bare span sink is kept for
-    # the logs sink below, whose records correlate to open spans
-    # through its table.
+    trace_options = dict(traces or {})
+    sample = trace_options.pop("sample", None)
+    sampler_name = trace_options.pop("sampler", None)
+    sampler_arg = trace_options.pop("sampler_arg", None)
 
-    spans: OpenTelemetrySink | None = None
+    if sampler_name is not None and not isinstance(sampler_name, str):
+        raise ValueError(f"sampler must be a sampler name, got {sampler_name!r}")
+    if sampler_arg is not None and (
+        not isinstance(sampler_arg, (int, float)) or isinstance(sampler_arg, bool)
+    ):
+        raise ValueError(f"sampler_arg must be a number, got {sampler_arg!r}")
+
+    metric_options = dict(metrics or {})
+    export_interval = metric_options.pop("export_interval", None)
+
+    if export_interval is not None and (
+        not isinstance(export_interval, (int, float))
+        or isinstance(export_interval, bool)
+        or export_interval <= 0
+    ):
+        raise ValueError(
+            f"export_interval must be a positive number of seconds,"
+            f" got {export_interval!r}"
+        )
+
+    log_options = dict(logs or {})
+
     if "traces" in signals:
-        options = dict(traces or {})
-        sample = options.pop("sample", None)
-        sampler_name = options.pop("sampler", None)
-        sampler_arg = options.pop("sampler_arg", None)
-
-        if sampler_name is not None and not isinstance(sampler_name, str):
-            raise ValueError(f"sampler must be a sampler name, got {sampler_name!r}")
-        if sampler_arg is not None and (
-            not isinstance(sampler_arg, (int, float)) or isinstance(sampler_arg, bool)
-        ):
-            raise ValueError(f"sampler_arg must be a number, got {sampler_arg!r}")
-
-        processor, resource, sampler = providers._trace_pipeline(
-            service_name, sampler_name, sampler_arg
+        _check_options(
+            OpenTelemetrySink,
+            "traces",
+            trace_options,
+            ("processor", "resource", "sampler", "exceptions"),
         )
-
-        spans = OpenTelemetrySink(
-            processor=processor,
-            resource=resource,
-            sampler=sampler,
-            exceptions=exceptions,
-            **options,
-        )
-        span_sink: wrapture.Sink = spans
         if sample is not None:
-            span_sink = wrapture.Sample(sample, span_sink)
-        sinks.append(span_sink)
-
+            wrapture.Sample(sample, wrapture.Sink())
     if "metrics" in signals:
-        options = dict(metrics or {})
-        export_interval = options.pop("export_interval", None)
-
-        if export_interval is not None and (
-            not isinstance(export_interval, (int, float))
-            or isinstance(export_interval, bool)
-            or export_interval <= 0
-        ):
-            raise ValueError(
-                f"export_interval must be a positive number of seconds,"
-                f" got {export_interval!r}"
-            )
-
-        provider = providers._meter_provider(service_name, export_interval)
-        sinks.append(OpenTelemetryMetricsSink(provider=provider, **options))
-
+        _check_options(
+            OpenTelemetryMetricsSink, "metrics", metric_options, ("provider",)
+        )
     if "logs" in signals:
-        options = dict(logs or {})
-
-        provider = providers._logger_provider(service_name)
-        sinks.append(
-            OpenTelemetryLogsSink(
-                provider=provider, spans=spans, exceptions=exceptions, **options
-            )
+        _check_options(
+            OpenTelemetryLogsSink,
+            "logs",
+            log_options,
+            ("provider", "spans", "exceptions"),
         )
 
-    # A lone signal is returned bare; several fan out. Either way the
-    # capture declarations negotiate through: metrics and logs alone
-    # stay at "none", traces raise the fan-out to "summary".
+    def build() -> wrapture.Sink:
+        sinks: list[wrapture.Sink] = []
 
-    if len(sinks) == 1:
-        return sinks[0]
-    return wrapture.Fanout(*sinks)
+        # The trace export, optionally sampled inside this
+        # registration: Sample decides per tree at the root, so the
+        # span sink beneath it still sees whole, consistently paired
+        # trees, while the metrics sink alongside hears everything.
+        # The bare span sink is kept for the logs sink below, whose
+        # records correlate to open spans through its table.
+
+        spans: OpenTelemetrySink | None = None
+        if "traces" in signals:
+            processor, resource, sampler = providers._trace_pipeline(
+                service_name, sampler_name, sampler_arg
+            )
+
+            spans = OpenTelemetrySink(
+                processor=processor,
+                resource=resource,
+                sampler=sampler,
+                exceptions=exceptions,
+                **trace_options,
+            )
+            span_sink: wrapture.Sink = spans
+            if sample is not None:
+                span_sink = wrapture.Sample(sample, span_sink)
+            sinks.append(span_sink)
+
+        if "metrics" in signals:
+            provider = providers._meter_provider(service_name, export_interval)
+            sinks.append(OpenTelemetryMetricsSink(provider=provider, **metric_options))
+
+        if "logs" in signals:
+            log_provider = providers._logger_provider(service_name)
+            sinks.append(
+                OpenTelemetryLogsSink(
+                    provider=log_provider,
+                    spans=spans,
+                    exceptions=exceptions,
+                    **log_options,
+                )
+            )
+
+        # A lone signal is returned bare; several fan out. Either way
+        # the capture declarations negotiate through: metrics and logs
+        # alone stay at "none", traces raise the fan-out to "summary".
+
+        if len(sinks) == 1:
+            return sinks[0]
+        return wrapture.Fanout(*sinks)
+
+    capture = OpenTelemetrySink.capture_args if "traces" in signals else "none"
+
+    return build, str(capture)
+
+
+def _check_options(
+    kind: type[wrapture.Sink],
+    signal: str,
+    options: dict[str, Any],
+    reserved: tuple[str, ...],
+) -> None:
+    # Bind the options to the constructor without calling it, so an
+    # unknown key is refused before anything is built. The keys the
+    # factory passes itself are refused too, as the constructor would
+    # refuse a second value for them.
+
+    taken = sorted(set(options) & set(reserved))
+    if taken:
+        raise ValueError(f"{signal}: {taken} are set by the factory, not the table")
+
+    try:
+        inspect.signature(kind).bind_partial(**options)
+    except TypeError as exc:
+        raise ValueError(f"{signal}: {exc}") from None
 
 
 __all__ = [

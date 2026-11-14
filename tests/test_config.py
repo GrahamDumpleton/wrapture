@@ -294,6 +294,119 @@ def test_a_failed_apply_leaves_nothing_behind() -> None:
 
 
 # ---------------------------------------------------------------------------
+# starting the outputs after the patches
+# ---------------------------------------------------------------------------
+
+
+def test_apply_without_start_patches_and_records_nothing_until_started() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target=f"{__name__}:OrderService", name="place")],
+        sink=collector,
+    )
+
+    applied = config.apply(start=False)
+    try:
+        # The binding is in place, but no sink listens yet.
+
+        assert applied.started is False
+        assert [bound.path for bound in applied.bindings] == [
+            f"{__name__}:OrderService.place"
+        ]
+
+        OrderService().place()
+        assert collector.entered == []
+
+        applied.start()
+        assert applied.started is True
+
+        OrderService().place()
+    finally:
+        _unwind(applied)
+
+    assert len(collector.entered) == 1
+
+
+def test_start_is_idempotent_and_refused_after_revert() -> None:
+    collector = Collector()
+    config = Config(
+        observe=[ObserveEntry(target=f"{__name__}:OrderService", name="place")],
+        sink=collector,
+    )
+
+    applied = config.apply(start=False)
+    try:
+        applied.start()
+        applied.start()
+
+        # Registered once: one event per call.
+
+        OrderService().place()
+        assert len(collector.entered) == 1
+    finally:
+        _unwind(applied)
+
+    with pytest.raises(ConfigError, match="reverted config cannot be started"):
+        applied.start()
+
+
+def test_a_held_back_file_sink_opens_nothing_before_start(tmp_path: Path) -> None:
+    # The point of holding the outputs back: in a parent that forks
+    # after applying, a traced call made before start() reaches no
+    # sink, so no writer thread starts and no file opens there.
+
+    sink = JSONLines(tmp_path / "trace.jsonl")
+    config = Config(
+        observe=[ObserveEntry(target=f"{__name__}:OrderService", name="place")],
+        sink=sink,
+    )
+
+    applied = config.apply(start=False)
+    try:
+        OrderService().place()
+        assert sink.path is None
+
+        applied.start()
+        OrderService().place()
+    finally:
+        _unwind(applied)
+        sink.close()
+
+    assert sink.path is not None
+    assert len((tmp_path / "trace.jsonl").read_text().splitlines()) == 1
+
+
+def test_windows_start_with_the_outputs() -> None:
+    from wrapture import Window
+
+    window = Window(name="held", duration="1h", collect=[Collector()])
+    applied = Config(windows=[window]).apply(start=False)
+    try:
+        assert window.runs == 0
+
+        applied.start()
+        assert window.runs == 1
+    finally:
+        _unwind(applied)
+
+    assert not window.open()
+
+
+def test_the_report_says_when_the_outputs_have_not_started() -> None:
+    applied = Config(sink=Collector()).apply(start=False)
+    try:
+        assert "outputs: not started" in applied.report()
+        assert "not started" in repr(applied)
+
+        applied.start()
+
+        assert "not started" not in applied.report()
+        assert "not started" not in repr(applied)
+    finally:
+        _unwind(applied)
+
+
+# ---------------------------------------------------------------------------
 # deferral
 # ---------------------------------------------------------------------------
 

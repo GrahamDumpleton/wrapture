@@ -18,6 +18,7 @@ import pytest
 
 import wrapture
 from wrapture import load_config
+from wrapture.config import _build_pending, _Pending
 
 # On a plain install, without the wrapture[otel] extra, everything
 # here would fail on the missing packages; the plain-install face of
@@ -106,6 +107,21 @@ def exported_logs(_pipelines: dict[str, Any]) -> Any:
     return _pipelines["logs"]
 
 
+def started(config: wrapture.Config) -> Any:
+    # The [otel] table's export sink is built when the config's
+    # outputs start; build it, as start() would, and return it.
+
+    sink = config.sink
+    assert sink is not None
+    _build_pending(sink)
+
+    if isinstance(sink, wrapture.Fanout):
+        sink = sink._sinks[0]
+
+    assert isinstance(sink, _Pending)
+    return sink.sink
+
+
 # ---------------------------------------------------------------------------
 # the [otel] table
 # ---------------------------------------------------------------------------
@@ -125,9 +141,10 @@ def test_an_otel_table_builds_the_export_sink(tmp_path: Path) -> None:
     )
 
     config = load_config(source)
+    export = started(config)
 
-    assert isinstance(config.sink, wrapture.Fanout)
-    spans, metrics = config.sink._sinks
+    assert isinstance(export, wrapture.Fanout)
+    spans, metrics = export._sinks
     assert isinstance(spans, OpenTelemetrySink)
     assert isinstance(metrics, OpenTelemetryMetricsSink)
 
@@ -140,7 +157,7 @@ def test_a_lone_signal_builds_a_bare_sink(tmp_path: Path) -> None:
 
     config = load_config(source)
 
-    assert isinstance(config.sink, OpenTelemetrySink)
+    assert isinstance(started(config), OpenTelemetrySink)
 
 
 def test_the_otel_sink_registers_ahead_of_the_sink_list(tmp_path: Path) -> None:
@@ -155,10 +172,12 @@ def test_the_otel_sink_registers_ahead_of_the_sink_list(tmp_path: Path) -> None:
     source.write_text('[[sink]]\ntype = "printer"\n\n[otel]\nsignals = ["traces"]\n')
 
     config = load_config(source)
+    started(config)
 
     assert isinstance(config.sink, wrapture.Fanout)
     first, second = config.sink._sinks
-    assert isinstance(first, OpenTelemetrySink)
+    assert isinstance(first, _Pending)
+    assert isinstance(first.sink, OpenTelemetrySink)
     assert isinstance(second, wrapture.Printer)
 
 
@@ -176,11 +195,13 @@ def test_the_otel_sink_prepends_to_a_fanned_out_sink_list(tmp_path: Path) -> Non
     )
 
     config = load_config(source)
+    started(config)
 
     assert isinstance(config.sink, wrapture.Fanout)
     sinks = config.sink._sinks
     assert len(sinks) == 3
-    assert isinstance(sinks[0], OpenTelemetrySink)
+    assert isinstance(sinks[0], _Pending)
+    assert isinstance(sinks[0].sink, OpenTelemetrySink)
     assert all(isinstance(each, wrapture.Printer) for each in sinks[1:])
 
 
@@ -222,8 +243,73 @@ def test_a_bad_otel_table_fails_the_load(tmp_path: Path) -> None:
     bad_signal = tmp_path / "signal.toml"
     bad_signal.write_text('[otel]\nsignals = ["profiles"]\n')
 
-    with pytest.raises(wrapture.ConfigError, match="building the export sink"):
+    with pytest.raises(wrapture.ConfigError, match="signals must name"):
         load_config(bad_signal)
+
+    # The tuning is checked against the constructors at load too,
+    # though nothing is built until the outputs start.
+
+    bad_option = tmp_path / "option.toml"
+    bad_option.write_text('[otel]\n[otel.traces]\nkind = ["call"]\n')
+
+    with pytest.raises(wrapture.ConfigError, match="traces: .*kind"):
+        load_config(bad_option)
+
+    taken = tmp_path / "taken.toml"
+    taken.write_text('[otel]\n[otel.metrics]\nprovider = "mine"\n')
+
+    with pytest.raises(wrapture.ConfigError, match="set by the factory"):
+        load_config(taken)
+
+    bad_rate = tmp_path / "rate.toml"
+    bad_rate.write_text("[otel]\n[otel.traces]\nsample = 2.0\n")
+
+    with pytest.raises(wrapture.ConfigError, match="rate must be between"):
+        load_config(bad_rate)
+
+
+def test_the_export_pipelines_are_built_when_the_outputs_start(
+    tmp_path: Path, exported: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pipelines run threads of their own, so a config applied
+    # with its outputs held back builds none: a parent that forks
+    # after applying holds no exporter, and each child builds its own
+    # when it starts the outputs.
+
+    from wrapture.otel import OpenTelemetrySink, providers
+
+    built: list[str | None] = []
+    pipeline = providers._trace_pipeline
+
+    def counting(service_name: str | None, *args: Any) -> Any:
+        built.append(service_name)
+        return pipeline(service_name, *args)
+
+    monkeypatch.setattr(providers, "_trace_pipeline", counting)
+
+    source = tmp_path / "wrapture.toml"
+    source.write_text('[otel]\nservice_name = "shop"\nsignals = ["traces"]\n')
+
+    config = load_config(source)
+    applied = config.apply(start=False)
+    try:
+        assert built == []
+        assert isinstance(config.sink, _Pending)
+        assert config.sink.sink is None
+        assert "not started" in repr(config.sink)
+
+        applied.start()
+
+        assert built == ["shop"]
+        assert isinstance(config.sink.sink, OpenTelemetrySink)
+
+        with wrapture.block("work"):
+            pass
+    finally:
+        applied.revert()
+
+    (span,) = exported.get_finished_spans()
+    assert span.name == "work"
 
 
 # ---------------------------------------------------------------------------
@@ -750,12 +836,12 @@ def test_span_times_come_from_the_sinks_pinned_clock(
     source.write_text('[otel]\nsignals = ["traces"]\n')
 
     config = load_config(source)
-    sink: Any = config.sink
+    applied = config.apply()
+    sink: Any = started(config)
 
     hour = 3_600_000_000_000_000
     sink._epoch_offset_ns += hour
 
-    applied = config.apply()
     try:
         _chore()
     finally:
@@ -784,9 +870,9 @@ def test_on_fork_drops_the_open_span_table(tmp_path: Path, exported: Any) -> Non
     source.write_text('[otel]\nsignals = ["traces"]\n')
 
     config = load_config(source)
-    sink: Any = config.sink
-
     applied = config.apply()
+    sink: Any = started(config)
+
     try:
         with wrapture.block("outer"):
             assert sink.open_spans == 1
@@ -816,9 +902,9 @@ def test_a_configured_otel_sink_hears_events(tmp_path: Path) -> None:
     source.write_text('[otel]\nsignals = ["traces"]\n')
 
     config = load_config(source)
-    sink: Any = config.sink
-
     applied = config.apply()
+    sink: Any = started(config)
+
     try:
         with wrapture.block("outer"):
             with wrapture.block("inner"):

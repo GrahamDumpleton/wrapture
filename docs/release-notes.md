@@ -2,6 +2,26 @@
 
 ## Version 1.0.0b5
 
+- `Config.apply()` takes `start=False`, which installs the bindings,
+  instrumentations and log captures but holds back the outputs: the
+  sink is not registered, the windows are not started, and the
+  `[otel]` table's export pipelines are not built. `start()` on the
+  returned `AppliedConfig` starts them, and `started` says whether it
+  has. This is for a process that forks its workers after the
+  application is imported: apply in the parent before the import, so
+  the patches are inherited, and start in each worker, so the sinks'
+  threads and files and the exporters' connections belong to the
+  worker and the parent has none at the fork. Nothing traced before
+  `start()` is recorded. See
+  [Manual setup](manual-setup.md#applying-before-a-fork-starting-after-it).
+
+- The `[otel]` table's export pipelines are now built when the
+  config's outputs start, at `apply()` or `start()`, rather than as
+  the file loads, so loading a config no longer starts exporter
+  threads. The table's keys are still checked at load, now including
+  each signal's options against the sink they are passed to, so an
+  unknown option fails the load as before.
+
 - An event's `forwarded` arguments, recorded when call behaviour such
   as `decorates()` or `transforms_args()` runs, are now captured under
   the binding's argument capture policy, as `arguments` are. Before,

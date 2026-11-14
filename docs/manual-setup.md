@@ -50,6 +50,46 @@ entries still waiting for their module, `report()` renders the whole
 picture for a startup log, and `revert()` takes everything down
 again if the host ever needs that.
 
+## Applying before a fork, starting after it
+
+A process that forks its workers after the application is imported,
+gunicorn with `preload_app` or any other preforking server, wants two
+things from setup at two different moments. The patches have to go in
+before the application is imported, which is in the parent. The
+outputs, the sinks and the windows, are better started in each worker:
+a `JSONLines` sink runs a writer thread and holds a file open, the
+`[otel]` table's exporters run batch threads and hold connections,
+and a server that checks the parent is single-threaded before it
+forks sees them.
+
+`apply(start=False)` does the first half and `start()` on the record
+does the second:
+
+```python
+applied = wrapture.load_config(source).apply(start=False)   # in the parent
+
+...
+
+applied.start()                                              # in each worker
+```
+
+Between the two, the bindings are installed but no sink listens, so a
+traced call in the parent costs almost nothing and records nothing.
+That includes whatever the application does as it is imported:
+work done in the parent before the fork is not traced. `start()` then
+builds the `[otel]` table's export pipelines, registers the sink as
+the process sink and starts the windows, all in the worker, which
+records for itself from then on; a `{pid}` path template gives each
+worker its own file. `start()` is idempotent, `started` says whether
+it has run, `report()` notes outputs not yet started, and a reverted
+record refuses to start. Starting a window that has an `on_signal`
+trigger installs its handler, which has to happen on the main thread.
+
+A server that imports the application in each worker instead has
+nothing to separate: apply in the worker with the outputs started, as
+in the four-line pattern above, and the application's import is
+traced too.
+
 ## Choosing the source
 
 `find_config()` implements the standard precedence: a path in the
@@ -187,7 +227,40 @@ across the fork, flushing sinks before it and reinitialising in the
 child, as [Forked worker
 processes](ad-hoc-tracing.md#forked-worker-processes) describes, so
 this also works, with a `{pid}` path template giving each worker its
-own output file.
+own output file. To keep the master free of the sinks' threads and
+files, apply with the outputs held back at the top of the module and
+start them from gunicorn's `post_fork` hook:
+
+```python
+# myapp/wsgi.py
+
+import wrapture
+
+applied = None
+
+source = wrapture.find_config()
+if source is not None:
+    applied = wrapture.load_config(source).apply(start=False)
+
+from myapp.web import application
+```
+
+```python
+# gunicorn.conf.py
+
+preload_app = True
+
+
+def post_fork(server, worker):
+    from myapp import wsgi
+
+    if wsgi.applied is not None:
+        wsgi.applied.start()
+```
+
+With `preload_app` the master has already imported `myapp.wsgi`, so
+the import in `post_fork` hands back the worker's inherited copy of
+the module and its record.
 
 The alternative placement is gunicorn's own config file hooks, which
 suit applying per worker regardless of preload, plus an explicit

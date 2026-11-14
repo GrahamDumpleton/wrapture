@@ -60,6 +60,17 @@ rather than by convention. Using the table on a plain install fails
 the config load with an error naming the fix, installing
 `wrapture[otel]`, rather than a bare `ModuleNotFoundError`.
 
+The table is checked when the file loads, every key against what it
+is passed to, so a mistake fails the load. The export pipelines, whose
+batch processors and periodic readers run threads of their own, are
+built when the config's outputs start: at `apply()`, or at `start()`
+on the applied record when `apply(start=False)` held the outputs back
+for a process that forks its workers (see
+[Manual setup](manual-setup.md#applying-before-a-fork-starting-after-it)).
+Until then the config's sink shows the export as not started. A
+`[[sink]]` entry naming `wrapture.otel:sink` is built as the file
+loads, like any other `[[sink]]` entry.
+
 The two neighbouring tables stay crisp: `[trace]` governs
 identities, `[otel]` governs export. Any other export destination
 remains a `[[sink]]` entry with a `module:attr` factory, which is

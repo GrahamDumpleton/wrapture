@@ -360,10 +360,17 @@ class AppliedConfig:
     still waiting for their module, `instrumentations` is the live
     record of each applied instrumentation, `report()` renders the
     whole picture, and `revert()` takes everything down again.
+
+    The outputs, the sink and the windows, start with the record
+    unless `Config.apply(start=False)` held them back, in which case
+    `start()` starts them, typically in a process forked after the
+    patches went in.
     """
 
     def __init__(self, sink: Sink | None, windows: Sequence[Window] = ()) -> None:
         self._lock = threading.Lock()
+        self._started = False
+        self._sink_added = False
         self._bindings: list[Binding] = []
         self._pending: list[ObserveEntry] = []
         self._captures: list[LogCapture] = []
@@ -385,9 +392,18 @@ class AppliedConfig:
 
     @property
     def sink(self) -> Sink | None:
-        """The process sink the config registered."""
+        """The process sink the config registered, or registers when
+        its outputs start."""
 
         return self._sink
+
+    @property
+    def started(self) -> bool:
+        """Whether the outputs have started: the sink registered and
+        the windows started."""
+
+        with self._lock:
+            return self._started
 
     @property
     def windows(self) -> tuple[Window, ...]:
@@ -439,6 +455,9 @@ class AppliedConfig:
 
         lines = [f"sink: {self._sink!r}" if self._sink is not None else "sink: none"]
 
+        if not self.started:
+            lines.append("outputs: not started")
+
         if self._windows:
             lines.append("windows:")
             for window in self._windows:
@@ -466,6 +485,58 @@ class AppliedConfig:
                 lines.append(f"  {entry.target}")
 
         return "\n".join(lines)
+
+    def start(self) -> None:
+        """Start the outputs `Config.apply(start=False)` held back.
+
+        Builds the [otel] table's export pipelines, registers the sink
+        as a process sink (which on the first registration installs
+        the flush at exit and the fork handlers), and starts each
+        window. Until then the patches are in place but nothing hears
+        them, so nothing traced is recorded and no thread or file is
+        opened for the config. Starting the windows installs any
+        on_signal handler, which has to happen on the main thread.
+
+        Idempotent. Raises ConfigError on a reverted record, and when
+        an export pipeline cannot be built; a failure stops whatever
+        the call had started.
+        """
+
+        with self._lock:
+            if self._reverted:
+                raise ConfigError("a reverted config cannot be started")
+
+            if self._started:
+                return
+
+            self._started = True
+
+        try:
+            if self._sink is not None:
+                _build_pending(self._sink)
+                add_sink(self._sink)
+                self._sink_added = True
+
+            for window in self._windows:
+                window.start()
+        except BaseException:
+            self._stop_outputs()
+
+            with self._lock:
+                self._started = False
+
+            raise
+
+    def _stop_outputs(self) -> None:
+        # Undo what start() did, as far as it got: the windows stop
+        # (a no-op for one never started) and the sink is removed.
+
+        for window in self._windows:
+            window.stop()
+
+        if self._sink_added and self._sink is not None:
+            self._sink_added = False
+            remove_sink(self._sink)
 
     def suspend(self) -> None:
         """Suspend every binding this config applied: the wrappers
@@ -543,11 +614,7 @@ class AppliedConfig:
             _trace._restore(self._trace_previous)
             self._trace_previous = None
 
-        for window in self._windows:
-            window.stop()
-
-        if self._sink is not None:
-            remove_sink(self._sink)
+        self._stop_outputs()
 
     def _adopt(self, entry: ObserveEntry) -> None:
         with self._lock:
@@ -555,9 +622,10 @@ class AppliedConfig:
 
     def __repr__(self) -> str:
         with self._lock:
+            started = "" if self._started else ", not started"
             return (
                 f"<AppliedConfig: {len(self._bindings)} bindings,"
-                f" {len(self._pending)} pending, sink {self._sink!r}>"
+                f" {len(self._pending)} pending, sink {self._sink!r}{started}>"
             )
 
 
@@ -715,12 +783,19 @@ class Config:
 
         return self._inherit
 
-    def apply(self) -> AppliedConfig:
+    def apply(self, *, start: bool = True) -> AppliedConfig:
         """Install everything this config describes, returning the
         live record of what was installed.
 
-        The sink is registered as a process sink first and the windows
-        are started. Observe entries defer: a
+        The outputs start first: the [otel] table's export pipelines
+        are built, the sink is registered as a process sink and the
+        windows are started. With start=False they are held back, for
+        a process that forks after applying: the parent applies before
+        the application is imported, so the patches land, and each
+        child calls start() on the returned record after the fork, so
+        the sinks' threads and files, and the exporters' connections,
+        belong to the child alone. Until then nothing traced is
+        recorded. Observe entries defer: a
         post-import hook is registered per target module, which fires
         immediately when the module is already imported and otherwise
         when the application imports it, so applying never imports a
@@ -739,11 +814,7 @@ class Config:
         leaves nothing behind.
         """
 
-        installed: Sink | None = None
-        if self._sink is not None:
-            installed = add_sink(self._sink)
-
-        record = AppliedConfig(installed, self._windows)
+        record = AppliedConfig(self._sink, self._windows)
         record._disabled = tuple(
             entry for entry in self._instrument if not entry.enabled
         )
@@ -756,8 +827,8 @@ class Config:
 
         record._applying = True
         try:
-            for window in self._windows:
-                window.start()
+            if start:
+                record.start()
 
             for entry in self._observe:
                 record._adopt(entry)
@@ -1435,12 +1506,92 @@ def _build_otel(table: Any) -> Sink | None:
 
     spec = {key: value for key, value in table.items() if key != "enabled"}
 
-    try:
-        built = otel.sink(**spec)
-    except Exception as exc:
-        raise ConfigError(f"otel: building the export sink failed: {exc}") from exc
+    # The arguments are checked now, so a bad table fails the load;
+    # the pipelines, whose processors and readers run threads, are
+    # built when the config's outputs start.
 
-    return built
+    try:
+        build, capture = otel._prepare(**spec)
+    except Exception as exc:
+        raise ConfigError(f"otel: {exc}") from exc
+
+    return _Pending(build, capture, "OpenTelemetry export")
+
+
+class _Pending(Sink):
+    """A sink built when the config's outputs start, standing in for it
+    in the config's composition until then.
+
+    It declares the capture levels the built sink will, so a Fanout
+    around it negotiates the same policy before and after, and passes
+    every notification on once built.
+    """
+
+    def __init__(self, build: Callable[[], Sink], capture: str, name: str) -> None:
+        self._build = build
+        self._name = name
+        self._built: Sink | None = None
+        self._lock = threading.Lock()
+        self.capture_args = capture
+        self.capture_result = capture
+
+    def __repr__(self) -> str:
+        if self._built is None:
+            return f"<{self._name}, not started>"
+        return repr(self._built)
+
+    @property
+    def sink(self) -> Sink | None:
+        """The built sink, or None before the outputs start."""
+
+        return self._built
+
+    def build(self) -> None:
+        """Build the sink, once."""
+
+        with self._lock:
+            if self._built is not None:
+                return
+
+            try:
+                self._built = self._build()
+            except Exception as exc:
+                raise ConfigError(
+                    f"{self._name}: building the sink failed: {exc}"
+                ) from exc
+
+    def on_enter(self, event: Event) -> None:
+        if self._built is not None:
+            self._built.on_enter(event)
+
+    def on_exit(self, event: Event) -> None:
+        if self._built is not None:
+            self._built.on_exit(event)
+
+    def on_error(self, event: Event) -> None:
+        if self._built is not None:
+            self._built.on_error(event)
+
+    def flush(self) -> None:
+        if self._built is not None:
+            self._built.flush()
+
+    def on_fork(self) -> None:
+        if self._built is not None:
+            self._built.on_fork()
+
+
+def _build_pending(sink: Sink) -> None:
+    # Build every placeholder in a composition, through the fan-outs
+    # and the gating combinators the file wraps sinks in.
+
+    if isinstance(sink, _Pending):
+        sink.build()
+    elif isinstance(sink, Fanout):
+        for inner in sink._sinks:
+            _build_pending(inner)
+    elif isinstance(sink, (Filter, Depth, Sample)):
+        _build_pending(sink._sink)
 
 
 def _entry_table(

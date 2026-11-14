@@ -168,6 +168,49 @@ def test_jsonlines_gives_the_child_its_own_file(tmp_path: Path) -> None:
     assert json.loads(child_line)["label"] == "child-side"
 
 
+def test_a_config_applied_before_the_fork_starts_its_outputs_in_the_child(
+    tmp_path: Path,
+) -> None:
+    # The preforking server's shape: the parent applies with the
+    # outputs held back, so the patches are inherited but nothing in
+    # the parent records or opens a file, and the child starts the
+    # outputs after the fork and records for itself.
+
+    config = wrapture.Config(
+        observe=[wrapture.ObserveEntry(target=__name__, name="_traced")],
+        sink=wrapture.JSONLines(tmp_path / "trace-{pid}.jsonl"),
+    )
+
+    applied = config.apply(start=False)
+    try:
+        _traced("parent-side")
+
+        pid = os.fork()
+
+        if pid == 0:
+            try:
+                applied.start()
+                _traced("child-side")
+                wrapture.flush_sinks()
+                ok = True
+            except BaseException:
+                os._exit(1)
+            os._exit(0 if ok else 1)
+
+        _wait_ok(pid)
+    finally:
+        applied.revert()
+
+    assert not (tmp_path / f"trace-{os.getpid()}.jsonl").exists()
+
+    (line,) = (tmp_path / f"trace-{pid}.jsonl").read_text().splitlines()
+    assert json.loads(line)["arguments"] == {"side": "child-side"}
+
+
+def _traced(side: str) -> str:
+    return side
+
+
 def test_the_handlers_install_once(monkeypatch: pytest.MonkeyPatch) -> None:
     # Registration is once per process however many sinks come and
     # go; the hook itself is idempotent through the _fork_hooked flag.

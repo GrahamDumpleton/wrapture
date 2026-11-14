@@ -1483,6 +1483,15 @@ handling restarts the exporter threads. Children created by spawn or
 exec are a different case and need none of this: they start fresh
 and deliberately untraced, as the autowrapt section above describes.
 
+A parent that applies a config only so its forked workers inherit the
+patches can keep the outputs out of itself altogether:
+`apply(start=False)` installs the bindings without registering the
+sink or starting the windows, and each worker calls `start()` on the
+returned record after the fork. Nothing in the parent records, opens
+a file or starts a thread for the config, and the fork handling above
+has nothing to rebuild. [Manual setup](manual-setup.md#applying-before-a-fork-starting-after-it)
+covers the pattern.
+
 ## Trace identity and propagation
 
 wrapture's event linkage, sequence numbers and parent ids, is
