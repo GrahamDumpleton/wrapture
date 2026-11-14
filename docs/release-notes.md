@@ -1,5 +1,7 @@
 # Release notes
 
+## Version 1.0.0b5
+
 ## Version 1.0.0b4
 
 - `wrapture.Part` is renamed `wrapture.Aspect`, and the resolved form
